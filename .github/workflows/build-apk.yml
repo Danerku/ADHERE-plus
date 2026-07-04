@@ -58,6 +58,9 @@ jobs:
       - name: Sync web assets + Capacitor into the native project
         run: cd android-app && npx cap sync android
 
+      - name: Generate app icon + splash screen (all densities)
+        run: cd android-app && npx capacitor-assets generate --android
+
       - name: Normalise gradlew line endings & make executable
         run: |
           cd android-app/android
