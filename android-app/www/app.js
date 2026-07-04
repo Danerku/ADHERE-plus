@@ -58,7 +58,7 @@ function route(){
   if(!ME) return login();
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,labour:labour,partograph:partograph,anc:ancScreen,
-    checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard}[screen]||home)(arg);
+    checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users}[screen]||home)(arg);
 }
 
 function login(){
@@ -78,7 +78,8 @@ function nav(){ return `<div style="margin-bottom:12px">
   ${ME.role==='recorder'||ME.role==='admin'?'<a class="nav" href="#register">Register</a>':''}
   <a class="nav" href="#labour">Labour ward</a>
   <a class="nav" href="#pnc">Postnatal</a>
-  <a class="nav" href="#dashboard">Dashboard</a></div>`; }
+  <a class="nav" href="#dashboard">Dashboard</a>
+  ${ME.role==='admin'?'<a class="nav" href="#users">Users</a>':''}</div>`; }
 
 function home(){
   app().innerHTML=nav()+`<div class="card"><h3>Welcome, ${esc(ME.full_name)}</h3>
@@ -167,6 +168,28 @@ function renderTraj(id){ const h=(BTS[id]&&BTS[id].history)||[]; if(!h.length){ 
 function renderAdh(id,enc){ if(!RE){return;} const r=RE.evaluate(enc);
   $('#gauge').innerHTML=Charts.gauge(r.adherence,{label:'adherence'});
   $('#prompts').innerHTML = r.prompts.length? r.prompts.map(p=>`<div style="padding:3px 0"><span class="pill ${p.sev==='high'?'red':p.sev==='med'?'amber':'green'}">${p.sev}</span> ${p.msg}</div>`).join('') : '<span style="color:#0f6e56">all applicable steps recorded</span>'; }
+
+async function users(){
+  if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  const list=await api('GET','users').catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>Add a user</h3>
+    <div class="grid">
+     <label>Username<input id="nu"></label><label>Full name<input id="nn"></label>
+     <label>Password<input id="np" type="text"></label>
+     <label>Role<select id="nr"><option value="recorder">Recorder</option><option value="provider">Provider</option><option value="observer">Observer</option><option value="admin">Admin</option></select></label>
+     <label>Cadre<input id="nc" placeholder="midwife / health officer / IESO"></label>
+    </div><button class="act" id="add" style="margin-top:10px">Create user</button> <span class="muted" id="m"></span></div>
+    <div class="card"><h3>Users</h3><table><tr><th>Username</th><th>Name</th><th>Role</th><th>Active</th><th>Actions</th></tr>
+     ${list.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${esc(u.role)}</td>
+       <td>${u.is_active==1?'<span style="color:#0f6e56">yes</span>':'<span style="color:#a32d2d">no</span>'}</td>
+       <td><button class="sec" data-act="toggle" data-id="${u.id}" data-a="${u.is_active}">${u.is_active==1?'Deactivate':'Activate'}</button>
+           <button class="sec" data-act="pw" data-id="${u.id}">Reset password</button></td></tr>`).join('')}
+     </table><p class="muted">Deactivating disables login but keeps the audit trail (safer than deleting).</p></div>`;
+  $('#add').onclick=async()=>{ const r=await api('POST','users',{username:nu.value,full_name:nn.value,password:np.value,role:nr.value,cadre:nc.value}); if(r.id){ users(); } else $('#m').textContent=' '+(r.error||'error'); };
+  document.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{ const id=b.dataset.id;
+    if(b.dataset.act==='toggle'){ await api('PATCH','users/'+id,{is_active:b.dataset.a=='1'?0:1}); users(); }
+    else { const pw=prompt('New password for this user:'); if(pw){ await api('PATCH','users/'+id,{password:pw}); alert('Password reset.'); } } });
+}
 
 async function dashboard(){
   let d; try{ d=await api('GET','analytics'); }catch(e){ d={months:[],indicators:{},anomalies:{}}; }

@@ -21,6 +21,23 @@ try {
   if ($r==='me'){ out(['user'=>user()]); }
   require_auth(); // everything below requires a session
 
+  // ---- users (admin only) ----
+  if ($r==='users'){ require_role(['admin']);
+    if($m==='GET'){ $st=db()->query("SELECT id,username,full_name,role,cadre,facility_id,is_active,last_login FROM users ORDER BY id"); out($st->fetchAll()); }
+    if($m==='POST'){ $b=body();
+      if(empty($b['username'])||empty($b['password'])||empty($b['role'])) err('username, password and role are required');
+      if(!in_array($b['role'],['recorder','provider','observer','admin'])) err('invalid role');
+      $me=user(); $ex=db()->prepare("SELECT id FROM users WHERE username=?"); $ex->execute([$b['username']]); if($ex->fetch()) err('username already taken',409);
+      $nid=insert('users',['username'=>$b['username'],'password_hash'=>password_hash($b['password'],PASSWORD_DEFAULT),'full_name'=>$b['full_name']??$b['username'],'role'=>$b['role'],'cadre'=>$b['cadre']??null,'facility_id'=>$b['facility_id']??$me['facility_id']]);
+      audit('create_user','users',$nid); out(['id'=>$nid],201); }
+    if($m==='PATCH' && $id){ $b=body(); $me=user();
+      if(isset($b['is_active'])){ if((int)$id===(int)$me['id'] && !$b['is_active']) err('you cannot deactivate your own account'); db()->prepare("UPDATE users SET is_active=? WHERE id=?")->execute([$b['is_active']?1:0,$id]); }
+      if(isset($b['role']) && in_array($b['role'],['recorder','provider','observer','admin'])){ db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]); }
+      if(!empty($b['password'])){ db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
+      audit('update_user','users',$id); out(['ok'=>true]); }
+  }
+  if ($r==='facilities' && $m==='GET'){ require_role(['admin']); out(db()->query("SELECT id,name FROM facilities ORDER BY id")->fetchAll()); }
+
   // ---- women (registration) ----
   if ($r==='women'){
     if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=?"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }
