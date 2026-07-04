@@ -10,7 +10,7 @@ $id = $parts[1] ?? null;
 try {
   // ---- auth ----
   if ($r==='login' && $m==='POST'){
-    $b=body(); $st=db()->prepare("SELECT * FROM users WHERE username=? AND is_active=1");
+    $b=body(); $st=db()->prepare("SELECT u.*, f.name AS facility_name FROM users u LEFT JOIN facilities f ON f.id=u.facility_id WHERE u.username=? AND u.is_active=1");
     $st->execute([$b['username']??'']); $u=$st->fetch();
     if(!$u || !password_verify($b['password']??'', $u['password_hash'])) err('invalid credentials',401);
     unset($u['password_hash']); session_regenerate_id(true); $_SESSION['user']=$u;
@@ -36,7 +36,14 @@ try {
       if(!empty($b['password'])){ db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
       audit('update_user','users',$id); out(['ok'=>true]); }
   }
-  if ($r==='facilities' && $m==='GET'){ require_role(['admin']); out(db()->query("SELECT id,name FROM facilities ORDER BY id")->fetchAll()); }
+  if ($r==='facilities'){ require_role(['admin']);
+    if($m==='GET'){ out(db()->query("SELECT id,name,facility_type,kebele,woreda,zone,region,dhis2_org_unit FROM facilities ORDER BY id")->fetchAll()); }
+    if($m==='POST'){ $b=body();
+      if(empty($b['name'])) err('facility name is required');
+      $ft=in_array($b['facility_type']??'',['primary_hospital','health_center','general_hospital','other'])?$b['facility_type']:'health_center';
+      $nid=insert('facilities',['name'=>$b['name'],'facility_type'=>$ft,'kebele'=>$b['kebele']??null,'woreda'=>$b['woreda']??null,'zone'=>$b['zone']??null,'region'=>$b['region']??'Amhara','dhis2_org_unit'=>$b['dhis2_org_unit']??null]);
+      audit('create_facility','facilities',$nid); out(['id'=>$nid],201); }
+  }
 
   // ---- women (registration) ----
   if ($r==='women'){

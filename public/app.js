@@ -53,12 +53,12 @@ $('#logout').onclick=async()=>{ try{ await api('GET','logout'); }catch(e){} ME=n
 window.addEventListener('hashchange', route);
 
 function route(){
-  $('#who').textContent = ME?(' — '+ME.full_name+' ['+ME.role+']'+(ME._offline?' · offline':'')):'';
+  $('#who').textContent = ME?(' — '+ME.full_name+' ['+ME.role+']'+(ME.facility_name?' · '+ME.facility_name:'')+(ME._offline?' · offline':'')):'';
   $('#logout').style.display = ME?'inline-block':'none';
   if(!ME) return login();
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,labour:labour,partograph:partograph,anc:ancScreen,
-    checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users}[screen]||home)(arg);
+    checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities}[screen]||home)(arg);
 }
 
 function login(){
@@ -79,6 +79,7 @@ function nav(){ return `<div style="margin-bottom:12px">
   <a class="nav" href="#labour">Labour ward</a>
   <a class="nav" href="#pnc">Postnatal</a>
   <a class="nav" href="#dashboard">Dashboard</a>
+  ${ME.role==='admin'?'<a class="nav" href="#facilities">Facilities</a>':''}
   ${ME.role==='admin'?'<a class="nav" href="#users">Users</a>':''}</div>`; }
 
 function home(){
@@ -169,23 +170,45 @@ function renderAdh(id,enc){ if(!RE){return;} const r=RE.evaluate(enc);
   $('#gauge').innerHTML=Charts.gauge(r.adherence,{label:'adherence'});
   $('#prompts').innerHTML = r.prompts.length? r.prompts.map(p=>`<div style="padding:3px 0"><span class="pill ${p.sev==='high'?'red':p.sev==='med'?'amber':'green'}">${p.sev}</span> ${p.msg}</div>`).join('') : '<span style="color:#0f6e56">all applicable steps recorded</span>'; }
 
+async function facilities(){
+  if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  const list=await api('GET','facilities').catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>Add a facility</h3>
+    <div class="grid">
+     <label>Name<input id="fnm" placeholder="Debre Tabor Health Center"></label>
+     <label>Type<select id="fty"><option value="health_center">Health center</option><option value="primary_hospital">Primary hospital</option><option value="general_hospital">General hospital</option><option value="other">Other</option></select></label>
+     <label>Kebele<input id="fke"></label><label>Woreda<input id="fwo"></label>
+     <label>Zone<input id="fzo"></label><label>Region<input id="fre" value="Amhara"></label>
+     <label>DHIS2 org-unit code<input id="fdh" placeholder="optional"></label>
+    </div><button class="act" id="fadd" style="margin-top:10px">Create facility</button> <span class="muted" id="fm"></span></div>
+    <div class="card"><h3>Facilities</h3><table><tr><th>ID</th><th>Name</th><th>Type</th><th>Woreda</th><th>Zone</th><th>Region</th><th>DHIS2</th></tr>
+     ${list.map(f=>`<tr><td>${f.id}</td><td>${esc(f.name)}</td><td>${esc(f.facility_type||'')}</td>
+       <td>${esc(f.woreda||'')}</td><td>${esc(f.zone||'')}</td><td>${esc(f.region||'')}</td><td>${esc(f.dhis2_org_unit||'')}</td></tr>`).join('')}
+     </table><p class="muted">Each user and every patient belongs to a facility. Data is scoped per facility, and the dashboard/DHIS2 export roll up by facility.</p></div>`;
+  $('#fadd').onclick=async()=>{ const r=await api('POST','facilities',{name:fnm.value,facility_type:fty.value,kebele:fke.value,woreda:fwo.value,zone:fzo.value,region:fre.value,dhis2_org_unit:fdh.value}); if(r.id){ facilities(); } else $('#fm').textContent=' '+(r.error||'error'); };
+}
+
 async function users(){
   if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
-  const list=await api('GET','users').catch(()=>[]);
+  const [list,facs]=await Promise.all([api('GET','users').catch(()=>[]),api('GET','facilities').catch(()=>[])]);
+  const facName=id=>{ const f=facs.find(x=>x.id==id); return f?f.name:(id||'—'); };
   app().innerHTML=nav()+`<div class="card"><h3>Add a user</h3>
     <div class="grid">
      <label>Username<input id="nu"></label><label>Full name<input id="nn"></label>
      <label>Password<input id="np" type="text"></label>
      <label>Role<select id="nr"><option value="recorder">Recorder</option><option value="provider">Provider</option><option value="observer">Observer</option><option value="admin">Admin</option></select></label>
+     <label>Facility<select id="nf">${facs.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select></label>
      <label>Cadre<input id="nc" placeholder="midwife / health officer / IESO"></label>
-    </div><button class="act" id="add" style="margin-top:10px">Create user</button> <span class="muted" id="m"></span></div>
-    <div class="card"><h3>Users</h3><table><tr><th>Username</th><th>Name</th><th>Role</th><th>Active</th><th>Actions</th></tr>
+    </div><button class="act" id="add" style="margin-top:10px">Create user</button> <span class="muted" id="m"></span>
+    ${facs.length?'':'<p class="muted">No facilities yet — add one on the Facilities screen first.</p>'}</div>
+    <div class="card"><h3>Users</h3><table><tr><th>Username</th><th>Name</th><th>Role</th><th>Facility</th><th>Active</th><th>Actions</th></tr>
      ${list.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${esc(u.role)}</td>
+       <td>${esc(String(facName(u.facility_id)))}</td>
        <td>${u.is_active==1?'<span style="color:#0f6e56">yes</span>':'<span style="color:#a32d2d">no</span>'}</td>
        <td><button class="sec" data-act="toggle" data-id="${u.id}" data-a="${u.is_active}">${u.is_active==1?'Deactivate':'Activate'}</button>
            <button class="sec" data-act="pw" data-id="${u.id}">Reset password</button></td></tr>`).join('')}
      </table><p class="muted">Deactivating disables login but keeps the audit trail (safer than deleting).</p></div>`;
-  $('#add').onclick=async()=>{ const r=await api('POST','users',{username:nu.value,full_name:nn.value,password:np.value,role:nr.value,cadre:nc.value}); if(r.id){ users(); } else $('#m').textContent=' '+(r.error||'error'); };
+  $('#add').onclick=async()=>{ const r=await api('POST','users',{username:nu.value,full_name:nn.value,password:np.value,role:nr.value,cadre:nc.value,facility_id:document.getElementById('nf')?nf.value:null}); if(r.id){ users(); } else $('#m').textContent=' '+(r.error||'error'); };
   document.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{ const id=b.dataset.id;
     if(b.dataset.act==='toggle'){ await api('PATCH','users/'+id,{is_active:b.dataset.a=='1'?0:1}); users(); }
     else { const pw=prompt('New password for this user:'); if(pw){ await api('PATCH','users/'+id,{password:pw}); alert('Password reset.'); } } });
