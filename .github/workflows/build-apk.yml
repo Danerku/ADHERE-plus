@@ -1,0 +1,80 @@
+name: Build Android APK
+
+# Builds an installable debug APK for the ADHERE+ MCH tablet app.
+# Runs automatically when web or app code changes, and can be run manually
+# from the Actions tab (Run workflow). Download the APK from the run's
+# "Artifacts" section when it finishes.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+    paths:
+      - 'public/**'
+      - 'android-app/**'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Rebuild the app's web assets fresh from public/ so the APK always
+      # matches the website, then point it at the live server.
+      - name: Assemble web assets into www/
+        run: |
+          cd android-app
+          rm -rf www
+          mkdir -p www/model
+          cp ../public/index.html          www/
+          cp ../public/app.js              www/
+          cp ../public/styles.css          www/
+          cp ../public/manifest.webmanifest www/
+          cp ../public/service-worker.js   www/ 2>/dev/null || true
+          cp ../public/model/*.js          www/model/
+          cp ../public/model/*.json        www/model/
+          printf 'window.ADHERE_API_BASE = "https://159-89-12-45.sslip.io/";\n' > www/config.js
+          echo "www contents:"; ls -R www
+
+      - name: Install Capacitor CLI
+        run: cd android-app && npm install
+
+      - name: Sync web assets + Capacitor into the native project
+        run: cd android-app && npx cap sync android
+
+      - name: Normalise gradlew line endings & make executable
+        run: |
+          cd android-app/android
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
+
+      - name: Build debug APK
+        run: cd android-app/android && ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          cd android-app/android/app/build/outputs/apk/debug
+          cp app-debug.apk ADHERE-MCH.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ADHERE-MCH-apk
+          path: android-app/android/app/build/outputs/apk/debug/ADHERE-MCH.apk
+          if-no-files-found: error
