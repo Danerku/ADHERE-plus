@@ -1,0 +1,31 @@
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: adhere
+      MYSQL_USER: adhere
+      MYSQL_PASSWORD: adhere
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD","mysqladmin","ping","-h","localhost","-prootpw"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["3307:3306"]
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      DB_HOST: db
+      DB_NAME: adhere
+      DB_USER: adhere
+      DB_PASS: adhere
+    depends_on:
+      db: { condition: service_healthy }
+    ports: ["8080:80"]
+volumes:
+  dbdata:

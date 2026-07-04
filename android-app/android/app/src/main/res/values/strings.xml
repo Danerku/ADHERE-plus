@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ADHERE+ MCH</string>
+    <string name="title_activity_main">ADHERE+ MCH</string>
+    <string name="package_name">et.epichealthsystems.adhere</string>
+    <string name="custom_url_scheme">et.epichealthsystems.adhere</string>
+</resources>

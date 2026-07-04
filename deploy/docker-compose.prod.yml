@@ -1,0 +1,39 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:?set in .env}
+      MYSQL_DATABASE: ${DB_NAME:-adhere}
+      MYSQL_USER: ${DB_USER:-adhere}
+      MYSQL_PASSWORD: ${DB_PASS:?set in .env}
+    volumes:
+      - ../docker/init:/docker-entrypoint-initdb.d:ro
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD","mysqladmin","ping","-h","localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  web:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    restart: always
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-adhere}
+      DB_USER: ${DB_USER:-adhere}
+      DB_PASS: ${DB_PASS:?set in .env}
+      SITE_DOMAIN: ${SITE_DOMAIN}
+    depends_on:
+      db: { condition: service_healthy }
+  caddy:
+    image: caddy:2
+    restart: always
+    ports: ["80:80","443:443"]
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?e.g. partograph.epichealthsystems.org}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    depends_on: [web]
+volumes: { dbdata: {}, caddydata: {} }

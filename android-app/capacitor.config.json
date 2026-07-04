@@ -1,0 +1,6 @@
+{
+  "appId": "et.epichealthsystems.adhere",
+  "appName": "ADHERE+ MCH",
+  "webDir": "www",
+  "server": { "androidScheme": "https" }
+}
