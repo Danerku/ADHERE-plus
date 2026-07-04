@@ -45,6 +45,15 @@ try {
       audit('create_facility','facilities',$nid); out(['id'=>$nid],201); }
   }
 
+  // ---- self-service password change (any logged-in user) ----
+  if ($r==='password' && $m==='POST'){ $u=user(); $b=body();
+    if(empty($b['current'])||empty($b['new'])) err('current and new password required');
+    if(strlen($b['new'])<6) err('new password must be at least 6 characters');
+    $st=db()->prepare("SELECT password_hash FROM users WHERE id=?"); $st->execute([$u['id']]); $row=$st->fetch();
+    if(!$row || !password_verify($b['current'],$row['password_hash'])) err('current password is incorrect',403);
+    db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['new'],PASSWORD_DEFAULT),$u['id']]);
+    audit('change_own_password','users',$u['id']); out(['ok'=>true]); }
+
   // ---- women (registration) ----
   if ($r==='women'){
     if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=?"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }

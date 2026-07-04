@@ -57,7 +57,7 @@ function route(){
   $('#logout').style.display = ME?'inline-block':'none';
   if(!ME) return login();
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
-  ({home:home,register:register,labour:labour,partograph:partograph,anc:ancScreen,
+  ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities}[screen]||home)(arg);
 }
 
@@ -78,16 +78,25 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   const L=(href,txt)=>`<a class="nav${on(href)}" href="${href}">${txt}</a>`;
   return `<nav class="navbar">
   ${ME.role==='recorder'||ME.role==='admin'?L('#register','Register'):''}
+  ${L('#antenatal','Antenatal')}
   ${L('#labour','Labour ward')}
+  ${L('#highrisk','High risk')}
   ${L('#pnc','Postnatal')}
   ${L('#dashboard','Dashboard')}
   ${ME.role==='admin'?L('#facilities','Facilities'):''}
   ${ME.role==='admin'?L('#users','Users'):''}</nav>`; }
 
 function home(){
+  const ec=(window.Ethiopian?Ethiopian.fmt(new Date()):'');
   app().innerHTML=nav()+`<div class="card"><h3>Welcome, ${esc(ME.full_name)}</h3>
-   <p class="muted">Role: ${ME.role}. Use the links above. Recorders register women and hand over to providers;
-   providers run the partograph, checklist, danger-sign, delivery and PNC; observers can view.</p></div>`;
+   <p class="muted">Role: ${ME.role}${ME.facility_name?' · '+esc(ME.facility_name):''}. ${ec?'Today: <b>'+ec+'</b> ('+new Date().toLocaleDateString()+').':''}</p>
+   <p class="muted">Care pathway: Antenatal → Labour ward → High risk → Postnatal. Recorders register women; providers run the partograph, checklist, danger-sign, delivery and PNC; observers can view.</p></div>
+   <div class="card"><h3>Change my password</h3>
+    <div class="grid">
+     <label>Current password<input id="cpw" type="password"></label>
+     <label>New password<input id="npw" type="password"></label>
+    </div><button class="act" id="chpw" style="margin-top:10px">Update password</button> <span class="muted" id="pwm"></span></div>`;
+  $('#chpw').onclick=async()=>{ const r=await api('POST','password',{current:cpw.value,new:npw.value}); if(r&&r.ok){ $('#pwm').textContent=' updated'; cpw.value='';npw.value=''; } else $('#pwm').textContent=' '+((r&&r.error)||'error'); };
 }
 
 async function register(){
@@ -119,7 +128,7 @@ async function labour(){
 const OB={}; // per-episode in-memory observations for the chart
 async function partograph(id){
   const obs=await api('GET','observations?episode='+id).catch(()=>[]);
-  OB[id]=obs.map(o=>({hrs:+o.hours_since_active,cvx:+o.cervix_cm,fhr:+o.fetal_heart_rate,ctx:+o.contractions_per10,mld:+o.moulding,sbp:+o.bp_systolic,tmp:+o.temperature}));
+  OB[id]=obs.map(o=>({hrs:+o.hours_since_active,cvx:+o.cervix_cm,fhr:+o.fetal_heart_rate,ctx:+o.contractions_per10,mld:+o.moulding,sbp:+o.bp_systolic,tmp:+o.temperature,dsc:(o.descent_head==null?null:+o.descent_head),amn:o.amniotic_fluid}));
   if(!BTS[id]) BTS[id]=new BayesTracker(0.15);
   app().innerHTML=nav()+`<div class="card"><h3>Partograph — episode ${esc(id)} <span id="band" class="pill"></span></h3>
     <div class="grid">
@@ -128,10 +137,15 @@ async function partograph(id){
      <label>Fetal HR<input id="fhr" type="number" value="140"></label>
      <label>Contractions/10<input id="ctx" type="number" value="3"></label>
      <label>Moulding<input id="mld" type="number" value="0"></label>
+     <label>Descent — fifths palpable<input id="dsc" type="number" min="0" max="5" placeholder="5→0 (optional)"></label>
+     <label>Amniotic fluid<select id="amn"><option value="">Not assessed</option><option value="I">Intact</option><option value="C">Clear</option><option value="M">Meconium</option><option value="B">Blood</option><option value="A">Absent</option></select></label>
      <label>Systolic BP<input id="sbp" type="number" value="118"></label>
      <label>Temp °C<input id="tmp" type="number" step="0.1" value="37"></label>
     </div><button class="act" id="rec" style="margin-top:10px">Record &amp; score</button>
     <svg id="pg" viewBox="0 0 640 300" width="100%" style="margin-top:10px"></svg>
+    <div class="muted" style="font-size:12px">Cervicograph — X = cervical dilatation, O = descent (fifths palpable), with alert &amp; action lines.</div>
+    <svg id="pgv" viewBox="0 0 640 220" width="100%" style="margin-top:8px"></svg>
+    <div class="muted" style="font-size:12px">Fetal heart rate (normal band 110–160 bpm) and contractions per 10 min.</div>
     <div id="ai" style="display:none;border-top:0.5px solid #eee;padding-top:8px;margin-top:8px">
      <b class="muted">Module 1 — intrapartum AI</b> risk estimate <b id="prob" style="font-size:20px"></b> <span class="muted" id="drv"></span><div class="muted" style="font-size:11px;margin-top:2px">Decision support — a risk estimate, not a diagnosis or proof of complication.</div>
      <div style="margin-top:6px"><button class="sec" id="ack">Acknowledge</button><button class="sec" id="ovr">Override</button> <span class="muted" id="hitl"></span></div>
@@ -139,17 +153,17 @@ async function partograph(id){
     <div class="card"><b class="muted">Module 3 — Bayesian longitudinal risk</b><div id="traj"></div></div>
     <div class="card"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div id="gauge"></div>
       <div style="flex:1"><b class="muted">Module 2 — guideline adherence</b><div id="prompts" class="muted">record an observation to evaluate</div></div></div></div>`;
-  drawPG(id); renderTraj(id);
+  drawPG(id); drawVitals(id); renderTraj(id);
   $('#rec').onclick=async()=>{
-    const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,tmp:+tmp.value};
-    OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id);
+    const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,tmp:+tmp.value,dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null)};
+    OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id);
     const feat=Object.assign({},FEAT_DEFAULTS,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:o.mld,sbp:o.sbp,dbp:Math.round(o.sbp*0.65),temp:o.tmp});
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
     const cf=clinicalFlags(o); const finalBand=escalate(r.band,cf.band);   // safety guardrail
     $('#ai').style.display='block'; $('#prob').textContent=Math.round(r.probability*100)+'%'; $('#prob').className=finalBand;
     const bd=$('#band'); bd.textContent=finalBand.toUpperCase()+(finalBand!==r.band?' (clinical override)':''); bd.className='pill '+finalBand;
     $('#drv').textContent=(cf.reasons.length?('red-flags: '+cf.reasons.join(', ')):'AI band '+r.band);
-    await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][Math.max(0,Math.min(3,o.mld))],bp_systolic:o.sbp,temperature:o.tmp});
+    await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][Math.max(0,Math.min(3,o.mld))],descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,temperature:o.tmp});
     const sc=await api('POST','risk_scores',{episode_id:+id,model_version:MODEL&&MODEL.version,probability:r.probability.toFixed(4),band:finalBand,features_json:Object.assign({ml_band:r.band,clinical:cf.reasons},feat)});
     lastScoreId[id]=sc&&sc.id; lastAI[id]={p:r.probability,band:finalBand};
     // Module 3 — Bayesian update from findings
@@ -241,7 +255,27 @@ function drawPG(id){
   const o=OB[id]||[]; const pts=o.map(p=>`${x(p.hrs)},${y(Math.max(4,Math.min(10,p.cvx)))}`);
   if(pts.length>1)s+=`<polyline points="${pts.join(' ')}" fill="none" stroke="#1a1a18" stroke-width="1.5"/>`;
   o.forEach(p=>s+=`<text x="${x(p.hrs)}" y="${y(Math.max(4,Math.min(10,p.cvx)))+5}" text-anchor="middle" font-size="14" font-weight="600">X</text>`);
+  const yD=v=>mT+((5-Math.max(0,Math.min(5,v)))/5)*(H-mT-mB);
+  const od=o.filter(p=>p.dsc!=null&&!isNaN(p.dsc)); const dpts=od.map(p=>`${x(p.hrs)},${yD(p.dsc)}`);
+  if(dpts.length>1)s+=`<polyline points="${dpts.join(' ')}" fill="none" stroke="#0d9488" stroke-width="1.2" stroke-dasharray="4 3"/>`;
+  od.forEach(p=>s+=`<text x="${x(p.hrs)}" y="${yD(p.dsc)+5}" text-anchor="middle" font-size="13" font-weight="600" fill="#0d9488">O</text>`);
   $('#pg').innerHTML=s;
+}
+function drawVitals(id){
+  const o=OB[id]||[]; const W=640,mL=48,mR=16;
+  const x=h=>mL+(Math.min(h,12)/12)*(W-mL-mR);
+  const fT=16,fB=120,fmin=80,fmax=200; const yF=v=>fT+(1-(Math.max(fmin,Math.min(fmax,v))-fmin)/(fmax-fmin))*(fB-fT);
+  let s=`<rect x="${mL}" y="${yF(160)}" width="${W-mL-mR}" height="${yF(110)-yF(160)}" fill="#e4f7ef"/>`;
+  [80,110,160,200].forEach(v=>{ s+=`<line x1="${mL}" y1="${yF(v)}" x2="${W-mR}" y2="${yF(v)}" stroke="#eee"/><text x="${mL-6}" y="${yF(v)+4}" text-anchor="end" font-size="10" fill="#8a8880">${v}</text>`; });
+  const fp=o.filter(p=>p.fhr).map(p=>`${x(p.hrs)},${yF(p.fhr)}`);
+  if(fp.length>1)s+=`<polyline points="${fp.join(' ')}" fill="none" stroke="#b3261e" stroke-width="1.6"/>`;
+  o.filter(p=>p.fhr).forEach(p=>s+=`<circle cx="${x(p.hrs)}" cy="${yF(p.fhr)}" r="3" fill="#b3261e"/>`);
+  s+=`<text x="${mL}" y="11" font-size="10" fill="#8a8880">FHR (bpm)</text>`;
+  const cT=150,cB=210,cmax=5; const yC=v=>cB-(Math.min(cmax,v)/cmax)*(cB-cT);
+  [0,5].forEach(v=>{ s+=`<line x1="${mL}" y1="${yC(v)}" x2="${W-mR}" y2="${yC(v)}" stroke="#eee"/><text x="${mL-6}" y="${yC(v)+4}" text-anchor="end" font-size="10" fill="#8a8880">${v}</text>`; });
+  o.filter(p=>p.ctx!=null&&!isNaN(p.ctx)).forEach(p=>{ const yy=yC(p.ctx); s+=`<rect x="${x(p.hrs)-6}" y="${yy}" width="12" height="${cB-yy}" rx="2" fill="#0d9488"/>`; });
+  s+=`<text x="${mL}" y="${cT-4}" font-size="10" fill="#8a8880">Contractions /10 min</text>`;
+  $('#pgv').innerHTML=s;
 }
 
 const CHK={admission:['Referral needed?','Partograph started (≥4cm)?','Start antibiotics?','Start magnesium sulfate?','Start antihypertensive?','Supplies for clean hands/gloves?','Birth companion present?','Confirm call-for-help plan?'],
@@ -291,7 +325,71 @@ async function pnc(){
   app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3><table><tr><th>MRN</th><th>Name</th><th>Status</th></tr>
    ${del.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.status)}</td></tr>`).join('')||'<tr><td colspan=3 class=muted>No postnatal women yet.</td></tr>'}</table></div>`;
 }
-async function ancScreen(id){ app().innerHTML=nav()+`<div class="card"><h3>ANC risk screening</h3><p class="muted">19-item WHO/MCPC screen — wired to /api/anc_screening.</p></div>`; }
+const ANC_GROUPS={obstetric_history:'Obstetric history',current_pregnancy:'Current pregnancy',general_medical:'General medical'};
+const ANC_ITEMS=[
+ ['OBS_PREV_STILLBIRTH','obstetric_history','Previous stillbirth or neonatal loss'],
+ ['OBS_3_ABORTIONS','obstetric_history','History of 3 or more consecutive spontaneous abortions'],
+ ['OBS_BW_LT2500','obstetric_history','Birth weight of last baby < 2500 g'],
+ ['OBS_BW_GT4500','obstetric_history','Birth weight of last baby > 4500 g'],
+ ['OBS_PREV_PREECLAMPSIA','obstetric_history','Last pregnancy: admitted for pre-eclampsia or eclampsia'],
+ ['OBS_PREV_SURGERY','obstetric_history','Previous surgery on the reproductive tract'],
+ ['CUR_MULTIPLE','current_pregnancy','Diagnosed or suspected multiple pregnancy'],
+ ['CUR_AGE_LT16','current_pregnancy','Age less than 16 years'],
+ ['CUR_AGE_GT40','current_pregnancy','Age more than 40 years'],
+ ['CUR_RH_ISO','current_pregnancy','Rh (-) isoimmunisation in current or previous pregnancy'],
+ ['CUR_BLEEDING','current_pregnancy','Vaginal bleeding'],
+ ['CUR_PELVIC_MASS','current_pregnancy','Pelvic mass'],
+ ['CUR_DBP_GE90','current_pregnancy','Diastolic blood pressure 90 mmHg or more at booking'],
+ ['MED_DIABETES','general_medical','Diabetes mellitus'],
+ ['MED_RENAL','general_medical','Renal disease'],
+ ['MED_CARDIAC','general_medical','Cardiac disease'],
+ ['MED_CHRONIC_HTN','general_medical','Chronic hypertension'],
+ ['MED_OTHER_SEVERE','general_medical','Any other severe medical condition (TB, HIV, cancer, DVT...)']
+];
+async function ancScreen(id){
+  const existing=await api('GET','anc_screening?episode='+id).catch(()=>[]);
+  const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
+  let html=nav()+`<div class="card"><h3>ANC risk screening — episode ${esc(id)} <span id="ancband" class="pill"></span></h3>
+    <p class="muted">WHO/MCPC classifying form. Any "Yes" means the woman needs specialised (hospital) care rather than basic ANC.</p>`;
+  Object.keys(ANC_GROUPS).forEach(gk=>{ html+=`<h4>${ANC_GROUPS[gk]}</h4>`;
+    ANC_ITEMS.filter(it=>it[1]===gk).forEach(it=>{ const v=prev[it[0]]||'no';
+      html+=`<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px">${esc(it[2])}
+        <select data-code="${it[0]}" data-group="${it[1]}" style="width:132px"><option value="no"${v==='no'?' selected':''}>No</option><option value="yes"${v==='yes'?' selected':''}>Yes</option><option value="unknown"${v==='unknown'?' selected':''}>Unknown</option></select></label></div>`; }); });
+  html+=`<button class="act" id="ancsave" style="margin-top:12px">Save screening</button> <span class="muted" id="ancm"></span></div>`;
+  app().innerHTML=html;
+  const sels=()=>[...document.querySelectorAll('#app select[data-code]')];
+  const evalBand=()=>{ const yes=sels().some(s=>s.value==='yes'); const b=$('#ancband'); b.textContent=yes?'Specialised care needed':'Basic ANC'; b.className='pill '+(yes?'red':'green'); };
+  sels().forEach(s=>s.onchange=evalBand); evalBand();
+  $('#ancsave').onclick=async()=>{ const rows=sels().map(s=>({episode_id:+id,item_code:s.dataset.code,item_group:s.dataset.group,response:s.value}));
+    const r=await api('POST','anc_screening',rows); $('#ancm').textContent=(r&&r.ids)?' saved ('+rows.length+' items)':' '+((r&&r.error)||'saved offline'); };
+}
+
+async function ancList(){
+  const rows=await api('GET','episodes?category=anc').catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>Antenatal care</h3>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}</td>
+    <td><a class="nav" href="#anc/${r.id}">Screening</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button> <button class="sec" data-w="${r.woman_id}" data-to="highrisk">&rarr; High risk</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
+   </table><p class="muted">"&rarr; Labour / High risk" admits the woman into that stream (recorded as an admission from ANC).</p></div>`;
+  document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_anc'));
+}
+
+async function highriskList(){
+  const rows=await api('GET','episodes?category=highrisk').catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>High-risk &amp; latent care</h3>
+   <p class="muted">Women admitted to close monitoring (high-risk pregnancy or latent-phase labour). The AI risk score on the partograph helps prioritise who to see first.</p>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>From</th><th>Status</th><th>Actions</th></tr>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.admitted_from||'new')}</td><td>${esc(r.status)}</td>
+    <td><a class="nav" href="#partograph/${r.id}">Monitor</a><a class="nav" href="#danger/${r.id}">Danger</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No high-risk women. Admit from Antenatal, or Register with service = High risk.</td></tr>'}
+   </table></div>`;
+  document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_highrisk'));
+}
+
+async function transfer(womanId,cat,from){
+  const r=await api('POST','episodes',{woman_id:womanId,service_category:cat,status:cat==='labour'?'laboring':'active',admitted_from:from,provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
+  if(r&&r.id){ location.hash=cat==='labour'?'#labour':(cat==='highrisk'?'#highrisk':'#antenatal'); route(); }
+  else alert('Could not admit: '+((r&&r.error)||'error'));
+}
 
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./service-worker.js').catch(()=>{}); }
 boot();
