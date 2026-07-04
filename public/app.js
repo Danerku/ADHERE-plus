@@ -74,13 +74,15 @@ function login(){
   $('#go').onclick=async()=>{ try{ const r=await api('POST','login',{username:$('#u').value,password:$('#p').value}); ME=r.user; localStorage.me=JSON.stringify(ME); location.hash='#home'; route(); }catch(e){ $('#msg').textContent=e.message; } };
 }
 
-function nav(){ return `<div style="margin-bottom:12px">
-  ${ME.role==='recorder'||ME.role==='admin'?'<a class="nav" href="#register">Register</a>':''}
-  <a class="nav" href="#labour">Labour ward</a>
-  <a class="nav" href="#pnc">Postnatal</a>
-  <a class="nav" href="#dashboard">Dashboard</a>
-  ${ME.role==='admin'?'<a class="nav" href="#facilities">Facilities</a>':''}
-  ${ME.role==='admin'?'<a class="nav" href="#users">Users</a>':''}</div>`; }
+function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===x?' on':'';
+  const L=(href,txt)=>`<a class="nav${on(href)}" href="${href}">${txt}</a>`;
+  return `<nav class="navbar">
+  ${ME.role==='recorder'||ME.role==='admin'?L('#register','Register'):''}
+  ${L('#labour','Labour ward')}
+  ${L('#pnc','Postnatal')}
+  ${L('#dashboard','Dashboard')}
+  ${ME.role==='admin'?L('#facilities','Facilities'):''}
+  ${ME.role==='admin'?L('#users','Users'):''}</nav>`; }
 
 function home(){
   app().innerHTML=nav()+`<div class="card"><h3>Welcome, ${esc(ME.full_name)}</h3>
