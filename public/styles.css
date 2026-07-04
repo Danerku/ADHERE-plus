@@ -175,4 +175,5 @@ main > .card:only-child{box-shadow:var(--shadow-lg)}
   #net.pill{display:none}
   .card table{display:block; width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; white-space:nowrap}
   th,td{padding:9px 11px}
+  .grid{grid-template-columns:1fr}
 }
