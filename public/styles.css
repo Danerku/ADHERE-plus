@@ -168,4 +168,11 @@ main > .card:only-child{box-shadow:var(--shadow-lg)}
   main{padding:16px 12px 32px}
   .card{padding:16px}
   a.nav{padding:9px 13px; font-size:13.5px}
+  header#top{padding:10px 12px; gap:8px}
+  header#top b{font-size:16px}
+  header#top #who{flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px}
+  header#top button{padding:5px 11px; font-size:12px; flex:0 0 auto}
+  #net.pill{display:none}
+  .card table{display:block; width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; white-space:nowrap}
+  th,td{padding:9px 11px}
 }
