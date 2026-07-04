@@ -34,10 +34,4 @@ See DEPLOY.md — `cd docker && docker compose up --build` → http://localhost:
 - docker/ — Dockerfile, docker-compose.yml, DB init (schema + seed)
 - data/synthetic_sample.csv — 400-row sample
 
-## Honest notes
-The model is SYNTHETIC (built to prove the pipeline and demo the UX), calibrated to
-published Ethiopia/SSA prevalences. It must be retrained on real de-identified records
-before any clinical or evaluation use, and only that model's metrics belong in the
-proposal's validation appendix. This rebuild is a separate, improved artifact — not the
-exact tool that was piloted; keep the proposal's tool description matched to what is
-genuinely deployed.
+
