@@ -26,6 +26,7 @@ function motherFeats(W){ W=W||{};
   if(W.age!=null&&W.age!=='') out.age=+W.age;
   if(W.para!=null&&W.para!=='') out.parity=+W.para;
   if(W.lnmp){ const d=(Date.now()-new Date(W.lnmp+'T00:00:00').getTime())/864e5; if(d>0&&d<310) out.ga=Math.max(24,Math.min(43,Math.round(d/7))); }
+  if(W.prior_cs==='yes') out.prior_cs=1;
   return out;
 }
 // Transparent MEOWS (Modified Early Obstetric Warning Score): aggregate-weighted trigger score.
@@ -167,6 +168,15 @@ async function register(){
     <label>Next of kin<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
     <label>SMS reminders consent<select id="sc"><option value="0">No</option><option value="1">Yes — may send SMS</option></select></label>
     <label>Gravida<input id="gr" type="number"></label><label>Para<input id="pa" type="number"></label>
+    <label>Height (cm)<input id="ht" type="number"></label>
+    <label>Prior caesarean<select id="pcs"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Prior stillbirth / NND<select id="psb"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Prior PPH<select id="pphx"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Prior pre-eclampsia<select id="ppe"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Prior obstructed labour<select id="pol"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Chronic hypertension<select id="chtn"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Diabetes<select id="dm"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
+    <label>Cardiac / renal disease<select id="crd"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
     ${ecPicker('lnmp','LNMP')}
     <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option><option value="highrisk">High risk</option></select></label>
     <label>Ruptured membrane<select id="rm"><option value="0">No</option><option value="1">Yes</option></select></label>
@@ -178,7 +188,7 @@ async function register(){
     const lnmp=ecGet('lnmp'); const edd=lnmp?addDays(lnmp,280):null;
     $('#m').textContent=' saving…';
     try{
-      const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,sms_consent:(sc&&sc.value==='1')?1:0,gravida:+gr.value||null,para:+pa.value||null,lnmp:lnmp,edd:edd});
+      const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,sms_consent:(sc&&sc.value==='1')?1:0,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),prior_cs:(pcs.value||null),prior_stillbirth:(psb.value||null),prior_pph:(pphx.value||null),prior_preeclampsia:(ppe.value||null),prior_obstructed:(pol.value||null),chronic_htn:(chtn.value||null),diabetes:(dm.value||null),cardiac_renal:(crd.value||null),lnmp:lnmp,edd:edd});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
       await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,ruptured_membrane:+rm.value,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
       $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
@@ -572,10 +582,13 @@ async function ancVisits(id){
     <label>Malaria assessed<select id="mal"><option value="">Not assessed</option><option value="no">No symptoms/risk</option><option value="yes">Symptoms/risk - test</option></select></label>
     ${ecPicker('na','Next appointment')}
    </div><label>Danger signs / note<input id="dn"></label>
-   <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span></div>
+   <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span><div class="muted" id="anccomp" style="margin-top:8px;font-size:12px"></div></div>
    <div class="card"><h3>Previous visits</h3><table><tr><th>Date</th><th>GA</th><th>Wt</th><th>BP</th><th>FH</th><th>FHR</th><th>Next</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.fundal_height_cm||'')}</td><td>${esc(p.fetal_heart_rate||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No visits yet.</td></tr>'}
    </table></div>`;
+  const ancRec=['cno','ga','bps','muac','fm','hiv','syph','tt','ifa','up','hb'];
+  const updComp=()=>{ let n=0; ancRec.forEach(k=>{const el=$('#'+k); if(el&&el.value&&el.value!=='') n++;}); const c=$('#anccomp'); if(c) c.textContent='ANC package: '+n+' of '+ancRec.length+' recommended items recorded'; };
+  ancRec.forEach(k=>{const el=$('#'+k); if(el){ el.addEventListener('input',updComp); el.addEventListener('change',updComp); }}); updComp();
   $('#asave').onclick=async()=>{ const b=$('#asave'); b.disabled=true; try{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,muac:(+muac.value||null),fetal_movement:(fm.value||null),hiv_status:(hiv.value||null),syphilis:(syph.value||null),tetanus_td:(tt.value||null),iron_folic:(ifa.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na')});
     $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); } finally{ b.disabled=false; } };
 }

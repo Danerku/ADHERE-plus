@@ -83,7 +83,7 @@ try {
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       if(empty($b['mrn'])) err('MRN is required');
       $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
-      $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','sms_consent','lnmp','edd','facility_id','created_by'])));
+      $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','facility_id','created_by'])));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
