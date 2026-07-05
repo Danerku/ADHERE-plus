@@ -111,8 +111,10 @@ function login(){
 
 function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===x?' on':'';
   const L=(href,txt)=>`<a class="nav${on(href)}" href="${href}">${txt}</a>`;
+  const _p=(location.hash||'').replace(/^#/,'').split('/'); const _EP=['partograph','anc','checklist','danger','delivery','baby','bemonc','handover','referral','report','vitals','ancvisit','pncvisit'];
+  const back=(_EP.indexOf(_p[0])>=0 && _p[1] && /^\d+$/.test(_p[1]))?`<a class="nav" href="#patient/${_p[1]}" style="font-weight:600">‹ Back to patient</a>`:'';
   if(ME.role==='supervisor') return `<nav class="navbar">${L('#supervisor','Supervisor')}${L('#reminders','Reminders')}</nav>`;
-  return `<nav class="navbar">
+  return `<nav class="navbar">${back}
   ${ME.role==='recorder'||ME.role==='admin'?L('#register','Register'):''}
   ${L('#antenatal','Antenatal')}
   ${L('#labour','Labour ward')}
