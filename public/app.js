@@ -298,7 +298,7 @@ async function users(){
      <label>Password<input id="np" type="text"></label>
      <label>Role<select id="nr"><option value="recorder">Recorder</option><option value="provider">Provider</option><option value="observer">Observer</option><option value="supervisor">Supervisor</option><option value="admin">Admin</option></select></label>
      <label>Facility<select id="nf">${facs.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select></label>
-     <label>Supervisor scope<select id="ns"><option value="facility">This facility</option><option value="woreda">Woreda</option><option value="zone">Zone</option><option value="region">Region</option></select></label>
+     <label id="nsWrap" style="display:none">Supervisor scope<select id="ns"><option value="facility">This facility</option><option value="woreda">Woreda</option><option value="zone">Zone</option><option value="region">Region</option></select></label>
      <label>Cadre<input id="nc" placeholder="midwife / health officer / IESO"></label>
     </div><button class="act" id="add" style="margin-top:10px">Create user</button> <span class="muted" id="m"></span>
     <p class="muted" style="font-size:12px">Supervisor scope only applies to the Supervisor role — it sets how wide their cross-facility dashboard reads (their base facility's woreda/zone/region).</p>
@@ -313,6 +313,7 @@ async function users(){
        <td><button class="sec" data-act="toggle" data-id="${u.id}" data-a="${u.is_active}">${u.is_active==1?'Deactivate':'Activate'}</button>
            <button class="sec" data-act="pw" data-id="${u.id}">Reset password</button></td></tr>`).join('')}
      </table><p class="muted">Deactivating disables login but keeps the audit trail (safer than deleting).</p></div>`;
+  const _rs=$('#nr'), _sw=$('#nsWrap'); const _tgl=()=>{ if(_sw) _sw.style.display=(_rs.value==='supervisor')?'':'none'; }; if(_rs){ _rs.onchange=_tgl; _tgl(); }
   $('#add').onclick=async()=>{ try{ const r=await api('POST','users',{username:nu.value,full_name:nn.value,password:np.value,role:nr.value,cadre:nc.value,scope:document.getElementById('ns')?ns.value:'facility',facility_id:document.getElementById('nf')?nf.value:null}); if(r.id){ users(); } else $('#m').textContent=' '+(r.error||'error'); }catch(e){ $('#m').textContent=' '+(e.message||'error'); } };
   $('#ucsvbtn').onclick=async()=>{ const fl=$('#ucsv').files[0]; if(!fl){ $('#ucsvm').textContent=' choose a CSV file first'; return; } let rows=parseCSV(await fl.text()).filter(r=>r.username&&r.password&&r.role); if(!rows.length){ $('#ucsvm').textContent=' no valid rows (need username, password, role)'; return; } rows=rows.map(r=>{ const f=facs.find(x=>String(x.name).toLowerCase()===String(r.facility||'').toLowerCase()); return {username:r.username,full_name:r.full_name,password:r.password,role:r.role,cadre:r.cadre,scope:r.scope||'facility',facility_id:f?f.id:null}; }); $('#ucsvm').textContent=' uploading '+rows.length+'…'; try{ const r=await api('POST','users',rows); const n=(r.created||[]).length,e=(r.errors||[]).length; $('#ucsvm').textContent=' added '+n+(e?(', '+e+' skipped'):''); setTimeout(()=>users(),1000); }catch(err){ $('#ucsvm').textContent=' '+(err.message||'error'); } };
   document.querySelectorAll('[data-act]').forEach(b=>b.onclick=async()=>{ const id=b.dataset.id;
