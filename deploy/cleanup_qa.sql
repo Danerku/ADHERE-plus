@@ -26,6 +26,8 @@ DELETE    FROM episodes             WHERE woman_id IN (SELECT id FROM women WHER
 DELETE    FROM women                WHERE FIND_IN_SET(mrn,@mrns);
 
 -- Remove the demo seed staff accounts (keep your real admin).
+-- Clear their audit-log rows first (FK: audit_log.user_id -> users.id).
+DELETE FROM audit_log WHERE user_id IN (SELECT id FROM (SELECT id FROM users WHERE username IN ('recorder1','provider1','observer1')) t);
 DELETE FROM users WHERE username IN ('recorder1','provider1','observer1');
 
 -- Remove the two 'Demo' facilities, but only if nothing references them.

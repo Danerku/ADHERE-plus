@@ -160,4 +160,74 @@ try {
     $ind=[
       'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
       'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
- 
+      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
+      'partographs'=>$series("SELECT COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?"),
+    ];
+    // EWMA anomaly flag: last point > mean + 2*std of the series
+    $flags=[]; foreach($ind as $k=>$v){ $n=count($v); $mean=array_sum($v)/max(1,$n);
+      $var=0; foreach($v as $x){$var+=($x-$mean)**2;} $sd=sqrt($var/max(1,$n));
+      $flags[$k] = ($sd>0 && end($v) > $mean+2*$sd); }
+    out(['months'=>$months,'indicators'=>$ind,'anomalies'=>$flags]);
+  }
+
+  // ---- DHIS2 indicator export (aggregate) ----
+  if ($r==='dhis2' && $m==='GET'){ $u=require_auth(); $ids=scoped_facility_ids($u); $in=implode(',',array_fill(0,count($ids),'?'));  // scoped to the user's facility / supervisor scope
+    $fac=$_GET['facility']??$u['facility_id']; $period=$_GET['period']??date('Y-m');
+    $one=function($sql,$p) use($ids){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$p])); return (int)($st->fetch()['c']??0); };
+    $ind=[
+      'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?",$period),
+      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
+      'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?",$period),
+    ];
+    out(['facility'=>$fac,'period'=>$period,'indicators'=>$ind]);
+  }
+
+  // ---- FHIR-style Encounter export (interop sample) ----
+  if ($r==='fhir' && $id){ require_ep($id);
+    $st=db()->prepare("SELECT e.*,w.mrn,w.first_name,w.father_name FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.id=?"); $st->execute([$id]); $e=$st->fetch(); if(!$e) err('not found',404);
+    out(['resourceType'=>'Encounter','id'=>"episode-$id",'status'=>$e['status'],
+         'class'=>['code'=>strtoupper($e['service_category'])],
+         'subject'=>['reference'=>'Patient/'.$e['mrn'],'display'=>trim($e['first_name'].' '.$e['father_name'])],
+         'period'=>['start'=>$e['admission_datetime']]]);
+  }
+
+  // ---- offline sync (batch apply queued entries) ----
+  if ($r==='sync' && $m==='POST'){ $u=require_role(['provider','admin']); $items=body()['items']??[]; $applied=[];
+    foreach($items as $it){ $ep=$it['entity']??''; $payload=$it['payload']??[];
+      $map=['observations'=>'partograph_obs','checklist'=>'checklist_responses','danger_signs'=>'danger_signs'];
+      $sallow=['partograph_obs'=>['episode_id','obs_datetime','hours_since_active','fetal_heart_rate','moulding','cervix_cm','contractions_per10','bp_systolic','temperature','recorded_by'],'checklist_responses'=>['episode_id','pause_point','item_code','response','recorded_by'],'danger_signs'=>['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']];
+      if(isset($map[$ep])){ require_ep($payload['episode_id']??0); $payload['recorded_by']=$u['id']; $payload=array_intersect_key($payload,array_flip($sallow[$map[$ep]])); $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert($map[$ep],$payload)]; } }
+    audit('sync',null,null,['count'=>count($applied)]); out(['applied'=>$applied]);
+  }
+
+  // ---- Supervisor dashboard (cross-facility rollup, read-only) ----
+  if ($r==='supervisor' && $m==='GET'){ $u=require_role(['supervisor','admin']); $ids=scoped_facility_ids($u);
+    if(!$ids){ out(['scope'=>$u['scope']??'facility','facilities'=>[]]); }
+    $in=implode(',',array_fill(0,count($ids),'?'));
+    $facs=db()->prepare("SELECT id,name,woreda,zone,region FROM facilities WHERE id IN ($in) ORDER BY name"); $facs->execute($ids); $facRows=$facs->fetchAll();
+    $days=(int)($_GET['days']??0); if($days<0)$days=0; if($days>3660)$days=3660;   // 0 = all time; sanitized int, safe to inline
+    $dc=function($col) use($days){ return $days>0 ? " AND $col >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : ""; };
+    $grp=function($sql) use($ids){ $st=db()->prepare($sql); $st->execute($ids); $o=[]; foreach($st->fetchAll() as $x){ $o[(int)$x['fid']]=(int)$x['c']; } return $o; };
+    $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE service_category='labour' AND facility_id IN ($in)".$dc('created_at')." GROUP BY facility_id");
+    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in)".$dc('o.recorded_at')." GROUP BY e.facility_id");
+    $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
+    $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
+    $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id IN ($in)".$dc('rf.recorded_at')." GROUP BY e.facility_id");
+    $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
+      $rows[]=['id'=>$fid,'name'=>$f['name'],'woreda'=>$f['woreda'],'zone'=>$f['zone'],
+        'labour_episodes'=>$lab,'partographs_started'=>$ps,'partograph_completion'=>$lab?(int)round(100*$ps/$lab):0,
+        'deliveries'=>$deliv[$fid]??0,'red_alerts'=>$reds[$fid]??0,'referrals'=>$refs[$fid]??0]; }
+    out(['scope'=>$u['scope']??'facility','base_facility'=>(int)$u['facility_id'],'days'=>$days,'facilities'=>$rows]);
+  }
+
+  // ---- Reminders: list (supervisor/admin) + run scheduler (admin) ----
+  if ($r==='reminders'){
+    if($m==='GET'){ $u=require_role(['supervisor','admin']); $ids=scoped_facility_ids($u); if(!$ids)$ids=[0];
+      $in=implode(',',array_fill(0,count($ids),'?'));
+      $st=db()->prepare("SELECT r.*, w.first_name, w.father_name FROM reminders r LEFT JOIN women w ON w.id=r.woman_id WHERE r.facility_id IN ($in) ORDER BY r.id DESC LIMIT 300");
+      $st->execute($ids); out($st->fetchAll()); }
+    if($m==='POST' && $id==='run'){ require_role(['admin']); require __DIR__.'/reminders_lib.php'; out(reminders_run(db()), 200); }
+  }
+
+  err('not found: '.$r, 404);
+} catch (Throwable $ex) { error_log('ADHERE API: '.$ex->getMessage()); err('server error', 500); }
