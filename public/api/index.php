@@ -61,7 +61,14 @@ try {
     if($m==='POST'){ $u=require_role(['recorder','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','lnmp','edd','facility_id','created_by'])));
       audit('create','women',$wid); out(['id'=>$wid],201); }
+    if($m==='PATCH' && $id){ $u=require_role(['recorder','admin']); $b=body();
+      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
+      $fields=array_intersect_key($b,array_flip(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','lnmp','edd']));
+      foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
   }
+
+  // ---- providers list (for handover picker; any logged-in user) ----
+  if ($r==='providers' && $m==='GET'){ $u=user(); $st=db()->prepare("SELECT id,full_name,role FROM users WHERE is_active=1 AND role IN ('provider','admin') AND facility_id=? ORDER BY full_name"); $st->execute([$u['facility_id']]); out($st->fetchAll()); }
 
   // ---- episodes ----
   if ($r==='episodes'){
@@ -101,11 +108,16 @@ try {
            'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','recorded_by']],
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
+           'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
+           'anc_visits'=>['anc_visits',['episode_id','visit_date','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','danger_note','next_appointment','recorded_by']],
+           'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','nb_temp','nb_feeding','cord','danger_note','recorded_by']],
+           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','recorded_by']],
+           'maternal_vitals'=>['maternal_vitals',['episode_id','obs_datetime','bp_systolic','bp_diastolic','pulse','temperature','resp_rate','spo2','note','recorded_by']],
            'messages'=>['messages',['episode_id','from_user_id','to_user_id','body']]];
   if(isset($simple[$r])){
     [$tbl,$allow]=$simple[$r];
     if($m==='GET'){ require_ep($_GET['episode']??0); $st=db()->prepare("SELECT * FROM `$tbl` WHERE episode_id=? ORDER BY id"); $st->execute([$_GET['episode']]); out($st->fetchAll()); }
-    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
+    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
       foreach($rows as $row){ require_ep($row['episode_id']??0); }
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id']; $ids[]=insert($tbl,array_intersect_key($row,array_flip($allow))); }

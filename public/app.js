@@ -58,7 +58,8 @@ function route(){
   if(!ME) return login();
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
-    checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities}[screen]||home)(arg);
+    checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
+    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman}[screen]||home)(arg);
 }
 
 function login(){
@@ -121,7 +122,7 @@ async function labour(){
   const rows=await api('GET','episodes?category=labour').catch(()=>[]);
   app().innerHTML=nav()+`<div class="card"><h3>Labour ward</h3><table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}</td>
-    <td><a class="nav" href="#partograph/${r.id}">Partograph</a><a class="nav" href="#checklist/${r.id}">Checklist</a><a class="nav" href="#danger/${r.id}">Danger</a><a class="nav" href="#delivery/${r.id}">Delivery</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No women in labour. Register one.</td></tr>'}
+    <td><a class="nav" href="#partograph/${r.id}">Partograph</a><a class="nav" href="#checklist/${r.id}">Checklist</a><a class="nav" href="#danger/${r.id}">Danger</a><a class="nav" href="#vitals/${r.id}">Vitals</a><a class="nav" href="#delivery/${r.id}">Delivery</a><a class="nav" href="#handover/${r.id}">Handover</a><a class="nav" href="#referral/${r.id}">Refer</a><a class="nav" href="#report/${r.id}">Report</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No women in labour. Register one.</td></tr>'}
    </table></div>`;
 }
 
@@ -322,8 +323,8 @@ async function delivery(id){
 async function pnc(){
   const rows=await api('GET','episodes?category=labour').catch(()=>[]);
   const del=rows.filter(r=>r.status==='delivered');
-  app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3><table><tr><th>MRN</th><th>Name</th><th>Status</th></tr>
-   ${del.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.status)}</td></tr>`).join('')||'<tr><td colspan=3 class=muted>No postnatal women yet.</td></tr>'}</table></div>`;
+  app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3><table><tr><th>MRN</th><th>Name</th><th>Status</th><th>Actions</th></tr>
+   ${del.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.status)}</td><td><a class="nav" href="#pncvisit/${r.id}">PNC follow-up</a><a class="nav" href="#baby/${r.id}">Newborn</a><a class="nav" href="#report/${r.id}">Report</a></td></tr>`).join('')||'<tr><td colspan=4 class=muted>No postnatal women yet.</td></tr>'}</table></div>`;
 }
 const ANC_GROUPS={obstetric_history:'Obstetric history',current_pregnancy:'Current pregnancy',general_medical:'General medical'};
 const ANC_ITEMS=[
@@ -369,7 +370,7 @@ async function ancList(){
   app().innerHTML=nav()+`<div class="card"><h3>Antenatal care</h3>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}</td>
-    <td><a class="nav" href="#anc/${r.id}">Screening</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button> <button class="sec" data-w="${r.woman_id}" data-to="highrisk">&rarr; High risk</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
+    <td><a class="nav" href="#anc/${r.id}">Screening</a><a class="nav" href="#ancvisit/${r.id}">Follow-up</a><a class="nav" href="#editwoman/${r.woman_id}">Edit</a><a class="nav" href="#referral/${r.id}">Refer</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button> <button class="sec" data-w="${r.woman_id}" data-to="highrisk">&rarr; High risk</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
    </table><p class="muted">"&rarr; Labour / High risk" admits the woman into that stream (recorded as an admission from ANC).</p></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_anc'));
 }
@@ -380,7 +381,7 @@ async function highriskList(){
    <p class="muted">Women admitted to close monitoring (high-risk pregnancy or latent-phase labour). The AI risk score on the partograph helps prioritise who to see first.</p>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>From</th><th>Status</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.admitted_from||'new')}</td><td>${esc(r.status)}</td>
-    <td><a class="nav" href="#partograph/${r.id}">Monitor</a><a class="nav" href="#danger/${r.id}">Danger</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No high-risk women. Admit from Antenatal, or Register with service = High risk.</td></tr>'}
+    <td><a class="nav" href="#partograph/${r.id}">Monitor</a><a class="nav" href="#vitals/${r.id}">Vitals</a><a class="nav" href="#danger/${r.id}">Danger</a><a class="nav" href="#handover/${r.id}">Handover</a><a class="nav" href="#referral/${r.id}">Refer</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No high-risk women. Admit from Antenatal, or Register with service = High risk.</td></tr>'}
    </table></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_highrisk'));
 }
@@ -389,6 +390,171 @@ async function transfer(womanId,cat,from){
   const r=await api('POST','episodes',{woman_id:womanId,service_category:cat,status:cat==='labour'?'laboring':'active',admitted_from:from,provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
   if(r&&r.id){ location.hash=cat==='labour'?'#labour':(cat==='highrisk'?'#highrisk':'#antenatal'); route(); }
   else alert('Could not admit: '+((r&&r.error)||'error'));
+}
+
+// ================= workflow-parity modules =================
+const nowStr=()=>new Date().toISOString().slice(0,19).replace('T',' ');
+const today=()=>new Date().toISOString().slice(0,10);
+
+async function referralScreen(id){
+  const past=await api('GET','referrals?episode='+id).catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>Referral — episode ${esc(id)}</h3>
+   <div class="grid">
+    <label>Refer to (facility)<input id="rto" placeholder="e.g. Felege Hiwot Referral Hospital"></label>
+    <label>Urgency<select id="rurg"><option value="urgent">Urgent</option><option value="emergency">Emergency</option><option value="routine">Routine</option></select></label>
+    <label>Transport<input id="rtr" placeholder="ambulance / private"></label>
+    <label>Reason<input id="rrsn" placeholder="e.g. obstructed labour"></label>
+   </div><button class="act" id="rsave" style="margin-top:10px">Save referral</button> <span class="muted" id="rm"></span></div>
+   <div class="card"><h3>Referral history</h3><table><tr><th>When</th><th>To</th><th>Urgency</th><th>Reason</th></tr>
+    ${past.map(p=>`<tr><td>${esc((p.recorded_at||'').slice(0,16))}</td><td>${esc(p.referred_to||'')}</td><td>${esc(p.urgency||'')}</td><td>${esc(p.reason||'')}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>No referrals yet.</td></tr>'}
+   </table></div>`;
+  $('#rsave').onclick=async()=>{ const r=await api('POST','referrals',{episode_id:+id,referred_to:rto.value,reason:rrsn.value,urgency:rurg.value,transport:rtr.value});
+    if(r&&(r.ids||r.queued)){ try{ await api('PATCH','episodes/'+id,{status:'referred'}); }catch(e){} $('#rm').textContent=' referred'; setTimeout(()=>referralScreen(id),500); } else $('#rm').textContent=' '+((r&&r.error)||'error'); };
+}
+
+async function ancVisits(id){
+  const past=await api('GET','anc_visits?episode='+id).catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>ANC follow-up visit — episode ${esc(id)}</h3>
+   <div class="grid">
+    <label>Visit date<input id="vd" type="date" value="${today()}"></label>
+    <label>GA (weeks)<input id="ga" type="number"></label>
+    <label>Weight (kg)<input id="wt" type="number" step="0.1"></label>
+    <label>BP systolic<input id="bps" type="number"></label>
+    <label>BP diastolic<input id="bpd" type="number"></label>
+    <label>Fundal height (cm)<input id="fh" type="number"></label>
+    <label>Fetal HR<input id="fhr" type="number"></label>
+    <label>Presentation<input id="pres" placeholder="cephalic / breech"></label>
+    <label>Urine protein<input id="up" placeholder="nil / +"></label>
+    <label>Hgb (g/dl)<input id="hb" type="number" step="0.1"></label>
+    <label>Next appointment<input id="na" type="date"></label>
+   </div><label>Danger signs / note<input id="dn"></label>
+   <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span></div>
+   <div class="card"><h3>Previous visits</h3><table><tr><th>Date</th><th>GA</th><th>Wt</th><th>BP</th><th>FH</th><th>FHR</th><th>Next</th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.fundal_height_cm||'')}</td><td>${esc(p.fetal_heart_rate||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No visits yet.</td></tr>'}
+   </table></div>`;
+  $('#asave').onclick=async()=>{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:vd.value||null,ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,danger_note:dn.value,next_appointment:na.value||null});
+    $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); };
+}
+
+async function pncVisits(id){
+  const past=await api('GET','pnc_visits?episode='+id).catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>PNC follow-up visit — episode ${esc(id)}</h3>
+   <h4>Mother</h4><div class="grid">
+    <label>Visit date<input id="vd" type="date" value="${today()}"></label>
+    <label>PNC day<input id="pd" type="number" placeholder="1 / 3 / 7 / 42"></label>
+    <label>Temp °C<input id="mt" type="number" step="0.1"></label>
+    <label>BP systolic<input id="bps" type="number"></label>
+    <label>BP diastolic<input id="bpd" type="number"></label>
+    <label>Pulse<input id="pl" type="number"></label>
+    <label>Bleeding<select id="bl"><option value="normal">Normal</option><option value="heavy">Heavy</option></select></label>
+    <label>Breast<select id="br"><option value="ok">OK</option><option value="problem">Problem</option></select></label>
+    <label>Mood<select id="md"><option value="ok">OK</option><option value="low">Low</option></select></label>
+   </div><h4>Newborn</h4><div class="grid">
+    <label>Temp °C<input id="nt" type="number" step="0.1"></label>
+    <label>Feeding<select id="nf"><option value="good">Good</option><option value="poor">Poor</option></select></label>
+    <label>Cord<select id="cd"><option value="clean">Clean/dry</option><option value="infected">Infected</option></select></label>
+   </div><label>Danger signs / note<input id="dn"></label>
+   <button class="act" id="psave" style="margin-top:10px">Save PNC visit</button> <span class="muted" id="pm"></span></div>
+   <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Day</th><th>M temp</th><th>M BP</th><th>Bleeding</th><th>NB feeding</th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(p.bleeding||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
+   </table></div>`;
+  $('#psave').onclick=async()=>{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:vd.value||null,pnc_day:+pd.value||null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,danger_note:dn.value});
+    $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); };
+}
+
+async function babiesScreen(id){
+  const past=await api('GET','babies?episode='+id).catch(()=>[]);
+  const nextOrder=(past.length||0)+1;
+  app().innerHTML=nav()+`<div class="card"><h3>Newborn record — episode ${esc(id)}</h3>
+   <p class="muted">Add one row per baby (supports twins and multiples).</p>
+   <div class="grid">
+    <label>Birth order<input id="bo" type="number" value="${nextOrder}"></label>
+    <label>Sex<select id="sx"><option value="female">Female</option><option value="male">Male</option><option value="ambiguous">Ambiguous</option></select></label>
+    <label>Weight (g)<input id="wg" type="number" value="3000"></label>
+    <label>APGAR 1<input id="a1" type="number" value="8"></label>
+    <label>APGAR 5<input id="a5" type="number" value="9"></label>
+    <label>Resuscitated<select id="rs"><option value="0">No</option><option value="1">Yes</option></select></label>
+    <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Neonatal death</option></select></label>
+   </div><button class="act" id="bsave" style="margin-top:10px">Add baby</button> <span class="muted" id="bm"></span></div>
+   <div class="card"><h3>Babies</h3><table><tr><th>#</th><th>Sex</th><th>Weight</th><th>APGAR</th><th>Resus</th><th>Outcome</th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.birth_order||'')}</td><td>${esc(p.sex||'')}</td><td>${esc(p.weight_g||'')}</td><td>${esc((p.apgar_1min||'')+'/'+(p.apgar_5min||''))}</td><td>${p.resuscitated==1?'yes':'no'}</td><td>${esc(p.outcome||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No babies recorded yet.</td></tr>'}
+   </table></div>`;
+  $('#bsave').onclick=async()=>{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value});
+    $('#bm').textContent=(r&&(r.ids||r.queued))?' added':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>babiesScreen(id),400); };
+}
+
+async function vitalsScreen(id){
+  const past=await api('GET','maternal_vitals?episode='+id).catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>Maternal vital signs — episode ${esc(id)}</h3>
+   <div class="grid">
+    <label>BP systolic<input id="bps" type="number" value="120"></label>
+    <label>BP diastolic<input id="bpd" type="number" value="80"></label>
+    <label>Pulse<input id="pl" type="number" value="80"></label>
+    <label>Temp °C<input id="tp" type="number" step="0.1" value="37"></label>
+    <label>Resp rate<input id="rr" type="number" value="18"></label>
+    <label>SpO2 %<input id="sp" type="number" value="98"></label>
+   </div><label>Note<input id="ntt"></label>
+   <button class="act" id="vsave" style="margin-top:10px">Record vitals</button> <span class="muted" id="vm"></span></div>
+   <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th></tr>
+    ${past.map(p=>`<tr><td>${esc((p.obs_datetime||p.recorded_at||'').slice(0,16))}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.pulse||'')}</td><td>${esc(p.temperature||'')}</td><td>${esc(p.resp_rate||'')}</td><td>${esc(p.spo2||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No vitals yet.</td></tr>'}
+   </table></div>`;
+  $('#vsave').onclick=async()=>{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,pulse:+pl.value||null,temperature:+tp.value||null,resp_rate:+rr.value||null,spo2:+sp.value||null,note:ntt.value});
+    $('#vm').textContent=(r&&(r.ids||r.queued))?' recorded':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>vitalsScreen(id),400); };
+}
+
+async function handoverScreen(id){
+  const [past,provs]=await Promise.all([api('GET','handover?episode='+id).catch(()=>[]),api('GET','providers').catch(()=>[])]);
+  const pname=uid=>{ const p=provs.find(x=>x.id==uid); return p?p.full_name:(uid||''); };
+  app().innerHTML=nav()+`<div class="card"><h3>Provider handover — episode ${esc(id)}</h3>
+   <div class="grid">
+    <label>Handover to<select id="hto">${provs.map(p=>`<option value="${p.id}">${esc(p.full_name)} (${esc(p.role)})</option>`).join('')}</select></label>
+    <label>Note<input id="hn" placeholder="status, plan, pending tasks"></label>
+   </div><button class="act" id="hsave" style="margin-top:10px">Record handover</button> <span class="muted" id="hm"></span>
+   ${provs.length?'':'<p class="muted">No providers at this facility yet.</p>'}</div>
+   <div class="card"><h3>Handover history</h3><table><tr><th>When</th><th>From</th><th>To</th><th>Note</th></tr>
+    ${past.map(p=>`<tr><td>${esc((p.handover_datetime||'').slice(0,16))}</td><td>${esc(pname(p.from_provider_id))}</td><td>${esc(pname(p.to_provider_id))}</td><td>${esc(p.note||'')}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>No handovers yet.</td></tr>'}
+   </table></div>`;
+  $('#hsave').onclick=async()=>{ const to=document.getElementById('hto')?+hto.value:null; const r=await api('POST','handover',{episode_id:+id,from_provider_id:ME.id,to_provider_id:to,note:hn.value});
+    $('#hm').textContent=(r&&(r.ids||r.queued))?' handed over':' '+((r&&r.error)||'error'); if(r&&r.ids){ if(to){ try{ await api('PATCH','episodes/'+id,{provider_id:to}); }catch(e){} } setTimeout(()=>handoverScreen(id),400);} };
+}
+
+async function editWoman(wid){
+  const w=await api('GET','women/'+wid).catch(()=>null);
+  if(!w||!w.id){ app().innerHTML=nav()+'<div class="card">Woman not found.</div>'; return; }
+  app().innerHTML=nav()+`<div class="card"><h3>Edit woman — ${esc(w.mrn)}</h3>
+   <div class="grid">
+    <label>First name<input id="fn" value="${esc(w.first_name||'')}"></label>
+    <label>Father name<input id="fa" value="${esc(w.father_name||'')}"></label>
+    <label>Grandfather<input id="gf" value="${esc(w.grandfather_name||'')}"></label>
+    <label>Age<input id="age" type="number" value="${esc(w.age||'')}"></label>
+    <label>Phone<input id="ph" value="${esc(w.phone||'')}"></label>
+    <label>Kebele<input id="kb" value="${esc(w.kebele||'')}"></label>
+    <label>Gravida<input id="gr" type="number" value="${esc(w.gravida||'')}"></label>
+    <label>Para<input id="pa" type="number" value="${esc(w.para||'')}"></label>
+   </div><button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
+  $('#wsave').onclick=async()=>{ const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null});
+    $('#wm').textContent=(r&&(r.ok||r.queued))?' saved':' '+((r&&r.error)||'error'); };
+}
+
+async function reportScreen(id){
+  const [ep,obs,chk,deliv,babies,anc,pnc,refs]=await Promise.all([
+    api('GET','episodes').catch(()=>[]), api('GET','observations?episode='+id).catch(()=>[]),
+    api('GET','checklist?episode='+id).catch(()=>[]), api('GET','delivery?episode='+id).catch(()=>[]),
+    api('GET','babies?episode='+id).catch(()=>[]), api('GET','anc_screening?episode='+id).catch(()=>[]),
+    api('GET','pnc_visits?episode='+id).catch(()=>[]), api('GET','referrals?episode='+id).catch(()=>[])]);
+  const e=(ep||[]).find(x=>x.id==id)||{}; const d=(deliv||[])[0]||{}; const last=obs[obs.length-1]||{};
+  const ancYes=(anc||[]).filter(a=>a.response==='yes').length;
+  app().innerHTML=nav()+`<div class="card"><h3>Care summary — episode ${esc(id)}</h3>
+   <p><b>${esc((e.first_name||'')+' '+(e.father_name||''))}</b> · MRN ${esc(e.mrn||'')} · G${esc(e.gravida||'?')}/P${esc(e.para||'?')} · ${esc(e.service_category||'')} · status ${esc(e.status||'')}</p>
+   <p class="muted">Admitted ${esc((e.admission_datetime||'').slice(0,16))}${e.admitted_from&&e.admitted_from!=='new'?(' ('+esc(e.admitted_from)+')'):''}</p>
+   <h4>Partograph</h4><p class="muted">${obs.length} observation(s). Last: cervix ${esc(last.cervix_cm||'—')} cm, FHR ${esc(last.fetal_heart_rate||'—')}, hrs ${esc(last.hours_since_active||'—')}.</p>
+   <h4>ANC screening</h4><p class="muted">${anc.length?(ancYes?(ancYes+' risk factor(s) → specialised care'):'no risk factors → basic ANC'):'not screened'}</p>
+   <h4>Safe-birth checklist</h4><p class="muted">${chk.length} item(s) recorded.</p>
+   <h4>Delivery</h4><p class="muted">${d.delivery_datetime?('Mode '+esc(d.mode||'')+', outcome '+esc(d.outcome||'')+', mother '+esc(d.maternal_outcome||'')):'not delivered'}</p>
+   <h4>Newborn(s)</h4><p class="muted">${babies.length?babies.map(b=>'#'+esc(b.birth_order)+' '+esc(b.sex||'')+' '+esc(b.weight_g||'?')+'g APGAR '+esc(b.apgar_1min||'?')+'/'+esc(b.apgar_5min||'?')+' '+esc(b.outcome||'')).join('; '):'none recorded'}</p>
+   <h4>PNC follow-up</h4><p class="muted">${pnc.length} visit(s).</p>
+   <h4>Referral</h4><p class="muted">${refs.length?refs.map(r=>'to '+esc(r.referred_to||'')+' ('+esc(r.urgency||'')+') — '+esc(r.reason||'')).join('; '):'none'}</p>
+   <button class="sec" onclick="window.print()" style="margin-top:10px">Print</button></div>`;
 }
 
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./service-worker.js').catch(()=>{}); }
