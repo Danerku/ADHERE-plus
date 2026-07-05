@@ -147,12 +147,13 @@ function home(){
 function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
 function ecPicker(id,label,def){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
   const days=Array.from({length:30},(_,i)=>i+1); const years=Array.from({length:7},(_,i)=>t.year-4+i);
-  return `<label>${label} <span class="muted" style="font-weight:400">E.C.</span>
-   <span style="display:flex;gap:4px">
-    <select id="${id}_d"><option value="">day</option>${days.map(d=>`<option${def&&d===t.day?' selected':''}>${d}</option>`).join('')}</select>
-    <select id="${id}_m"><option value="">month</option>${mons.map((m,i)=>`<option value="${i+1}"${def&&(i+1)===t.month?' selected':''}>${m}</option>`).join('')}</select>
-    <select id="${id}_y"><option value="">year</option>${years.map(y=>`<option${y===t.year?' selected':''}>${y}</option>`).join('')}</select>
-   </span></label>`; }
+  return `<label>${label} <span class="muted" style="font-weight:400">(Ethiopian calendar)</span>
+   <span style="display:flex;gap:6px;flex-wrap:wrap">
+    <select id="${id}_d" style="min-width:80px"><option value="">Day</option>${days.map(d=>`<option${def&&d===t.day?' selected':''}>${d}</option>`).join('')}</select>
+    <select id="${id}_m" style="min-width:135px"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${def&&(i+1)===t.month?' selected':''}>${m}</option>`).join('')}</select>
+    <select id="${id}_y" style="min-width:90px"><option value="">Year</option>${years.map(y=>`<option${y===t.year?' selected':''}>${y}</option>`).join('')}</select>
+   </span>
+   <span class="muted" style="font-weight:400;font-size:11px">format: Day &middot; Month &middot; Year</span></label>`; }
 function ecGet(id){ const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).value, y=($('#'+id+'_y')||{}).value;
   return (d&&m&&y&&window.Ethiopian)?Ethiopian.toGreg(+y,+m,+d):null; }
 function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
@@ -177,7 +178,7 @@ async function register(){
     <label>Chronic hypertension<select id="chtn"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
     <label>Diabetes<select id="dm"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
     <label>Cardiac / renal disease<select id="crd"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    ${ecPicker('lnmp','LNMP')}
+    ${ecPicker('lnmp','Last menstrual period')}
     <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option><option value="highrisk">High risk</option></select></label>
     <label>Ruptured membrane<select id="rm"><option value="0">No</option><option value="1">Yes</option></select></label>
    </div><p class="muted" id="edd"></p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
@@ -237,10 +238,11 @@ async function partograph(id){
      <div class="muted" style="font-size:11px;margin-top:2px">Clinical decision support — an aid to the provider's judgement, not a diagnosis.</div>
      <div style="margin-top:6px"><button class="sec" id="ack">Acknowledge</button><button class="sec" id="ovr">Override</button> <span class="muted" id="hitl"></span></div>
     </div></div>
+    <div class="card" id="monsched"></div>
     <div class="card"><b class="muted">Risk trajectory</b><div id="traj"></div></div>
     <div class="card"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div id="gauge"></div>
       <div style="flex:1"><b class="muted">Guideline adherence</b><div id="prompts" class="muted">record an observation to evaluate</div></div></div></div>`;
-  drawPG(id); drawVitals(id); renderTraj(id);
+  drawPG(id); drawVitals(id); renderTraj(id); renderMonSched(id,obs);
   if(locked){ ['hrs','cvx','fhr','ctx','mld','dsc','amn','cap','sbp','tmp','uprot','uacet','rec'].forEach(k=>{const el=$('#'+k); if(el)el.disabled=true;}); const rb=$('#rec'); if(rb){ rb.textContent='Delivered - partograph closed'; rb.className='sec'; } }
   $('#rec').onclick=async()=>{
     if(locked) return;
@@ -250,7 +252,7 @@ async function partograph(id){
     const mld3=Math.max(0,Math.min(3,Math.round(o.mld)||0));
     // Save the observation FIRST — a failed save must never show a misleading chart/score.
     const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
-    OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id);
+    OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id); obs.push({obs_datetime:new Date().toISOString().slice(0,19).replace('T',' ')}); renderMonSched(id,obs);
     const mecon=(o.amn==='M')?1:0;
     const feat=Object.assign({},FEAT_DEFAULTS,MF,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:Math.round(o.sbp*0.65),temp:o.tmp});
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
@@ -284,6 +286,16 @@ async function partograph(id){
   };
   $('#ack').onclick=async()=>{ if(lastScoreId[id]){ try{ await api('PATCH','risk_scores/'+lastScoreId[id]); $('#hitl').textContent='acknowledged (saved)'; }catch(e){ $('#hitl').textContent='acknowledged (queued)'; } } else $('#hitl').textContent='record a score first'; };
   $('#ovr').onclick=async()=>{ const la=lastAI[id]||{p:0,band:'green'}; await api('POST','risk_scores',{episode_id:+id,model_version:'override',probability:la.p.toFixed(4),band:la.band,override_reason:'clinician judgement',provider_ack:1}); $('#hitl').textContent='override logged'; };
+}
+function renderMonSched(id,obs){ const el=$('#monsched'); if(!el) return;
+  const last=(obs&&obs.length)?obs[obs.length-1]:null;
+  const lt=last?new Date(String(last.obs_datetime||last.recorded_at||'').replace(' ','T')):null;
+  if(!lt||isNaN(lt.getTime())){ el.innerHTML='<b class="muted">Monitoring schedule</b><div class="muted" style="font-size:12px">Record the first reading to start the schedule.</div>'; return; }
+  const mins=Math.max(0,Math.round((Date.now()-lt.getTime())/60000));
+  const sched=[['Fetal heart rate',30],['Contractions',30],['Pulse',30],['Temperature',120],['Blood pressure',240],['Cervix / descent',240]];
+  const rows=sched.map(function(s){ const over=mins-s[1]; const st=over>=0?('<span class="pill red">due now'+(over>0?(' (overdue '+over+'m)'):'')+'</span>'):('<span class="pill green">in '+(-over)+'m</span>'); return '<tr><td>'+esc(s[0])+'</td><td>every '+s[1]+'m</td><td>'+st+'</td></tr>'; }).join('');
+  const win=mins<30?'30-minute':(mins<120?'2-hour':(mins<240?'4-hour':'overdue &mdash; escalate'));
+  el.innerHTML='<b class="muted">Monitoring schedule</b> <span class="muted" style="font-size:12px">&mdash; '+mins+' min since last reading &middot; '+win+' assessment window (classic WHO partograph)</span><table style="margin-top:6px"><tr><th>Parameter</th><th>Frequency</th><th>Status</th></tr>'+rows+'</table>';
 }
 function renderTraj(id){ const h=(BTS[id]&&BTS[id].history)||[]; if(!h.length){ $('#traj').innerHTML='<span class="muted">no visits scored yet</span>'; return; }
   const series=h.map(p=>({x:p.at,y:p.probability,lo:p.ci[0],hi:p.ci[1]}));
@@ -479,16 +491,11 @@ const ANC_ITEMS=[
  ['OBS_BW_GT4500','obstetric_history','Birth weight of last baby > 4500 g'],
  ['OBS_PREV_PREECLAMPSIA','obstetric_history','Last pregnancy: admitted for pre-eclampsia or eclampsia'],
  ['OBS_PREV_SURGERY','obstetric_history','Previous surgery on the reproductive tract'],
- ['CUR_MULTIPLE','current_pregnancy','Diagnosed or suspected multiple pregnancy'],
+ ['CUR_MULTIPLE','current_pregnancy','Suspected multiple pregnancy'],
  ['CUR_AGE_LT16','current_pregnancy','Age less than 16 years'],
  ['CUR_AGE_GT40','current_pregnancy','Age more than 40 years'],
- ['CUR_RH_ISO','current_pregnancy','Rh (-) isoimmunisation in current or previous pregnancy'],
  ['CUR_BLEEDING','current_pregnancy','Vaginal bleeding'],
- ['CUR_PELVIC_MASS','current_pregnancy','Pelvic mass'],
- ['CUR_DBP_GE90','current_pregnancy','Diastolic blood pressure 90 mmHg or more at booking'],
  ['MED_DIABETES','general_medical','Diabetes mellitus'],
- ['MED_RENAL','general_medical','Renal disease'],
- ['MED_CARDIAC','general_medical','Cardiac disease'],
  ['MED_CHRONIC_HTN','general_medical','Chronic hypertension'],
  ['MED_OTHER_SEVERE','general_medical','Any other severe medical condition (TB, HIV, cancer, DVT...)']
 ];
@@ -756,7 +763,7 @@ const BEMONC=[
 async function bemoncScreen(id){
   const existing=await api('GET','bemonc?episode='+id).catch(()=>[]);
   const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
-  app().innerHTML=nav()+`<div class="card"><h3>BEmONC care given — episode ${esc(id)}</h3>
+  app().innerHTML=nav()+`<div class="card"><h3>Basic Emergency Obstetric &amp; Newborn Care (BEmONC) — episode ${esc(id)}</h3>
    <p class="muted">Record the emergency obstetric &amp; newborn signal functions. "Referred" = indicated but not available here (needs hospital / CEmONC).</p>
    ${BEMONC.map(it=>{const v=prev[it[0]]||'not_needed'; return `<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px">${esc(it[1])}
      <select data-code="${it[0]}" style="width:170px"><option value="not_needed"${v==='not_needed'?' selected':''}>Not needed</option><option value="given"${v==='given'?' selected':''}>Given</option><option value="referred"${v==='referred'?' selected':''}>Referred (unavailable)</option></select></label></div>`;}).join('')}
@@ -789,7 +796,7 @@ async function patientHub(id){
   if(ME.role==='observer') tiles=[tile('#report/'+id,'Care summary')];   // read-only role: view the summary, no data-entry screens
   else if(cat==='anc') tiles=[tile('#anc/'+id,'ANC screening'),tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
   else if(cat==='pnc') tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#bemonc/'+id,'BEmONC care'),tile('#handover/'+id,'Handover'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''}</p>
     <div class="hubgrid">${tiles.join('')}</div></div>`;
