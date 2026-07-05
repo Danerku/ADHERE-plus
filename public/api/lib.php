@@ -8,7 +8,7 @@ if($__origin && in_array($__origin,$__allow,true)){
   header('Vary: Origin');
   header('Access-Control-Allow-Credentials: true');
   header('Access-Control-Allow-Headers: Content-Type');
-  header('Access-Control-Allow-Methods: GET,POST,PATCH,OPTIONS');
+  header('Access-Control-Allow-Methods: GET,POST,PATCH,DELETE,OPTIONS');
 }
 if(($_SERVER['REQUEST_METHOD']??'')==='OPTIONS'){ http_response_code(204); exit; }
 $__secure=(!empty($_SERVER['HTTPS'])||($_SERVER['HTTP_X_FORWARDED_PROTO']??'')==='https');

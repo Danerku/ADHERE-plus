@@ -59,14 +59,14 @@ function route(){
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
-    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub}[screen]||home)(arg);
+    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit}[screen]||home)(arg);
 }
 
 function login(){
   app().innerHTML='';
   const c=el(`<div class="card" style="max-width:360px;margin:48px auto">
     <h3 style="justify-content:center">Sign in</h3>
-    <p class="muted" style="text-align:center;margin-top:-6px">ADHERE+ Maternal &amp; Newborn Care</p>
+    <p class="muted" style="text-align:center;margin-top:-6px">ADHERE+ : MCH &mdash; AI Decision Support</p>
     <label>Username<input id="u" autocomplete="username" autofocus></label>
     <label style="margin-top:8px">Password<input id="p" type="password" autocomplete="current-password"></label>
     <button class="act" id="go" style="margin-top:14px;width:100%">Sign in</button>
@@ -100,21 +100,42 @@ function home(){
   $('#chpw').onclick=async()=>{ const r=await api('POST','password',{current:cpw.value,new:npw.value}); if(r&&r.ok){ $('#pwm').textContent=' updated'; cpw.value='';npw.value=''; } else $('#pwm').textContent=' '+((r&&r.error)||'error'); };
 }
 
+// Ethiopian-calendar date entry: 3 selects (day/month/year E.C.) -> stores Gregorian YYYY-MM-DD
+function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
+function ecPicker(id,label,def){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
+  const days=Array.from({length:30},(_,i)=>i+1); const years=Array.from({length:7},(_,i)=>t.year-4+i);
+  return `<label>${label} <span class="muted" style="font-weight:400">E.C.</span>
+   <span style="display:flex;gap:4px">
+    <select id="${id}_d"><option value="">day</option>${days.map(d=>`<option${def&&d===t.day?' selected':''}>${d}</option>`).join('')}</select>
+    <select id="${id}_m"><option value="">month</option>${mons.map((m,i)=>`<option value="${i+1}"${def&&(i+1)===t.month?' selected':''}>${m}</option>`).join('')}</select>
+    <select id="${id}_y"><option value="">year</option>${years.map(y=>`<option${y===t.year?' selected':''}>${y}</option>`).join('')}</select>
+   </span></label>`; }
+function ecGet(id){ const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).value, y=($('#'+id+'_y')||{}).value;
+  return (d&&m&&y&&window.Ethiopian)?Ethiopian.toGreg(+y,+m,+d):null; }
+function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
+
 async function register(){
   app().innerHTML=nav()+`<div class="card"><h3>Register / admit</h3>
    <div class="grid">
     <label>MRN<input id="mrn"></label><label>First name<input id="fn"></label>
     <label>Father name<input id="fa"></label><label>Grandfather<input id="gf"></label>
-    <label>Age<input id="age" type="number"></label><label>Phone<input id="ph"></label>
+    <label>Age<input id="age" type="number"></label>
+    <label>Marital status<select id="ms"><option value="married">Married</option><option value="single">Single</option><option value="divorced">Divorced</option><option value="widowed">Widowed</option></select></label>
+    <label>Phone<input id="ph" placeholder="09..."></label><label>Kebele<input id="kb"></label>
+    <label>Next of kin<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
     <label>Gravida<input id="gr" type="number"></label><label>Para<input id="pa" type="number"></label>
+    ${ecPicker('lnmp','LNMP')}
     <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option><option value="highrisk">High risk</option></select></label>
     <label>Ruptured membrane<select id="rm"><option value="0">No</option><option value="1">Yes</option></select></label>
-   </div><button class="act" id="save" style="margin-top:12px">Register</button><p class="muted" id="m"></p></div>`;
+   </div><p class="muted" id="edd"></p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
+  const showEdd=()=>{ const l=ecGet('lnmp'); $('#edd').textContent=l?('Estimated delivery date: '+esc(l)+(window.Ethiopian?(' ('+Ethiopian.fmt(new Date(addDays(l,280)+'T00:00:00'))+')'):'')):''; };
+  ['lnmp_d','lnmp_m','lnmp_y'].forEach(x=>{ const el=$('#'+x); if(el) el.onchange=showEdd; });
   $('#save').onclick=async()=>{
-    const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value,phone:ph.value,gravida:+gr.value,para:+pa.value});
-    const wid=w.id; if(!wid){ $('#m').textContent='saved (offline queued)'; return; }
+    const lnmp=ecGet('lnmp'); const edd=lnmp?addDays(lnmp,280):null;
+    const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,gravida:+gr.value||null,para:+pa.value||null,lnmp:lnmp,edd:edd});
+    const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
     await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,ruptured_membrane:+rm.value,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
-    $('#m').textContent='Registered. → Labour ward'; setTimeout(()=>location.hash='#labour',600);
+    $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
   };
 }
 
@@ -198,11 +219,12 @@ async function facilities(){
      <label>Zone<input id="fzo"></label><label>Region<input id="fre" value="Amhara"></label>
      <label>DHIS2 org-unit code<input id="fdh" placeholder="optional"></label>
     </div><button class="act" id="fadd" style="margin-top:10px">Create facility</button> <span class="muted" id="fm"></span></div>
-    <div class="card"><h3>Facilities</h3><table><tr><th>ID</th><th>Name</th><th>Type</th><th>Woreda</th><th>Zone</th><th>Region</th><th>DHIS2</th></tr>
+    <div class="card"><h3>Facilities</h3><table><tr><th>ID</th><th>Name</th><th>Type</th><th>Woreda</th><th>Zone</th><th>Region</th><th>DHIS2</th><th></th></tr>
      ${list.map(f=>`<tr><td>${f.id}</td><td>${esc(f.name)}</td><td>${esc(f.facility_type||'')}</td>
-       <td>${esc(f.woreda||'')}</td><td>${esc(f.zone||'')}</td><td>${esc(f.region||'')}</td><td>${esc(f.dhis2_org_unit||'')}</td></tr>`).join('')}
+       <td>${esc(f.woreda||'')}</td><td>${esc(f.zone||'')}</td><td>${esc(f.region||'')}</td><td>${esc(f.dhis2_org_unit||'')}</td><td><a class="nav" href="#facilityedit/${f.id}">Edit</a> <button class="sec" data-del="${f.id}" data-nm="${esc(f.name)}">Delete</button></td></tr>`).join('')}
      </table><p class="muted">Each user and every patient belongs to a facility. Data is scoped per facility, and the dashboard/DHIS2 export roll up by facility.</p></div>`;
   $('#fadd').onclick=async()=>{ const r=await api('POST','facilities',{name:fnm.value,facility_type:fty.value,kebele:fke.value,woreda:fwo.value,zone:fzo.value,region:fre.value,dhis2_org_unit:fdh.value}); if(r.id){ facilities(); } else $('#fm').textContent=' '+(r.error||'error'); };
+  document.querySelectorAll('#app button[data-del]').forEach(b=>b.onclick=async()=>{ if(confirm('Delete facility "'+b.dataset.nm+'"? This only works if it has no users or patients.')){ const r=await api('DELETE','facilities/'+b.dataset.del); if(r&&r.ok){ facilities(); } else alert((r&&r.error)||'error'); } });
 }
 
 async function users(){
@@ -416,7 +438,7 @@ async function ancVisits(id){
   const past=await api('GET','anc_visits?episode='+id).catch(()=>[]);
   app().innerHTML=nav()+`<div class="card"><h3>ANC follow-up visit — episode ${esc(id)}</h3>
    <div class="grid">
-    <label>Visit date<input id="vd" type="date" value="${today()}"></label>
+    ${ecPicker('vd','Visit date',true)}
     <label>GA (weeks)<input id="ga" type="number"></label>
     <label>Weight (kg)<input id="wt" type="number" step="0.1"></label>
     <label>BP systolic<input id="bps" type="number"></label>
@@ -426,13 +448,13 @@ async function ancVisits(id){
     <label>Presentation<input id="pres" placeholder="cephalic / breech"></label>
     <label>Urine protein<input id="up" placeholder="nil / +"></label>
     <label>Hgb (g/dl)<input id="hb" type="number" step="0.1"></label>
-    <label>Next appointment<input id="na" type="date"></label>
+    ${ecPicker('na','Next appointment')}
    </div><label>Danger signs / note<input id="dn"></label>
    <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span></div>
    <div class="card"><h3>Previous visits</h3><table><tr><th>Date</th><th>GA</th><th>Wt</th><th>BP</th><th>FH</th><th>FHR</th><th>Next</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.fundal_height_cm||'')}</td><td>${esc(p.fetal_heart_rate||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No visits yet.</td></tr>'}
    </table></div>`;
-  $('#asave').onclick=async()=>{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:vd.value||null,ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,danger_note:dn.value,next_appointment:na.value||null});
+  $('#asave').onclick=async()=>{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,danger_note:dn.value,next_appointment:ecGet('na')});
     $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); };
 }
 
@@ -440,7 +462,7 @@ async function pncVisits(id){
   const past=await api('GET','pnc_visits?episode='+id).catch(()=>[]);
   app().innerHTML=nav()+`<div class="card"><h3>PNC follow-up visit — episode ${esc(id)}</h3>
    <h4>Mother</h4><div class="grid">
-    <label>Visit date<input id="vd" type="date" value="${today()}"></label>
+    ${ecPicker('vd','Visit date',true)}
     <label>PNC day<input id="pd" type="number" placeholder="1 / 3 / 7 / 42"></label>
     <label>Temp °C<input id="mt" type="number" step="0.1"></label>
     <label>BP systolic<input id="bps" type="number"></label>
@@ -458,7 +480,7 @@ async function pncVisits(id){
    <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Day</th><th>M temp</th><th>M BP</th><th>Bleeding</th><th>NB feeding</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(p.bleeding||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
    </table></div>`;
-  $('#psave').onclick=async()=>{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:vd.value||null,pnc_day:+pd.value||null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,danger_note:dn.value});
+  $('#psave').onclick=async()=>{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:+pd.value||null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,danger_note:dn.value});
     $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); };
 }
 
@@ -555,6 +577,22 @@ async function reportScreen(id){
    <h4>PNC follow-up</h4><p class="muted">${pnc.length} visit(s).</p>
    <h4>Referral</h4><p class="muted">${refs.length?refs.map(r=>'to '+esc(r.referred_to||'')+' ('+esc(r.urgency||'')+') — '+esc(r.reason||'')).join('; '):'none'}</p>
    <button class="sec" onclick="window.print()" style="margin-top:10px">Print</button></div>`;
+}
+
+async function facilityEdit(id){
+  if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  const list=await api('GET','facilities').catch(()=>[]); const f=(list||[]).find(x=>x.id==id)||{};
+  const types=['health_center','primary_hospital','general_hospital','other'];
+  app().innerHTML=nav()+`<div class="card"><h3>Edit facility</h3>
+    <div class="grid">
+     <label>Name<input id="fnm" value="${esc(f.name||'')}"></label>
+     <label>Type<select id="fty">${types.map(t=>`<option value="${t}"${f.facility_type===t?' selected':''}>${t.replace('_',' ')}</option>`).join('')}</select></label>
+     <label>Kebele<input id="fke" value="${esc(f.kebele||'')}"></label><label>Woreda<input id="fwo" value="${esc(f.woreda||'')}"></label>
+     <label>Zone<input id="fzo" value="${esc(f.zone||'')}"></label><label>Region<input id="fre" value="${esc(f.region||'')}"></label>
+     <label>DHIS2 org-unit code<input id="fdh" value="${esc(f.dhis2_org_unit||'')}"></label>
+    </div><button class="act" id="fsave" style="margin-top:10px">Save changes</button> <a class="nav" href="#facilities">Cancel</a> <span class="muted" id="fm"></span></div>`;
+  $('#fsave').onclick=async()=>{ const r=await api('PATCH','facilities/'+id,{name:fnm.value,facility_type:fty.value,kebele:fke.value,woreda:fwo.value,zone:fzo.value,region:fre.value,dhis2_org_unit:fdh.value});
+    if(r&&(r.ok||r.queued)){ $('#fm').textContent=' saved'; setTimeout(()=>location.hash='#facilities',600); } else $('#fm').textContent=' '+((r&&r.error)||'error'); };
 }
 
 async function patientHub(id){

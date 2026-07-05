@@ -43,6 +43,17 @@ try {
       $ft=in_array($b['facility_type']??'',['primary_hospital','health_center','general_hospital','other'])?$b['facility_type']:'health_center';
       $nid=insert('facilities',['name'=>$b['name'],'facility_type'=>$ft,'kebele'=>$b['kebele']??null,'woreda'=>$b['woreda']??null,'zone'=>$b['zone']??null,'region'=>$b['region']??'Amhara','dhis2_org_unit'=>$b['dhis2_org_unit']??null]);
       audit('create_facility','facilities',$nid); out(['id'=>$nid],201); }
+    if($m==='PATCH' && $id){ $b=body();
+      if(isset($b['facility_type']) && !in_array($b['facility_type'],['primary_hospital','health_center','general_hospital','other'])) unset($b['facility_type']);
+      $fields=array_intersect_key($b,array_flip(['name','facility_type','kebele','woreda','zone','region','dhis2_org_unit']));
+      foreach($fields as $k=>$v){ db()->prepare("UPDATE facilities SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      audit('update_facility','facilities',$id); out(['ok'=>true]); }
+    if($m==='DELETE' && $id){
+      $uc=db()->prepare("SELECT COUNT(*) c FROM users WHERE facility_id=?"); $uc->execute([$id]);
+      $wc=db()->prepare("SELECT COUNT(*) c FROM women WHERE facility_id=?"); $wc->execute([$id]);
+      if(($uc->fetch()['c']??0)>0 || ($wc->fetch()['c']??0)>0) err('facility still has users or patients — reassign them first',409);
+      db()->prepare("DELETE FROM facilities WHERE id=?")->execute([$id]);
+      audit('delete_facility','facilities',$id); out(['ok'=>true]); }
   }
 
   // ---- self-service password change (any logged-in user) ----
