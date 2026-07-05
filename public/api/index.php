@@ -23,26 +23,37 @@ try {
 
   // ---- users (admin only) ----
   if ($r==='users'){ require_role(['admin']);
-    if($m==='GET'){ $st=db()->query("SELECT id,username,full_name,role,cadre,facility_id,is_active,last_login FROM users ORDER BY id"); out($st->fetchAll()); }
-    if($m==='POST'){ $b=body();
-      if(empty($b['username'])||empty($b['password'])||empty($b['role'])) err('username, password and role are required');
-      if(!in_array($b['role'],['recorder','provider','observer','admin'])) err('invalid role');
-      $me=user(); $ex=db()->prepare("SELECT id FROM users WHERE username=?"); $ex->execute([$b['username']]); if($ex->fetch()) err('username already taken',409);
-      $nid=insert('users',['username'=>$b['username'],'password_hash'=>password_hash($b['password'],PASSWORD_DEFAULT),'full_name'=>$b['full_name']??$b['username'],'role'=>$b['role'],'cadre'=>$b['cadre']??null,'facility_id'=>$b['facility_id']??$me['facility_id']]);
-      audit('create_user','users',$nid); out(['id'=>$nid],201); }
+    if($m==='GET'){ $st=db()->query("SELECT id,username,full_name,role,cadre,facility_id,scope,is_active,last_login FROM users ORDER BY id"); out($st->fetchAll()); }
+    if($m==='POST'){ $me=user(); $b=body(); $rows=isset($b[0])?$b:[$b]; $created=[]; $errors=[];  // single object OR array (CSV bulk)
+      foreach($rows as $i=>$row){
+        $un=trim($row['username']??''); $pw=(string)($row['password']??''); $role=$row['role']??'';
+        if($un===''||$pw===''||$role===''){ $errors[]=['row'=>$i,'error'=>'username, password and role are required']; continue; }
+        if(!in_array($role,['recorder','provider','observer','supervisor','admin'])){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'invalid role']; continue; }
+        $ex=db()->prepare("SELECT id FROM users WHERE username=?"); $ex->execute([$un]); if($ex->fetch()){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'username already taken']; continue; }
+        $scope=in_array(($row['scope']??'facility'),['facility','woreda','zone','region'])?($row['scope']??'facility'):'facility';
+        $nid=insert('users',['username'=>$un,'password_hash'=>password_hash($pw,PASSWORD_DEFAULT),'full_name'=>$row['full_name']??$un,'role'=>$role,'cadre'=>$row['cadre']??null,'facility_id'=>$row['facility_id']??$me['facility_id'],'scope'=>$scope]);
+        $created[]=['id'=>$nid,'username'=>$un];
+      }
+      audit('create_user','users',$created[0]['id']??null,['count'=>count($created)]);
+      if(!isset($b[0])){ if($errors) err($errors[0]['error'], $errors[0]['error']==='username already taken'?409:400); out(['id'=>$created[0]['id']],201); }
+      out(['created'=>$created,'errors'=>$errors],201); }
     if($m==='PATCH' && $id){ $b=body(); $me=user();
       if(isset($b['is_active'])){ if((int)$id===(int)$me['id'] && !$b['is_active']) err('you cannot deactivate your own account'); db()->prepare("UPDATE users SET is_active=? WHERE id=?")->execute([$b['is_active']?1:0,$id]); }
-      if(isset($b['role']) && in_array($b['role'],['recorder','provider','observer','admin'])){ db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]); }
+      if(isset($b['role']) && in_array($b['role'],['recorder','provider','observer','supervisor','admin'])){ db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]); }
+      if(isset($b['scope']) && in_array($b['scope'],['facility','woreda','zone','region'])){ db()->prepare("UPDATE users SET scope=? WHERE id=?")->execute([$b['scope'],$id]); }
       if(!empty($b['password'])){ db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
       audit('update_user','users',$id); out(['ok'=>true]); }
   }
   if ($r==='facilities'){ require_role(['admin']);
     if($m==='GET'){ out(db()->query("SELECT id,name,facility_type,kebele,woreda,zone,region,dhis2_org_unit FROM facilities ORDER BY id")->fetchAll()); }
-    if($m==='POST'){ $b=body();
-      if(empty($b['name'])) err('facility name is required');
-      $ft=in_array($b['facility_type']??'',['primary_hospital','health_center','general_hospital','other'])?$b['facility_type']:'health_center';
-      $nid=insert('facilities',['name'=>$b['name'],'facility_type'=>$ft,'kebele'=>$b['kebele']??null,'woreda'=>$b['woreda']??null,'zone'=>$b['zone']??null,'region'=>$b['region']??'Amhara','dhis2_org_unit'=>$b['dhis2_org_unit']??null]);
-      audit('create_facility','facilities',$nid); out(['id'=>$nid],201); }
+    if($m==='POST'){ $b=body(); $rows=isset($b[0])?$b:[$b]; $created=[]; $errors=[];  // single object OR array (CSV bulk)
+      foreach($rows as $i=>$row){ if(empty($row['name'])){ $errors[]=['row'=>$i,'error'=>'facility name is required']; continue; }
+        $ft=in_array($row['facility_type']??'',['primary_hospital','health_center','general_hospital','other'])?$row['facility_type']:'health_center';
+        $nid=insert('facilities',['name'=>$row['name'],'facility_type'=>$ft,'kebele'=>$row['kebele']??null,'woreda'=>$row['woreda']??null,'zone'=>$row['zone']??null,'region'=>$row['region']??'Amhara','dhis2_org_unit'=>$row['dhis2_org_unit']??null]);
+        $created[]=['id'=>$nid,'name'=>$row['name']]; }
+      audit('create_facility','facilities',$created[0]['id']??null,['count'=>count($created)]);
+      if(!isset($b[0])){ if($errors) err('facility name is required'); out(['id'=>$created[0]['id']],201); }
+      out(['created'=>$created,'errors'=>$errors],201); }
     if($m==='PATCH' && $id){ $b=body();
       if(isset($b['facility_type']) && !in_array($b['facility_type'],['primary_hospital','health_center','general_hospital','other'])) unset($b['facility_type']);
       $fields=array_intersect_key($b,array_flip(['name','facility_type','kebele','woreda','zone','region','dhis2_org_unit']));
@@ -72,11 +83,11 @@ try {
     if($m==='POST'){ $u=require_role(['recorder','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       if(empty($b['mrn'])) err('MRN is required');
       $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
-      $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','lnmp','edd','facility_id','created_by'])));
+      $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','sms_consent','lnmp','edd','facility_id','created_by'])));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
-      $fields=array_intersect_key($b,array_flip(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','lnmp','edd']));
+      $fields=array_intersect_key($b,array_flip(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','sms_consent','lnmp','edd']));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
   }
 
@@ -184,6 +195,33 @@ try {
       $sallow=['partograph_obs'=>['episode_id','obs_datetime','hours_since_active','fetal_heart_rate','moulding','cervix_cm','contractions_per10','bp_systolic','temperature','recorded_by'],'checklist_responses'=>['episode_id','pause_point','item_code','response','recorded_by'],'danger_signs'=>['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']];
       if(isset($map[$ep])){ require_ep($payload['episode_id']??0); $payload['recorded_by']=$u['id']; $payload=array_intersect_key($payload,array_flip($sallow[$map[$ep]])); $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert($map[$ep],$payload)]; } }
     audit('sync',null,null,['count'=>count($applied)]); out(['applied'=>$applied]);
+  }
+
+  // ---- Supervisor dashboard (cross-facility rollup, read-only) ----
+  if ($r==='supervisor' && $m==='GET'){ $u=require_role(['supervisor','admin']); $ids=scoped_facility_ids($u);
+    if(!$ids){ out(['scope'=>$u['scope']??'facility','facilities'=>[]]); }
+    $in=implode(',',array_fill(0,count($ids),'?'));
+    $facs=db()->prepare("SELECT id,name,woreda,zone,region FROM facilities WHERE id IN ($in) ORDER BY name"); $facs->execute($ids); $facRows=$facs->fetchAll();
+    $grp=function($sql) use($ids){ $st=db()->prepare($sql); $st->execute($ids); $o=[]; foreach($st->fetchAll() as $x){ $o[(int)$x['fid']]=(int)$x['c']; } return $o; };
+    $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE service_category='labour' AND facility_id IN ($in) GROUP BY facility_id");
+    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in) GROUP BY e.facility_id");
+    $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) GROUP BY e.facility_id");
+    $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in) GROUP BY e.facility_id");
+    $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id IN ($in) GROUP BY e.facility_id");
+    $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
+      $rows[]=['id'=>$fid,'name'=>$f['name'],'woreda'=>$f['woreda'],'zone'=>$f['zone'],
+        'labour_episodes'=>$lab,'partographs_started'=>$ps,'partograph_completion'=>$lab?(int)round(100*$ps/$lab):0,
+        'deliveries'=>$deliv[$fid]??0,'red_alerts'=>$reds[$fid]??0,'referrals'=>$refs[$fid]??0]; }
+    out(['scope'=>$u['scope']??'facility','base_facility'=>(int)$u['facility_id'],'facilities'=>$rows]);
+  }
+
+  // ---- Reminders: list (supervisor/admin) + run scheduler (admin) ----
+  if ($r==='reminders'){
+    if($m==='GET'){ $u=require_role(['supervisor','admin']); $ids=scoped_facility_ids($u); if(!$ids)$ids=[0];
+      $in=implode(',',array_fill(0,count($ids),'?'));
+      $st=db()->prepare("SELECT r.*, w.first_name, w.father_name FROM reminders r LEFT JOIN women w ON w.id=r.woman_id WHERE r.facility_id IN ($in) ORDER BY r.id DESC LIMIT 300");
+      $st->execute($ids); out($st->fetchAll()); }
+    if($m==='POST' && $id==='run'){ require_role(['admin']); require __DIR__.'/reminders_lib.php'; out(reminders_run(db()), 200); }
   }
 
   err('not found: '.$r, 404);

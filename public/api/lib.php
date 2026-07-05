@@ -29,6 +29,22 @@ function audit($action,$entity=null,$entity_id=null,$detail=null){
 // Generic insert helper (whitelisted columns per table done by caller)
 function ep_facility_ok($eid){ $u=user(); if(!$u)return false; $st=db()->prepare("SELECT facility_id FROM episodes WHERE id=?"); $st->execute([$eid]); $r=$st->fetch(); return $r && $r['facility_id']==$u['facility_id']; }
 function require_ep($eid){ if(!ep_facility_ok($eid)) err('not found',404); }
+// Facilities this user may READ across (aggregate). Supervisors widen by scope; others = own facility.
+function scoped_facility_ids($u){
+  if(($u['role']??'')==='supervisor'){
+    $scope=$u['scope']??'facility';
+    $f=db()->prepare("SELECT woreda,zone,region FROM facilities WHERE id=?"); $f->execute([$u['facility_id']]); $row=$f->fetch();
+    if($row){
+      if($scope==='woreda' && $row['woreda']!==null){ $q=db()->prepare("SELECT id FROM facilities WHERE woreda<=>?"); $q->execute([$row['woreda']]); }
+      elseif($scope==='zone' && $row['zone']!==null){ $q=db()->prepare("SELECT id FROM facilities WHERE zone<=>?"); $q->execute([$row['zone']]); }
+      elseif($scope==='region' && $row['region']!==null){ $q=db()->prepare("SELECT id FROM facilities WHERE region<=>?"); $q->execute([$row['region']]); }
+      else { return [(int)$u['facility_id']]; }
+      $ids=array_map(function($r){return (int)$r['id'];}, $q->fetchAll());
+      return $ids?:[(int)$u['facility_id']];
+    }
+  }
+  return [(int)$u['facility_id']];
+}
 function insert($table,$data){
   $cols=array_keys($data); $ph=implode(',',array_fill(0,count($cols),'?'));
   $sql="INSERT INTO `$table` (`".implode('`,`',$cols)."`) VALUES ($ph)";
