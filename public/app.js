@@ -434,10 +434,17 @@ async function delivery(id){
    <label>APGAR 1<input id="a1" type="number" value="8"></label><label>APGAR 5<input id="a5" type="number" value="9"></label>
    <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="neonatal_death">Neonatal death</option></select></label>
    <label>Mother<select id="mo"><option value="well">Well</option><option value="near_miss">Near miss</option><option value="referred">Referred</option></select></label>
+   <label>Uterotonic within 1 min<select id="ut1"><option value="">-</option><option value="done">Done</option><option value="delayed">Delayed</option><option value="not">Not done</option></select></label>
+   <label>Uterotonic type<select id="utt"><option value="">-</option><option value="oxytocin">Oxytocin</option><option value="misoprostol">Misoprostol</option><option value="ergometrine">Ergometrine</option></select></label>
+   <label>Controlled cord traction<select id="cct"><option value="">-</option><option value="done">Done</option><option value="not">Not done</option><option value="noskill">Not done (no skilled attendant)</option></select></label>
+   <label>Uterine tone<select id="utn"><option value="">Not assessed</option><option value="firm">Firm</option><option value="atonic">Atonic</option></select></label>
+   <label>Massage if atony<select id="umsg"><option value="">-</option><option value="done">Done</option><option value="not_needed">Not needed</option><option value="not">Not done</option></select></label>
+   <label>Placenta<select id="plc"><option value="">-</option><option value="complete">Complete</option><option value="incomplete">Incomplete</option><option value="retained">Retained</option></select></label>
+   <label>Est. blood loss (ml)<input id="ebl" type="number" placeholder="ml"></label>
    </div><button class="act" id="s" style="margin-top:10px">Save &amp; send to PNC</button><span class="muted" id="m"></span></div>`;
   $('#s').onclick=async()=>{ const btn=$('#s'); btn.disabled=true;
     try{
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,baby_weight_g:+bw.value,baby_sex:sx.value,apgar_1min:+a1.value,apgar_5min:+a5.value,outcome:oc.value,maternal_outcome:mo.value});
+      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,baby_weight_g:+bw.value,baby_sex:sx.value,apgar_1min:+a1.value,apgar_5min:+a5.value,outcome:oc.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null)});
       // Newborn record is the source of truth for outcomes/analytics — create baby #1 here if none recorded yet.
       const existing=await api('GET','babies?episode='+id).catch(()=>[]);
       if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0});
@@ -615,11 +622,17 @@ async function babiesScreen(id){
     <label>APGAR 5<input id="a5" type="number" value="9"></label>
     <label>Resuscitated<select id="rs"><option value="0">No</option><option value="1">Yes</option></select></label>
     <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Neonatal death</option></select></label>
+    <label>Dried &amp; stimulated<select id="dr"><option value="">-</option><option value="done">Done</option><option value="not">Not done</option></select></label>
+    <label>Breathing at birth<select id="brb"><option value="">-</option><option value="normal">Normal</option><option value="stimulation">Needed stimulation</option><option value="resus">Needed resuscitation</option></select></label>
+    <label>Vitamin K<select id="vk"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option></select></label>
+    <label>Eye ointment (TTC)<select id="eo"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option></select></label>
+    <label>Cord care<select id="cc"><option value="">-</option><option value="chlorhexidine">Chlorhexidine</option><option value="dry">Dry</option><option value="other">Other</option></select></label>
+    <label>Newborn ARV (HIV-exposed)<select id="arv"><option value="">N/A</option><option value="given">Given</option><option value="not">Not given</option></select></label>
    </div><button class="act" id="bsave" style="margin-top:10px">Add baby</button> <span class="muted" id="bm"></span></div>
    <div class="card"><h3>Babies</h3><table><tr><th>#</th><th>Sex</th><th>Weight</th><th>APGAR</th><th>Resus</th><th>Outcome</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.birth_order||'')}</td><td>${esc(p.sex||'')}</td><td>${esc(p.weight_g||'')}</td><td>${esc((p.apgar_1min||'')+'/'+(p.apgar_5min||''))}</td><td>${p.resuscitated==1?'yes':'no'}</td><td>${esc(p.outcome||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No babies recorded yet.</td></tr>'}
    </table></div>`;
-  $('#bsave').onclick=async()=>{ const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value});
+  $('#bsave').onclick=async()=>{ const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_vitamin_k:(vk.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),enc_arv:(arv.value||null)});
     $('#bm').textContent=(r&&(r.ids||r.queued))?' added':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>babiesScreen(id),400); } finally{ b.disabled=false; } };
 }
 

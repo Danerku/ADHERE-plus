@@ -129,13 +129,13 @@ try {
   // ---- checklist / danger signs / delivery / anc screening / handover / messages ----
   $simple=['checklist'=>['checklist_responses',['episode_id','pause_point','item_code','response','recorded_by']],
            'danger_signs'=>['danger_signs',['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']],
-           'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','recorded_by']],
+           'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','blood_loss_ml','recorded_by']],
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
            'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
            'anc_visits'=>['anc_visits',['episode_id','visit_date','contact_no','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','danger_note','next_appointment','recorded_by']],
            'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','danger_note','recorded_by']],
-           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','recorded_by']],
+           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','enc_dried','enc_breathing','enc_vitamin_k','enc_eye_ointment','enc_cord_care','enc_arv','recorded_by']],
            'maternal_vitals'=>['maternal_vitals',['episode_id','obs_datetime','bp_systolic','bp_diastolic','pulse','temperature','resp_rate','spo2','note','recorded_by']],
            'bemonc'=>['bemonc_care',['episode_id','item_code','response','note','recorded_by']],
            'messages'=>['messages',['episode_id','from_user_id','to_user_id','body']]];
