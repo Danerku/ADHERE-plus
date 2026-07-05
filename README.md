@@ -5,7 +5,7 @@ platform, with an on-device AI risk score, offline (PWA) operation, audit loggin
 and DHIS2/FHIR interoperability for MoH scale-up.
 
 ## Status
-- [x] Database schema (schema.sql) — 15 tables, validated
+- [x] Database schema — canonical files in docker/init/ (schema + migrations)
 - [x] AI risk model (app/model/risk_model.json) — SYNTHETIC but calibrated to Ethiopia/SSA
       meta-analyses (see model_card.md). AUROC 0.868. Retrain on real data before use.
 - [x] JS on-device scorer (app/model/score.js) — matches Python model exactly
@@ -26,12 +26,12 @@ and DHIS2/FHIR interoperability for MoH scale-up.
 See DEPLOY.md — `cd docker && docker compose up --build` → http://localhost:8080
 
 ## Layout
-- schema.sql — database
-- scripts/generate_and_train.py — reproducible synthetic cohort + model training
+- docker/init/*.sql — canonical database schema + migrations
+- scripts/generate_and_train.py — reproducible simulated cohort + model training
 - model_card.md — model provenance, parameters, citations
 - app/model/ — model + JS scorer
 - public/ — web root (SPA + PWA + PHP API under public/api)
 - docker/ — Dockerfile, docker-compose.yml, DB init (schema + seed)
-- data/synthetic_sample.csv — 400-row sample
+- data/simulated_sample.csv — 400-row sample
 
 

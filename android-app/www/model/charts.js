@@ -13,10 +13,10 @@
     }
     [0,0.25,0.5,0.75,1].forEach(t=>{var yv=yMin+t*(yMax-yMin);s+='<line x1="'+mL+'" y1="'+Y(yv)+'" x2="'+(W-mR)+'" y2="'+Y(yv)+'" stroke="#eee"/><text x="'+(mL-6)+'" y="'+(Y(yv)+4)+'" text-anchor="end" font-size="10" fill="#8a8880">'+(o.pct?Math.round(yv*100)+'%':yv.toFixed(1))+'</text>';});
     if(o.band){ var up=series.map((d,i)=>X(i)+','+Y(d.hi)).join(' '); var dn=series.map((d,i)=>X(i)+','+Y(d.lo)).reverse().join(' ');
-      s+='<polygon points="'+up+' '+dn+'" fill="#1f4e7922"/>'; }
+      s+='<polygon points="'+up+' '+dn+'" fill="#0f766e22"/>'; }
     var pts=series.map((d,i)=>X(i)+','+Y(d.y)).join(' ');
-    s+='<polyline points="'+pts+'" fill="none" stroke="'+(o.stroke||'#1f4e79')+'" stroke-width="2"/>';
-    series.forEach((d,i)=>{s+='<circle cx="'+X(i)+'" cy="'+Y(d.y)+'" r="3" fill="'+(o.stroke||'#1f4e79')+'"/>';
+    s+='<polyline points="'+pts+'" fill="none" stroke="'+(o.stroke||'#0f766e')+'" stroke-width="2"/>';
+    series.forEach((d,i)=>{s+='<circle cx="'+X(i)+'" cy="'+Y(d.y)+'" r="3" fill="'+(o.stroke||'#0f766e')+'"/>';
       if(d.x)s+='<text x="'+X(i)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="#8a8880">'+d.x+'</text>';});
     return '<svg viewBox="0 0 '+W+' '+H+'" width="100%">'+s+'</svg>';
   }
@@ -31,7 +31,7 @@
   function bars(data, o){ o=o||{}; var W=o.w||560,H=o.h||180,mL=38,mR=12,mT=12,mB=40;
     var mx=Math.max(...data.map(d=>d.v),1),n=data.length,bw=(W-mL-mR)/n*0.6;
     var s=''; data.forEach((d,i)=>{var x=mL+(i+0.2)*((W-mL-mR)/n),h=(d.v/mx)*(H-mT-mB),y=H-mB-h;
-      s+='<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+h+'" rx="3" fill="'+(d.flag?'#e24b4a':'#378add')+'"/>'
+      s+='<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+h+'" rx="3" fill="'+(d.flag?'#b3261e':'#0d9488')+'"/>'
        +'<text x="'+(x+bw/2)+'" y="'+(y-4)+'" text-anchor="middle" font-size="10" fill="#5f5e5a">'+d.v+'</text>'
        +'<text x="'+(x+bw/2)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="#8a8880">'+d.x+'</text>';});
     return '<svg viewBox="0 0 '+W+' '+H+'" width="100%">'+s+'</svg>';

@@ -1,4 +1,3 @@
-// Placeholder — do not edit or rely on this file.
-// The real web bundle is assembled fresh from /public by the GitHub Actions
-// APK build (.github/workflows/build-apk.yml → "Assemble web assets into www/").
-// This committed copy is intentionally a placeholder so no stale/demo build can ship.
+// Generated file — do not edit. The real bundle is assembled from /public by
+// GitHub Actions (.github/workflows/build-apk.yml) or locally via
+// android-app/assemble-www.sh. This placeholder prevents a stale/demo copy shipping.

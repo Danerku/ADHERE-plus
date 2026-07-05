@@ -9,11 +9,10 @@ docker compose up --build
 - App:  http://localhost:8080
 - DB:   MySQL on localhost:3307 (schema + seed auto-loaded on first run)
 
-Demo logins (password `demo1234`): `recorder1`, `provider1`, `observer1`, `admin`.
+First sign-in: username `admin` (bootstrap account created by the seed). **Change this password immediately after first login.** Then create your facilities and staff from the Admin screens.
 
-Try the flow: sign in as `provider1` → Labour ward → open the seeded woman →
-Partograph → Record & score (AI band updates) → Checklist / Danger / Delivery.
-Register new women as `recorder1`.
+Try the flow: Register a woman → Labour ward → open her → Partograph →
+Record & score (AI band updates) → Checklist / Danger / Delivery.
 
 ## What it includes
 - PHP 8 + MySQL 8 backend (REST API under /api): auth (bcrypt, role-based), women,
@@ -24,14 +23,19 @@ Register new women as `recorder1`.
   on-device AI band) → checklist → danger-sign → delivery → PNC.
 - On-device AI model (app/model/risk_model.json) scored in the browser (offline).
 
-## Deploy to an Epic subdomain / small VM
-1. Provision a small Linux VM with Docker (or any PHP 8 + MySQL host).
-2. Copy this folder up;  `cd docker && docker compose up -d --build`.
-3. Point a subdomain (e.g. partograph-dev.epichealthsystems.org) at the host; put
-   Nginx/Caddy in front for TLS (Let's Encrypt) → proxy to port 8080.
-4. Change all default passwords; set strong DB credentials via the compose env.
-5. Keep the DEV instance to synthetic / de-identified data only. Real patient data
-   must stay in an Ethiopian-compliant environment (data residency).
+## Deploy to a small VM (production)
+Use the production compose under `deploy/` (Caddy auto-HTTPS, env-based DB
+credentials) — NOT the `docker/` dev compose (default creds, MySQL on 3307,
+for local development only).
+1. Provision a small Linux VM with Docker + Docker Compose.
+2. Clone the repo; `cd deploy && cp .env.example .env` and set `SITE_DOMAIN`
+   and strong DB passwords.
+3. `docker compose --env-file .env -f docker-compose.prod.yml up -d --build`.
+   Caddy issues a Let's Encrypt certificate for `SITE_DOMAIN` automatically.
+4. Sign in as `admin`, change the password immediately, create real users.
+5. Keep any pre-production instance to simulated / de-identified data only.
+   Real patient data must stay in an Ethiopia-compliant, data-resident
+   environment.
 
 ## Standards / scale-up hooks (already wired)
 - DHIS2 indicator export endpoint + facilities.dhis2_org_unit (Master Facility Registry id).
@@ -42,4 +46,4 @@ Register new women as `recorder1`.
 
 ## Before real use
 - Retrain the model on real de-identified data; regenerate model_card + validation.
-- Independent security review; clinician sign-off; IRB/regulatory clearance.
+- Independent security 

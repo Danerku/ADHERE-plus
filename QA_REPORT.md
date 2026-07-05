@@ -48,7 +48,7 @@ caught are now fixed and re-verified (14/14 post-fix E2E checks pass):
 |---|---|---|
 | 1 | Docker seed/schema duplicate usernames → first-run failure | Removed all seed inserts from schema.sql / 01-schema.sql; demo seed lives only in 02-seed.sql (0 vs 1 verified) |
 | 3 | PHP API bundled inside Android web assets | Deleted android-app/www/api; added sync-web.sh that excludes api; workflow runs it |
-| 6 | Model non-monotonic / no clinical guardrails / feature subset | Added deterministic clinical red-flag layer that can only ESCALATE the AI band (severe BP, severe/abnormal FHR, moulding, fever, arrested/protracted labour); neutral defaults for uncollected features; "research/demo — not for clinical use" banner in the UI |
+| 6 | Model non-monotonic / no clinical guardrails / feature subset | Added deterministic clinical red-flag layer that can only ESCALATE the AI band (severe BP, severe/abnormal FHR, moulding, fever, arrested/protracted labour); neutral defaults for uncollected features; "pre-clinical — not for clinical use" banner in the UI |
 | 7 | Acknowledge not persisted | Added PATCH /risk_scores/{id} (sets provider_ack); front-end captures the score id and persists the acknowledgement |
 | 8 | Android packaging | applicationId + namespace = et.epichealthsystems.adhere; app_name = "ADHERE+ MCH"; removed duplicate/mis-packaged MainActivity; fixed MainActivity package; chmod +x gradlew; corrected CI workflow paths (repo root = android-app) |
 | 5 | Offline login | Identity cached in localStorage; restored on offline restart with an "offline" indicator; writes still queue |
@@ -75,7 +75,7 @@ found 3 still-broken things. All now fixed and re-verified (11/11 E2E incl. hash
 | Medium | 500 handler leaked exception/SQL text | Logs server-side, returns generic error |
 | Low | Session fixation; `flush()` retried 4xx forever; action-line rule never fired; no DB healthcheck | `session_regenerate_id(true)` on login; drop 4xx from queue; feed `past_action_line`; MySQL healthcheck + `depends_on: service_healthy` (dev + prod) |
 
-Deferred (documented, non-blocking for demo): offline registration episode linkage; per-user
+Deferred (documented, non-blocking for the preview): offline registration episode linkage; per-user
 offline queue namespacing; facility-filtered analytics; full CSRF tokens. Real-data retraining,
 security review, and clinician/IRB sign-off remain required before any real use.
 
@@ -83,14 +83,14 @@ security review, and clinician/IRB sign-off remain required before any real use.
 
 ## Third Fable pass — confirmation + final closure
 Fable confirmed items 1,2,4,5,6,7,8,9,10 CLOSED and the build "functionally CLEAN for the
-Docker demo and the APK build" (nothing blocks `docker compose up`, the happy path, or CI APK).
+Docker preview and the APK build" (nothing blocks `docker compose up`, the happy path, or CI APK).
 It correctly caught that facility-scoping item 3/3b was incomplete (an earlier replace was a
 silent no-op). Now closed:
 - `$simple` POST batch: `require_ep()` validates every row's facility before any insert.
 - `/sync` loop: `require_ep()` per queued item.
 - `risk_scores` PATCH (ack): resolves the score's episode and facility-checks it.
 - Nit: `require_ep($_GET['episode']??0)` avoids an undefined-key warning on a param-less GET.
-Braces/parens balanced; JS clean. No blocking bugs remain for a Docker demo or APK build.
+Braces/parens balanced; JS clean. No blocking bugs remain for a Docker preview or APK build.
 Deferred (non-blocking, documented): facility-scoped analytics counts, per-user offline queue,
 full CSRF tokens. Real-data retraining, security review, and clinician/IRB sign-off remain
 required before any real clinical use.

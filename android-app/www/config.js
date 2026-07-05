@@ -1,1 +1,1 @@
-window.ADHERE_API_BASE = "https://partograph-dev.epichealthsystems.org/";
+window.ADHERE_API_BASE = "https://159-89-12-45.sslip.io/";

@@ -47,7 +47,7 @@ You'll rent a small always-on computer in the cloud and run one command on it.
      Easiest: make the repo Public in A1, or tell me and I'll show the token step.
 3. Wait ~2–3 minutes. When it finishes, open in your browser:
    `https://203-0-113-9.sslip.io` (your IP). You should see the ADHERE+ login.
-   Demo logins: `provider1` / `demo1234`.
+   Sign in as `admin` (bootstrap account — change the password immediately after first login).
 
 ## A4. (Optional) Use a real web address later
 If Epic has a domain, point a sub-domain (e.g. partograph.epichealthsystems.org) at the
@@ -95,10 +95,10 @@ No Android Studio needed — GitHub builds the app file (APK) for you.
 # What I can do for you
 - Set the server address in `config.js` for you (just tell me the address).
 - Walk you through any screen live.
-- Once it's up, create your real user accounts and remove the demo logins.
+- Once it's up, create your real user accounts.
 
 # Important reminders
-- This is a research/demo build with a **synthetic** AI model — **not for clinical use**
+- This is a pre-clinical build with a **simulated** AI model — **not for clinical use**
   until it's retrained on real data, security-reviewed, and cleared by ethics/clinicians.
-- Keep the demo instance to **non-real / de-identified** data (real patient data must stay
+- Keep this instance to **non-real / de-identified** data (real patient data must stay
   in an Ethiopian-compliant system).

@@ -54,13 +54,6 @@ header#top button:hover{background:rgba(255,255,255,.26)}
 /* online/offline chip in header */
 #net.pill{margin-left:6px; background:rgba(255,255,255,.16); color:#fff; border:1px solid rgba(255,255,255,.3)}
 
-/* Evaluation banner */
-#demo-banner,.eval-banner{
-  background:var(--brand-050); color:var(--brand-700);
-  font-size:12px; font-weight:600; letter-spacing:.3px;
-  padding:6px 16px; text-align:center; border-bottom:1px solid var(--brand-100);
-}
-
 /* ---------- Layout ---------- */
 main{max-width:900px; margin:0 auto; padding:20px 16px 40px}
 

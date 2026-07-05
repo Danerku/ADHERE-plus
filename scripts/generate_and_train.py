@@ -1,5 +1,5 @@
 """
-Clinically-grounded synthetic labour cohort + intrapartum risk model.
+Clinically-grounded simulated labour cohort + intrapartum risk model.
 Simulates ~3,500 labours, each with several partograph examinations, producing
 ~15k exam-rows. Complications arise from realistic mechanisms (obstructed labour,
 fetal distress, pre-eclampsia/eclampsia, chorioamnionitis/sepsis, APH), with
@@ -161,19 +161,19 @@ model={"features":FEATS,
        "learning_rate":float(clf.learning_rate),
        "trees":_trees,
        "thresholds":{"amber":0.33,"red":0.60},
-       "version":"synthetic-clinical-eth-1.1",
+       "version":"simulated-clinical-eth-1.1",
        "auroc":round(float(auc),3),"brier":round(float(brier),3),
        "note":"Trained on a clinically-grounded SYNTHETIC cohort (~3,500 labours) whose complication "
               "prevalences are anchored to Ethiopia/SSA peer-reviewed meta-analyses (obstructed labour ~11.8%, "
               "pre-eclampsia ~11.5% national / ~14% Amhara, birth asphyxia ~19-23%, puerperal sepsis ~14.8%, APH). "
-              "See model_card.md for parameters and citations. For pipeline/UX and demo only; retrain and "
+              "See model_card.md for parameters and citations. For pipeline/UX only; retrain and "
               "revalidate on real de-identified records before any clinical or evaluation use."}
 open("app/model/risk_model.json","w").write(json.dumps(model))
 print("exported app/model/risk_model.json  trees=",len(model['trees']))
 
 # data sample (first 400 rows) for transparency
 import csv
-with open("data/synthetic_sample.csv","w",newline="") as f:
+with open("data/simulated_sample.csv","w",newline="") as f:
     wtr=csv.writer(f); wtr.writerow(FEATS+["label"])
     for i in range(400): wtr.writerow(list(X[i].astype(object))+[int(Y[i])])
-print("wrote data/synthetic_sample.csv (400 rows)")
+print("wrote data/simulated_sample.csv (400 rows)")

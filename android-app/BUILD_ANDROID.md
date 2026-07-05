@@ -6,15 +6,16 @@ runs fully offline on the tablet. It talks to your deployed server only for data
 ## One-time setup on your machine
 Install: Node.js 18+, Android Studio (with Android SDK + a JDK).
 
-## Point the app at your server
-Edit `www/config.js`:
+## Assemble the web bundle (required before a local build)
+`www/` is **generated from `/public`** — don't edit it by hand (a placeholder ships in git so no stale copy is packaged). Assemble the real bundle first:
 ```
-window.ADHERE_API_BASE = "https://<your-server-domain>/";   // must end with a slash
+cd android-app
+bash sync-web.sh              # copies /public into www/ and writes www/config.js (the API base)
 ```
+To point the app at a different server, edit the `ADHERE_API_BASE` URL near the top of `sync-web.sh`, then re-run it. The cloud CI build (below) runs this assemble step for you automatically, so **the downloadable APK is always complete and current** — the local step here is only needed if you build on your own machine.
 
 ## Build
 ```
-cd android-app
 npm install
 npx cap sync android          # copies www/ (incl. model) into the Android project
 npx cap open android          # opens Android Studio

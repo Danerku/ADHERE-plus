@@ -1,4 +1,4 @@
-{"version":"mch-rules-1.1","note":"Representative FMOH/WHO MCH protocol rule set for evaluation. Not the complete, signed-off national protocol — the full rule set requires clinical authoring and FMOH sign-off before clinical use.",
+{"version":"mch-rules-1.1","note":"Representative FMOH/WHO MCH protocol rule set. Not the complete, signed-off national protocol — the full rule set requires clinical authoring and FMOH sign-off before clinical use.",
  "rules":[
   {"id":"FANC_BP","phase":"fanc","when":{"encounter":"anc"},"require":"bp","msg":"Measure blood pressure","sev":"high"},
   {"id":"FANC_URINE","phase":"fanc","when":{"encounter":"anc"},"require":"urine_protein","msg":"Test urine for protein","sev":"high"},
