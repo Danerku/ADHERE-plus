@@ -165,11 +165,15 @@ async function register(){
   const showEdd=()=>{ const l=ecGet('lnmp'); const e=l?addDays(l,280):null; $('#edd').textContent=e?('Estimated delivery date: '+esc(e)+(window.Ethiopian?(' ('+Ethiopian.fmt(new Date(e+'T00:00:00'))+')'):'')):''; };
   ['lnmp_d','lnmp_m','lnmp_y'].forEach(x=>{ const el=$('#'+x); if(el) el.onchange=showEdd; });
   $('#save').onclick=async()=>{
+    if(!mrn.value.trim()){ $('#m').textContent=' MRN is required'; return; }
     const lnmp=ecGet('lnmp'); const edd=lnmp?addDays(lnmp,280):null;
-    const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,gravida:+gr.value||null,para:+pa.value||null,lnmp:lnmp,edd:edd});
-    const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
-    await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,ruptured_membrane:+rm.value,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
-    $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
+    $('#m').textContent=' saving…';
+    try{
+      const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,gravida:+gr.value||null,para:+pa.value||null,lnmp:lnmp,edd:edd});
+      const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
+      await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,ruptured_membrane:+rm.value,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
+      $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
+    }catch(e){ $('#m').textContent=' '+(e.message||'could not register'); }
   };
 }
 

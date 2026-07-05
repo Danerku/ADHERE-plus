@@ -70,6 +70,8 @@ try {
     if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=?"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }
     if($m==='GET'){ $u=user(); $q='%'.($_GET['q']??'').'%'; $st=db()->prepare("SELECT * FROM women WHERE facility_id=? AND (mrn LIKE ? OR first_name LIKE ?) ORDER BY id DESC LIMIT 100"); $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
+      if(empty($b['mrn'])) err('MRN is required');
+      $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
       $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','lnmp','edd','facility_id','created_by'])));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','admin']); $b=body();
