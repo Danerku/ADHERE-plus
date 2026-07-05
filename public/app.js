@@ -563,13 +563,20 @@ async function ancVisits(id){
     <label>Presentation<input id="pres" placeholder="cephalic / breech"></label>
     <label>Urine protein<input id="up" placeholder="nil / +"></label>
     <label>Hgb (g/dl)<input id="hb" type="number" step="0.1"></label>
+    <label>MUAC (cm)<input id="muac" type="number" step="0.1"></label>
+    <label>Fetal movement<select id="fm"><option value="">Not assessed</option><option value="normal">Normal</option><option value="reduced">Reduced</option><option value="absent">Absent</option></select></label>
+    <label>HIV status<select id="hiv"><option value="">Not tested</option><option value="negative">Negative</option><option value="positive">Positive</option><option value="unknown">Unknown</option></select></label>
+    <label>Syphilis (RPR)<select id="syph"><option value="">Not done</option><option value="nonreactive">Non-reactive</option><option value="reactive">Reactive</option></select></label>
+    <label>Tetanus / Td<select id="tt"><option value="">-</option><option value="TT1">TT1</option><option value="TT2">TT2</option><option value="TT3">TT3</option><option value="TT4">TT4</option><option value="TT5">TT5</option><option value="none">None</option></select></label>
+    <label>Iron-folic acid<select id="ifa"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option><option value="declined">Declined</option></select></label>
+    <label>Malaria assessed<select id="mal"><option value="">Not assessed</option><option value="no">No symptoms/risk</option><option value="yes">Symptoms/risk - test</option></select></label>
     ${ecPicker('na','Next appointment')}
    </div><label>Danger signs / note<input id="dn"></label>
    <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span></div>
    <div class="card"><h3>Previous visits</h3><table><tr><th>Date</th><th>GA</th><th>Wt</th><th>BP</th><th>FH</th><th>FHR</th><th>Next</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.fundal_height_cm||'')}</td><td>${esc(p.fetal_heart_rate||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No visits yet.</td></tr>'}
    </table></div>`;
-  $('#asave').onclick=async()=>{ const b=$('#asave'); b.disabled=true; try{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,danger_note:dn.value,next_appointment:ecGet('na')});
+  $('#asave').onclick=async()=>{ const b=$('#asave'); b.disabled=true; try{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,muac:(+muac.value||null),fetal_movement:(fm.value||null),hiv_status:(hiv.value||null),syphilis:(syph.value||null),tetanus_td:(tt.value||null),iron_folic:(ifa.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na')});
     $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); } finally{ b.disabled=false; } };
 }
 
@@ -600,12 +607,20 @@ async function pncVisits(id){
     <label>Temp °C<input id="nt" type="number" step="0.1"></label>
     <label>Breastfeeding<select id="nf"><option value="well">Feeding well</option><option value="difficulty">Difficulty</option><option value="none">Not feeding</option></select></label>
     <label>Cord<select id="cd"><option value="clean">Clean &amp; dry</option><option value="infected">Red / discharging</option><option value="bleeding">Bleeding</option></select></label>
+    <label>Convulsions<select id="ncv"><option value="no">No</option><option value="yes">Yes</option></select></label>
+    <label>Fast breathing<select id="nfb"><option value="no">No</option><option value="yes">Yes</option></select></label>
+    <label>Chest indrawing<select id="nci"><option value="no">No</option><option value="yes">Yes</option></select></label>
+    <label>Lethargic<select id="nlt"><option value="no">No</option><option value="yes">Yes</option></select></label>
+    <label>Severe jaundice<select id="njd"><option value="no">No</option><option value="yes">Yes</option></select></label>
+    <label>KMC (if LBW)<select id="nkmc"><option value="">N/A</option><option value="initiated">Initiated</option><option value="not">Not</option></select></label>
+    <label>Birth immunisation<select id="nimm"><option value="">-</option><option value="given">BCG/OPV-0 given</option><option value="not">Not given</option></select></label>
+    <label>EID (HIV-exposed)<select id="neid"><option value="">N/A</option><option value="taken">Sample taken</option><option value="not">Not taken</option></select></label>
    </div><label>Danger signs / note<input id="dn"></label>
    <button class="act" id="psave" style="margin-top:10px">Save PNC visit</button> <span class="muted" id="pm"></span></div>
    <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Day</th><th>M temp</th><th>M BP</th><th>Bleeding</th><th>NB feeding</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(p.bleeding||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
    </table></div>`;
-  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:+pd.value||null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,danger_note:dn.value});
+  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:+pd.value||null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value});
     $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); } finally{ b.disabled=false; } };
 }
 
