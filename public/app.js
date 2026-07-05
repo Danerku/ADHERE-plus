@@ -128,7 +128,7 @@ async function register(){
     <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option><option value="highrisk">High risk</option></select></label>
     <label>Ruptured membrane<select id="rm"><option value="0">No</option><option value="1">Yes</option></select></label>
    </div><p class="muted" id="edd"></p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
-  const showEdd=()=>{ const l=ecGet('lnmp'); $('#edd').textContent=l?('Estimated delivery date: '+esc(l)+(window.Ethiopian?(' ('+Ethiopian.fmt(new Date(addDays(l,280)+'T00:00:00'))+')'):'')):''; };
+  const showEdd=()=>{ const l=ecGet('lnmp'); const e=l?addDays(l,280):null; $('#edd').textContent=e?('Estimated delivery date: '+esc(e)+(window.Ethiopian?(' ('+Ethiopian.fmt(new Date(e+'T00:00:00'))+')'):'')):''; };
   ['lnmp_d','lnmp_m','lnmp_y'].forEach(x=>{ const el=$('#'+x); if(el) el.onchange=showEdd; });
   $('#save').onclick=async()=>{
     const lnmp=ecGet('lnmp'); const edd=lnmp?addDays(lnmp,280):null;
