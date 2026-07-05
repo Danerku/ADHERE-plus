@@ -1,6 +1,6 @@
 /* ADHERE+ SPA — register → partograph → AI score, checklist, danger-sign, delivery, PNC.
    Talks to /api (PHP). On-device AI via RiskModel. Offline queue in localStorage. */
-let ME=null, MODEL=null, RM=null, RULES=null, RE=null; const BTS={};
+let ME=null, MODEL=null, RM=null, NBMODEL=null, NRM=null, RULES=null, RE=null; const BTS={};
 const API_BASE=(typeof window!=='undefined'&&window.ADHERE_API_BASE)||'';
 const $=(s,r=document)=>r.querySelector(s);
 const el=(h)=>{const d=document.createElement('div');d.innerHTML=h.trim();return d.firstChild;};
@@ -20,6 +20,39 @@ function clinicalFlags(o){ let band='green'; const R=[]; const up=b=>{band=escal
 }
 // clinically-neutral defaults for features the partograph UI does not collect
 const FEAT_DEFAULTS={age:25,parity:1,ga:39,prior_cs:0,rom_hours:2,meconium:0,urine_prot:0,bleeding:0,headache:0,blurred:0,epigastric:0,clonus:0};
+// Derive real maternal features from the woman's record (falls back to neutral defaults).
+function motherFeats(W){ W=W||{};
+  const out={};
+  if(W.age!=null&&W.age!=='') out.age=+W.age;
+  if(W.para!=null&&W.para!=='') out.parity=+W.para;
+  if(W.lnmp){ const d=(Date.now()-new Date(W.lnmp+'T00:00:00').getTime())/864e5; if(d>0&&d<310) out.ga=Math.max(24,Math.min(43,Math.round(d/7))); }
+  return out;
+}
+// Transparent MEOWS (Modified Early Obstetric Warning Score): aggregate-weighted trigger score.
+// Any single parameter scoring 3 = red trigger; total>=5 = red; total 3-4 = amber (increase monitoring).
+function meowsScore(v){ const parts=[]; let total=0;
+  const add=(pts,label)=>{ if(pts>0){ total+=pts; parts.push({pts,label}); } };
+  const s=+v.sbp; if(!isNaN(s)){ add(s<=90?3:s>=160?3:(s>=150||s<=100)?2:s>=140?1:0, 'systolic '+s); }
+  const d=+v.dbp; if(!isNaN(d)&&d){ add(d>=110?3:d>=100?2:d>=91?1:0, 'diastolic '+d); }
+  const p=+v.pulse; if(!isNaN(p)&&p){ add(p>=120?3:(p>=110||p<=50)?2:(p>=100||p<=59)?1:0, 'pulse '+p); }
+  const r=+v.rr; if(!isNaN(r)&&r){ add((r>=25||r<8)?3:(r>=21||r<=11)?2:0, 'resp '+r); }
+  const t=+v.temp; if(!isNaN(t)&&t){ add(t<=35?3:t>=39?2:(t>=38||t<36)?1:0, 'temp '+t); }
+  const o=+v.spo2; if(!isNaN(o)&&o){ add(o<92?3:o<94?2:o<96?1:0, 'SpO₂ '+o); }
+  const anyRed=parts.some(x=>x.pts>=3);
+  const band=(anyRed||total>=5)?'red':(total>=3?'amber':'green');
+  return {total,parts,band};
+}
+// Explainability: readable findings driving the intrapartum estimate (rule-derived, mirrors model mechanisms).
+function riskDrivers(o,feat){ const D=[];
+  if(feat.cvx_rate!=null&&feat.hrs>=4&&feat.cvx_rate<0.5) D.push('slow cervical progress ('+feat.cvx_rate.toFixed(1)+' cm/h)');
+  if(o.mld>=2) D.push('moulding +'+o.mld);
+  if(o.fhr<110) D.push('low fetal HR ('+o.fhr+')'); else if(o.fhr>160) D.push('high fetal HR ('+o.fhr+')');
+  if(o.sbp>=160) D.push('severe hypertension ('+o.sbp+')'); else if(o.sbp>=140) D.push('raised BP ('+o.sbp+')');
+  if(o.tmp>=38) D.push('fever ('+o.tmp+'°C)');
+  if(o.amn==='M'||feat.meconium) D.push('meconium-stained liquor');
+  if(o.hrs>=8) D.push('prolonged labour ('+o.hrs+'h)');
+  return D;
+}
 const online=()=>navigator.onLine;
 
 async function api(method, path, bodyObj){
@@ -44,6 +77,7 @@ window.addEventListener('online',()=>{paintNet();flush();}); window.addEventList
 
 async function boot(){
   try{ MODEL=await (await fetch('model/risk_model.json')).json(); RM=new RiskModel(MODEL); }catch(e){}
+  try{ NBMODEL=await (await fetch('model/newborn_model.json')).json(); NRM=new RiskModel(NBMODEL); }catch(e){}
   try{ RULES=await (await fetch('model/mch_rules.json')).json(); RE=new RulesEngine(RULES); }catch(e){}
   try{ const r=await api('GET','me'); ME=r.user; if(ME) localStorage.me=JSON.stringify(ME); }catch(e){}
   if(!ME && localStorage.me){ ME=JSON.parse(localStorage.me); ME._offline=true; }
@@ -59,7 +93,7 @@ function route(){
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
-    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit}[screen]||home)(arg);
+    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen}[screen]||home)(arg);
 }
 
 function login(){
@@ -149,7 +183,8 @@ async function labour(){
 
 const OB={}; // per-episode in-memory observations for the chart
 async function partograph(id){
-  const obs=await api('GET','observations?episode='+id).catch(()=>[]);
+  const [obs,eps]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),api('GET','episodes').catch(()=>[])]);
+  const W=(eps||[]).find(x=>x.id==id)||{}; const MF=motherFeats(W);
   OB[id]=obs.map(o=>({hrs:+o.hours_since_active,cvx:+o.cervix_cm,fhr:+o.fetal_heart_rate,ctx:+o.contractions_per10,mld:+o.moulding,sbp:+o.bp_systolic,tmp:+o.temperature,dsc:(o.descent_head==null?null:+o.descent_head),amn:o.amniotic_fluid}));
   if(!BTS[id]) BTS[id]=new BayesTracker(0.15);
   app().innerHTML=nav()+`<div class="card"><h3>Partograph — episode ${esc(id)} <span id="band" class="pill"></span></h3>
@@ -169,7 +204,10 @@ async function partograph(id){
     <svg id="pgv" viewBox="0 0 640 220" width="100%" style="margin-top:8px"></svg>
     <div class="muted" style="font-size:12px">Fetal heart rate (normal band 110–160 bpm) and contractions per 10 min.</div>
     <div id="ai" style="display:none;border-top:0.5px solid #eee;padding-top:8px;margin-top:8px">
-     <b class="muted">Intrapartum risk (AI)</b> estimate <b id="prob" style="font-size:20px"></b> <span class="muted" id="drv"></span><div class="muted" style="font-size:11px;margin-top:2px">Clinical decision support — an aid to the provider's judgement, not a diagnosis.</div>
+     <b class="muted">Intrapartum risk (AI)</b> estimate <b id="prob" style="font-size:20px"></b> <span class="muted" id="drv"></span>
+     <div class="muted" id="why" style="font-size:12px;margin-top:3px"></div>
+     <div id="nbrisk" style="font-size:12px;margin-top:4px;display:none"></div>
+     <div class="muted" style="font-size:11px;margin-top:2px">Clinical decision support — an aid to the provider's judgement, not a diagnosis.</div>
      <div style="margin-top:6px"><button class="sec" id="ack">Acknowledge</button><button class="sec" id="ovr">Override</button> <span class="muted" id="hitl"></span></div>
     </div></div>
     <div class="card"><b class="muted">Risk trajectory</b><div id="traj"></div></div>
@@ -179,12 +217,19 @@ async function partograph(id){
   $('#rec').onclick=async()=>{
     const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,tmp:+tmp.value,dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null)};
     OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id);
-    const feat=Object.assign({},FEAT_DEFAULTS,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:o.mld,sbp:o.sbp,dbp:Math.round(o.sbp*0.65),temp:o.tmp});
+    const mecon=(o.amn==='M')?1:0;
+    const feat=Object.assign({},FEAT_DEFAULTS,MF,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:o.mld,meconium:mecon,sbp:o.sbp,dbp:Math.round(o.sbp*0.65),temp:o.tmp});
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
     const cf=clinicalFlags(o); const finalBand=escalate(r.band,cf.band);   // safety guardrail
     $('#ai').style.display='block'; $('#prob').textContent=Math.round(r.probability*100)+'%'; $('#prob').className=finalBand;
     const bd=$('#band'); bd.textContent=finalBand.toUpperCase()+(finalBand!==r.band?' (clinical override)':''); bd.className='pill '+finalBand;
     $('#drv').textContent=(cf.reasons.length?('red-flags: '+cf.reasons.join(', ')):'AI band '+r.band);
+    const drv=riskDrivers(o,feat); $('#why').innerHTML=drv.length?('<b>Contributing findings:</b> '+drv.map(esc).join(' &middot; ')):'No abnormal intrapartum findings detected.';
+    // Newborn — readiness for resuscitation, from the intrapartum picture
+    if(NRM){ const nb=NRM.predict({ga:feat.ga,meconium:mecon,fhr:o.fhr,mld:o.mld,cvx:o.cvx,hrs:o.hrs,ctx:o.ctx,sbp:o.sbp,temp:o.tmp,prior_cs:feat.prior_cs,age:feat.age,parity:feat.parity,rom_hours:feat.rom_hours});
+      const nel=$('#nbrisk'); nel.style.display='block';
+      const msg=nb.band==='green'?'low — routine newborn care':(nb.band==='amber'?'elevated — have bag-mask ready, call for help':'high — prepare resuscitation now (bag-mask, skilled attendant)');
+      nel.innerHTML='<b>Newborn readiness</b> <span class="pill '+nb.band+'">'+Math.round(nb.probability*100)+'%</span> '+esc(msg); }
     await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][Math.max(0,Math.min(3,o.mld))],descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,temperature:o.tmp});
     const sc=await api('POST','risk_scores',{episode_id:+id,model_version:MODEL&&MODEL.version,probability:r.probability.toFixed(4),band:finalBand,features_json:Object.assign({ml_band:r.band,clinical:cf.reasons},feat)});
     lastScoreId[id]=sc&&sc.id; lastAI[id]={p:r.probability,band:finalBand};
@@ -425,12 +470,13 @@ async function referralScreen(id){
     <label>Refer to (facility)<input id="rto" placeholder="e.g. Felege Hiwot Referral Hospital"></label>
     <label>Urgency<select id="rurg"><option value="urgent">Urgent</option><option value="emergency">Emergency</option><option value="routine">Routine</option></select></label>
     <label>Transport<input id="rtr" placeholder="ambulance / private"></label>
-    <label>Reason<input id="rrsn" placeholder="e.g. obstructed labour"></label>
+    <label>Reason<select id="rrsn"><option>Obstructed / prolonged labour</option><option>Postpartum haemorrhage (PPH)</option><option>Severe pre-eclampsia / eclampsia</option><option>Sepsis / infection</option><option>Birth asphyxia / newborn distress</option><option>Antepartum haemorrhage</option><option>Retained placenta</option><option>Uterine rupture</option><option>Other</option></select></label>
+    <label>Details<input id="rdet" placeholder="optional"></label>
    </div><button class="act" id="rsave" style="margin-top:10px">Save referral</button> <span class="muted" id="rm"></span></div>
    <div class="card"><h3>Referral history</h3><table><tr><th>When</th><th>To</th><th>Urgency</th><th>Reason</th></tr>
     ${past.map(p=>`<tr><td>${esc((p.recorded_at||'').slice(0,16))}</td><td>${esc(p.referred_to||'')}</td><td>${esc(p.urgency||'')}</td><td>${esc(p.reason||'')}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>No referrals yet.</td></tr>'}
    </table></div>`;
-  $('#rsave').onclick=async()=>{ const r=await api('POST','referrals',{episode_id:+id,referred_to:rto.value,reason:rrsn.value,urgency:rurg.value,transport:rtr.value});
+  $('#rsave').onclick=async()=>{ const det=($('#rdet')||{}).value; const r=await api('POST','referrals',{episode_id:+id,referred_to:rto.value,reason:rrsn.value+(det?(' — '+det):''),urgency:rurg.value,transport:rtr.value});
     if(r&&(r.ids||r.queued)){ try{ await api('PATCH','episodes/'+id,{status:'referred'}); }catch(e){} $('#rm').textContent=' referred'; setTimeout(()=>referralScreen(id),500); } else $('#rm').textContent=' '+((r&&r.error)||'error'); };
 }
 
@@ -507,6 +553,7 @@ async function babiesScreen(id){
 
 async function vitalsScreen(id){
   const past=await api('GET','maternal_vitals?episode='+id).catch(()=>[]);
+  const hist=past.map(p=>{ const ms=meowsScore({sbp:p.bp_systolic,dbp:p.bp_diastolic,pulse:p.pulse,temp:p.temperature,rr:p.resp_rate,spo2:p.spo2}); return `<tr><td>${esc((p.obs_datetime||p.recorded_at||'').slice(0,16))}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.pulse||'')}</td><td>${esc(p.temperature||'')}</td><td>${esc(p.resp_rate||'')}</td><td>${esc(p.spo2||'')}</td><td><span class="pill ${ms.band}">${ms.total}</span></td></tr>`; }).join('')||'<tr><td colspan=7 class=muted>No vitals yet.</td></tr>';
   app().innerHTML=nav()+`<div class="card"><h3>Maternal vital signs — episode ${esc(id)}</h3>
    <div class="grid">
     <label>BP systolic<input id="bps" type="number" value="120"></label>
@@ -516,10 +563,15 @@ async function vitalsScreen(id){
     <label>Resp rate<input id="rr" type="number" value="18"></label>
     <label>SpO2 %<input id="sp" type="number" value="98"></label>
    </div><label>Note<input id="ntt"></label>
+   <div id="meows" style="margin-top:10px"></div>
    <button class="act" id="vsave" style="margin-top:10px">Record vitals</button> <span class="muted" id="vm"></span></div>
-   <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th></tr>
-    ${past.map(p=>`<tr><td>${esc((p.obs_datetime||p.recorded_at||'').slice(0,16))}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.pulse||'')}</td><td>${esc(p.temperature||'')}</td><td>${esc(p.resp_rate||'')}</td><td>${esc(p.spo2||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No vitals yet.</td></tr>'}
+   <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th><th>MEOWS</th></tr>
+    ${hist}
    </table></div>`;
+  const showMeows=()=>{ const ms=meowsScore({sbp:bps.value,dbp:bpd.value,pulse:pl.value,temp:tp.value,rr:rr.value,spo2:sp.value});
+    const act=ms.band==='red'?'urgent review — escalate now':(ms.band==='amber'?'increase monitoring, review':'continue routine monitoring');
+    $('#meows').innerHTML='<div style="border-top:0.5px solid #eee;padding-top:8px"><b class="muted">MEOWS early-warning</b> <span class="pill '+ms.band+'">score '+ms.total+'</span> <span class="muted">'+esc(act)+'</span>'+(ms.parts.length?('<div class="muted" style="font-size:12px;margin-top:3px">Triggers: '+ms.parts.map(x=>esc(x.label)+' (+'+x.pts+')').join(' &middot; ')+'</div>'):'')+'</div>'; };
+  ['bps','bpd','pl','tp','rr','sp'].forEach(x=>{ const e=$('#'+x); if(e) e.oninput=showMeows; }); showMeows();
   $('#vsave').onclick=async()=>{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,pulse:+pl.value||null,temperature:+tp.value||null,resp_rate:+rr.value||null,spo2:+sp.value||null,note:ntt.value});
     $('#vm').textContent=(r&&(r.ids||r.queued))?' recorded':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>vitalsScreen(id),400); };
 }
@@ -579,6 +631,27 @@ async function reportScreen(id){
    <button class="sec" onclick="window.print()" style="margin-top:10px">Print</button></div>`;
 }
 
+const BEMONC=[
+ ['BEM_ANTIBIOTICS','Parenteral antibiotics'],
+ ['BEM_UTEROTONIC','Uterotonic for PPH (oxytocin / misoprostol)'],
+ ['BEM_MGSO4','Anticonvulsant — magnesium sulfate'],
+ ['BEM_MANUAL_PLACENTA','Manual removal of placenta'],
+ ['BEM_RETAINED_PRODUCTS','Removal of retained products'],
+ ['BEM_ASSISTED_DELIVERY','Assisted vaginal delivery (vacuum)'],
+ ['BEM_NEWBORN_RESUS','Newborn resuscitation']
+];
+async function bemoncScreen(id){
+  const existing=await api('GET','bemonc?episode='+id).catch(()=>[]);
+  const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
+  app().innerHTML=nav()+`<div class="card"><h3>BEmONC care given — episode ${esc(id)}</h3>
+   <p class="muted">Record the emergency obstetric &amp; newborn signal functions. "Referred" = indicated but not available here (needs hospital / CEmONC).</p>
+   ${BEMONC.map(it=>{const v=prev[it[0]]||'not_needed'; return `<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px">${esc(it[1])}
+     <select data-code="${it[0]}" style="width:170px"><option value="not_needed"${v==='not_needed'?' selected':''}>Not needed</option><option value="given"${v==='given'?' selected':''}>Given</option><option value="referred"${v==='referred'?' selected':''}>Referred (unavailable)</option></select></label></div>`;}).join('')}
+   <button class="act" id="bsave" style="margin-top:12px">Save</button> <span class="muted" id="bm"></span></div>`;
+  $('#bsave').onclick=async()=>{ const rows=[...document.querySelectorAll('#app select[data-code]')].map(s=>({episode_id:+id,item_code:s.dataset.code,response:s.value}));
+    const r=await api('POST','bemonc',rows); $('#bm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); };
+}
+
 async function facilityEdit(id){
   if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
   const list=await api('GET','facilities').catch(()=>[]); const f=(list||[]).find(x=>x.id==id)||{};
@@ -602,7 +675,7 @@ async function patientHub(id){
   let tiles;
   if(cat==='anc') tiles=[tile('#anc/'+id,'ANC screening'),tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
   else if(cat==='pnc') tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#handover/'+id,'Handover'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#bemonc/'+id,'BEmONC care'),tile('#handover/'+id,'Handover'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''}</p>
     <div class="hubgrid">${tiles.join('')}</div></div>`;

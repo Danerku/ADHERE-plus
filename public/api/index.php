@@ -83,7 +83,7 @@ try {
 
   // ---- episodes ----
   if ($r==='episodes'){
-    if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.facility_id=?";
+    if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.lnmp,w.edd FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
@@ -124,11 +124,12 @@ try {
            'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','nb_temp','nb_feeding','cord','danger_note','recorded_by']],
            'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','recorded_by']],
            'maternal_vitals'=>['maternal_vitals',['episode_id','obs_datetime','bp_systolic','bp_diastolic','pulse','temperature','resp_rate','spo2','note','recorded_by']],
+           'bemonc'=>['bemonc_care',['episode_id','item_code','response','note','recorded_by']],
            'messages'=>['messages',['episode_id','from_user_id','to_user_id','body']]];
   if(isset($simple[$r])){
     [$tbl,$allow]=$simple[$r];
     if($m==='GET'){ require_ep($_GET['episode']??0); $st=db()->prepare("SELECT * FROM `$tbl` WHERE episode_id=? ORDER BY id"); $st->execute([$_GET['episode']]); out($st->fetchAll()); }
-    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
+    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
       foreach($rows as $row){ require_ep($row['episode_id']??0); }
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id']; $ids[]=insert($tbl,array_intersect_key($row,array_flip($allow))); }

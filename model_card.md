@@ -1,52 +1,79 @@
-# Model card — ADHERE+ intrapartum risk model (synthetic-clinical-eth-1.1)
+# Model card — ADHERE+ risk models
 
-## Purpose
-Decision-support risk stratification (green / amber / red) at each partograph
-examination during labour, to prompt (not replace) clinician assessment.
-Runs on-device (JavaScript) for offline use.
+Two on-device (JavaScript) gradient-boosted models power the clinical decision support:
+1. **Maternal intrapartum risk** (`adhere-eth-1.2`) — green / amber / red stratification at each partograph examination.
+2. **Newborn resuscitation-need** (`adhere-newborn-eth-1.0`) — likelihood the baby will need active resuscitation, from the intrapartum picture, so the team can prepare.
 
-## Status — SYNTHETIC, for pipeline/UX and demo only
-This model is trained on a **clinically-grounded synthetic cohort**. It must be
-**retrained and revalidated on real, de-identified records** before any clinical
-or evaluation use. Only the retrained model's metrics belong in the proposal's
-validation appendix.
+Both prompt — never replace — clinician assessment, run offline on-device, and pair with a deterministic clinical red-flag safety layer and a transparent MEOWS early-warning score.
+
+## Status — trained on a simulated cohort; revalidate on real records before clinical use
+The models are trained on a **clinically-grounded simulated labour cohort** whose complication
+prevalences and risk-factor associations are calibrated to Ethiopia/SSA peer-reviewed
+meta-analyses. They are suitable for the pipeline, UX, and internal evaluation. They must be
+**retrained and revalidated on real, de-identified facility records** before any clinical use;
+only the retrained model's metrics belong in a validation appendix.
 
 ## Cohort
-~3,500 simulated labours → ~15,700 examination rows (3–6 exams per labour).
-Signal is deliberately weaker at early exams and stronger later, reflecting real
-detectability. Per-exam positive rate ~24%; per-labour any-complication ~34%
-(union of conditions; the Ethiopian source studies are facility/referral-weighted,
-so the union is an upper bound for a primary-care population).
+~6,000 simulated labours → ~27,200 examination rows (3–6 exams per labour). Signal is
+deliberately weaker at early exams and stronger later, reflecting real detectability.
+Per-exam positive rate ~24%. A per-birth newborn outcome is derived from the intrapartum
+picture (fetal distress, obstruction, sepsis, prematurity, APH, meconium, abnormal FHR);
+resuscitation-need rate ~13.6%.
 
 ## Complication prevalences — anchored to Ethiopia/SSA evidence
 | Condition | Simulated (per labour) | Literature anchor |
 |---|---|---|
-| Obstructed / prolonged labour | 10.0% | Ethiopia SR pooled 11.8% |
-| Pre-eclampsia / eclampsia | 12.9% | Ethiopia 11.5%; Amhara 14.08% (study region) |
-| Intrapartum fetal distress | 8.4% | Birth asphyxia SR 19.3–23.1% (neonatal, referral-weighted) → intrapartum set lower |
-| Maternal / intrapartum sepsis | 4.8% | Puerperal sepsis SR 14.8% (postpartum) → intrapartum set lower |
-| Antepartum haemorrhage | 3.3% | APH incidence ~3% |
+| Obstructed / prolonged labour | 10.2% | Ethiopia SR pooled 11.8% |
+| Pre-eclampsia / eclampsia | 12.3% | Ethiopia 11.5%; Amhara 14.08% (study region) |
+| Intrapartum fetal distress | 8.3% | Birth asphyxia SR 19.3–23.1% (neonatal, referral-weighted) → intrapartum set lower |
+| Maternal / intrapartum sepsis | 4.7% | Puerperal sepsis SR 14.8% (postpartum) → intrapartum set lower |
+| Antepartum haemorrhage | 3.1% | APH incidence ~3% |
 
-Risk-factor associations in the simulator match the literature: obstructed labour
-↑ with nulliparity, short stature, post-term, prior CS; birth asphyxia ↑ with
-APH (OR 4.7), PROM (OR 4.0), prolonged labour (OR 4.2), meconium (OR 5.6);
-pre-eclampsia ↑ with nulliparity, chronic hypertension, age extremes.
+Risk-factor associations in the simulator match the literature: obstructed labour ↑ with
+nulliparity, short stature, post-term, prior CS; birth asphyxia ↑ with APH, PROM, prolonged
+labour, meconium; pre-eclampsia ↑ with nulliparity, chronic hypertension, age extremes.
 
-## Features (22)
-hours in active labour, cervix (cm), cervical rate, fetal heart rate, contractions/10min,
-moulding, meconium, systolic/diastolic BP, urine protein, temperature, pulse, vaginal
-bleeding, headache, blurred vision, epigastric pain, clonus, age, parity, gestational age,
-prior CS, hours since ROM.
+## Features
+**Maternal (22):** hours in active labour, cervix (cm), cervical rate, fetal heart rate,
+contractions/10min, moulding, meconium, systolic/diastolic BP, urine protein, temperature,
+pulse, vaginal bleeding, headache, blurred vision, epigastric pain, clonus, age, parity,
+gestational age, prior CS, hours since ROM. Age, parity, and gestational age are now taken
+from the woman's registration record (with neutral fallbacks); meconium is read from the
+recorded amniotic-fluid finding.
 
-## Performance (held-out, synthetic)
-AUROC 0.868; Brier 0.107; sens 0.66 / spec 0.92 at amber (0.33); sens 0.56 / spec 0.95 at 0.50.
-Subgroup AUROC: nullipara 0.865, multipara 0.867. Thresholds are tunable — a safety
-tool would typically favour higher sensitivity.
+**Newborn (13):** gestational age, meconium, fetal heart rate, moulding, cervix, hours in
+labour, contractions/10min, systolic BP, temperature, prior CS, age, parity, hours since ROM.
+
+## Performance (held-out)
+**Maternal** — AUROC 0.882; Brier 0.099; well-calibrated across 8 probability bins.
+Subgroup AUROC: nullipara 0.885, multipara 0.880. Amber 0.33 / red 0.60 thresholds (tunable;
+a safety tool typically favours higher sensitivity).
+**Newborn** — AUROC 0.747; Brier 0.100. Amber 0.30 / red 0.55 thresholds.
+
+**On-device parity:** the JavaScript evaluator reproduces the Python model to within
+1.8e-6 (maternal) probability, confirming the exported tree JSON scores identically offline.
+
+## Transparent MEOWS early-warning (deterministic, no ML)
+Alongside the ML estimate, maternal vitals are scored with an aggregate-weighted Modified
+Early Obstetric Warning Score (systolic/diastolic BP, pulse, respiratory rate, temperature,
+SpO₂). Any single parameter scoring 3, or a total ≥5, triggers red (urgent review); 3–4
+triggers amber. The score and the exact triggering parameters are shown to the provider —
+fully auditable and independent of the ML model.
+
+## Explainability
+Each intrapartum estimate is accompanied by the specific contributing findings (e.g. slow
+cervical progress, moulding, abnormal FHR, raised BP, fever, meconium, prolonged labour),
+derived from the same clinical mechanisms the model was trained on.
 
 ## Intended use / limits
-Support, not replace, clinical judgement; every alert requires clinician acknowledgement
-or a documented override (logged). Not a substitute for the WHO alert/action cervicograph,
-which is retained. Retrospective/synthetic validation ≠ prospective clinical validation.
+Support, not replace, clinical judgement; every alert requires clinician acknowledgement or a
+documented override (logged). Not a substitute for the WHO alert/action cervicograph, which is
+retained. Simulated validation ≠ prospective clinical validation.
+
+## Reproducibility
+Training pipeline: `scripts/train_v2.py` (data generation, training, held-out metrics,
+calibration, subgroup AUROC, JS-parity check, JSON export). Prior baseline:
+`scripts/generate_and_train.py`.
 
 ## Sources (Ethiopia/SSA peer-reviewed)
 - Obstructed labour burden — Ethiopia SR/MA: https://pubmed.ncbi.nlm.nih.gov/33581417/ ; https://pmc.ncbi.nlm.nih.gov/articles/PMC9524671/
@@ -55,3 +82,4 @@ which is retained. Retrospective/synthetic validation ≠ prospective clinical v
 - Antepartum haemorrhage — Ethiopia SR/MA: https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0319512
 - Maternal/puerperal sepsis — Ethiopia SR/MA: https://pmc.ncbi.nlm.nih.gov/articles/PMC8628469/ ; SSA maternal/neonatal sepsis: https://www.frontiersin.org/journals/public-health/articles/10.3389/fpubh.2024.1272193/full
 - Maternal near miss — Ethiopia SR/MA (2015–2023): https://pmc.ncbi.nlm.nih.gov/articles/PMC10357694/
+- MEOWS (obstetric early warning) — validation literature (e.g. Singh et al.; Carle et al., aggregate-weighted obstetric EWS).

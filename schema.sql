@@ -315,4 +315,12 @@ CREATE TABLE maternal_vitals (
   INDEX idx_mv_ep (episode_id)
 ) ENGINE=InnoDB;
 
+-- ---------- BEmONC signal-function "care given" -------------------
+CREATE TABLE bemonc_care (
+  id INT AUTO_INCREMENT PRIMARY KEY, episode_id INT NOT NULL,
+  item_code VARCHAR(40) NOT NULL, response VARCHAR(20) NOT NULL, note VARCHAR(255),
+  recorded_by INT, recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_bem_ep (episode_id)
+) ENGINE=InnoDB;
+
 SET FOREIGN_KEY_CHECKS = 1;
