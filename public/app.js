@@ -64,13 +64,13 @@ function route(){
 
 function login(){
   app().innerHTML='';
-  const c=el(`<div class="card" style="max-width:360px;margin:40px auto">
-    <h3>Sign in</h3>
-    <label>Username<input id="u" value="provider1"></label>
-    <label style="margin-top:8px">Password<input id="p" type="password" value="demo1234"></label>
-    <button class="act" id="go" style="margin-top:12px">Sign in</button>
-    <p class="muted" id="msg"></p>
-    <p class="muted">demo: recorder1 / provider1 / observer1 / admin — password demo1234</p></div>`);
+  const c=el(`<div class="card" style="max-width:360px;margin:48px auto">
+    <h3 style="justify-content:center">Sign in</h3>
+    <p class="muted" style="text-align:center;margin-top:-6px">ADHERE+ Maternal &amp; Newborn Care</p>
+    <label>Username<input id="u" autocomplete="username" autofocus></label>
+    <label style="margin-top:8px">Password<input id="p" type="password" autocomplete="current-password"></label>
+    <button class="act" id="go" style="margin-top:14px;width:100%">Sign in</button>
+    <p class="muted" id="msg" style="text-align:center"></p></div>`);
   app().appendChild(c);
   $('#go').onclick=async()=>{ try{ const r=await api('POST','login',{username:$('#u').value,password:$('#p').value}); ME=r.user; localStorage.me=JSON.stringify(ME); location.hash='#home'; route(); }catch(e){ $('#msg').textContent=e.message; } };
 }
@@ -148,12 +148,12 @@ async function partograph(id){
     <svg id="pgv" viewBox="0 0 640 220" width="100%" style="margin-top:8px"></svg>
     <div class="muted" style="font-size:12px">Fetal heart rate (normal band 110–160 bpm) and contractions per 10 min.</div>
     <div id="ai" style="display:none;border-top:0.5px solid #eee;padding-top:8px;margin-top:8px">
-     <b class="muted">Module 1 — intrapartum AI</b> risk estimate <b id="prob" style="font-size:20px"></b> <span class="muted" id="drv"></span><div class="muted" style="font-size:11px;margin-top:2px">Decision support — a risk estimate, not a diagnosis or proof of complication.</div>
+     <b class="muted">Intrapartum risk (AI)</b> estimate <b id="prob" style="font-size:20px"></b> <span class="muted" id="drv"></span><div class="muted" style="font-size:11px;margin-top:2px">Clinical decision support — an aid to the provider's judgement, not a diagnosis.</div>
      <div style="margin-top:6px"><button class="sec" id="ack">Acknowledge</button><button class="sec" id="ovr">Override</button> <span class="muted" id="hitl"></span></div>
     </div></div>
-    <div class="card"><b class="muted">Module 3 — Bayesian longitudinal risk</b><div id="traj"></div></div>
+    <div class="card"><b class="muted">Risk trajectory</b><div id="traj"></div></div>
     <div class="card"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div id="gauge"></div>
-      <div style="flex:1"><b class="muted">Module 2 — guideline adherence</b><div id="prompts" class="muted">record an observation to evaluate</div></div></div></div>`;
+      <div style="flex:1"><b class="muted">Guideline adherence</b><div id="prompts" class="muted">record an observation to evaluate</div></div></div></div>`;
   drawPG(id); drawVitals(id); renderTraj(id);
   $('#rec').onclick=async()=>{
     const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,tmp:+tmp.value,dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null)};
@@ -237,8 +237,8 @@ async function dashboard(){
   const block=(k,label)=>{ const v=(d.indicators[k]||[]); const flag=d.anomalies[k];
     return `<div class="card"><b>${label}</b> ${flag?'<span class="pill red">anomaly</span>':''}
       ${Charts.bars(v.map((n,i)=>({x:mo[i],v:n,flag:flag&&i===v.length-1})))}</div>`; };
-  app().innerHTML=nav()+`<div class="card"><h3>Module 4 — operational intelligence</h3>
-    <p class="muted">Monthly facility indicators with automatic anomaly flags (DHIS2-ready). Export: <a class="nav" href="${API_BASE}api/dhis2">/api/dhis2</a></p></div>
+  app().innerHTML=nav()+`<div class="card"><h3>Facility dashboard</h3>
+    <p class="muted">Monthly indicators with automatic anomaly flags. Export: <a class="nav" href="${API_BASE}api/dhis2">DHIS2</a></p></div>
     ${block('deliveries','Deliveries')}${block('red_alerts','Red AI alerts')}
     ${block('partographs','Partographs completed')}${block('stillbirths','Fresh stillbirths')}`;
 }
@@ -446,13 +446,13 @@ async function pncVisits(id){
     <label>BP systolic<input id="bps" type="number"></label>
     <label>BP diastolic<input id="bpd" type="number"></label>
     <label>Pulse<input id="pl" type="number"></label>
-    <label>Bleeding<select id="bl"><option value="normal">Normal</option><option value="heavy">Heavy</option></select></label>
-    <label>Breast<select id="br"><option value="ok">OK</option><option value="problem">Problem</option></select></label>
-    <label>Mood<select id="md"><option value="ok">OK</option><option value="low">Low</option></select></label>
+    <label>Lochia<select id="bl"><option value="normal">Normal</option><option value="heavy">Heavy</option><option value="offensive">Offensive / foul-smelling</option></select></label>
+    <label>Breasts<select id="br"><option value="normal">Normal</option><option value="engorged">Engorged</option><option value="cracked">Cracked nipples</option><option value="mastitis">Mastitis</option></select></label>
+    <label>Mood<select id="md"><option value="normal">Normal</option><option value="low">Low mood</option><option value="support">Needs support</option></select></label>
    </div><h4>Newborn</h4><div class="grid">
     <label>Temp °C<input id="nt" type="number" step="0.1"></label>
-    <label>Feeding<select id="nf"><option value="good">Good</option><option value="poor">Poor</option></select></label>
-    <label>Cord<select id="cd"><option value="clean">Clean/dry</option><option value="infected">Infected</option></select></label>
+    <label>Breastfeeding<select id="nf"><option value="well">Feeding well</option><option value="difficulty">Difficulty</option><option value="none">Not feeding</option></select></label>
+    <label>Cord<select id="cd"><option value="clean">Clean &amp; dry</option><option value="infected">Red / discharging</option><option value="bleeding">Bleeding</option></select></label>
    </div><label>Danger signs / note<input id="dn"></label>
    <button class="act" id="psave" style="margin-top:10px">Save PNC visit</button> <span class="muted" id="pm"></span></div>
    <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Day</th><th>M temp</th><th>M BP</th><th>Bleeding</th><th>NB feeding</th></tr>

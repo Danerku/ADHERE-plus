@@ -26,6 +26,8 @@ services:
       SITE_DOMAIN: ${SITE_DOMAIN}
     depends_on:
       db: { condition: service_healthy }
+    volumes:
+      - sessions:/var/adhere-sessions
   caddy:
     image: caddy:2
     restart: always
@@ -36,4 +38,4 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
     depends_on: [web]
-volumes: { dbdata: {}, caddydata: {} }
+volumes: { dbdata: {}, caddydata: {}, sessions: {} }
