@@ -31,7 +31,7 @@ function reminders_run($db, $windowDays = 2){
        JOIN women   w ON w.id = e.woman_id
        LEFT JOIN facilities f ON f.id = e.facility_id
       WHERE av.next_appointment IS NOT NULL
-        AND av.next_appointment BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL ? DAY)");
+        AND av.next_appointment BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 DAY) AND DATE_ADD(CURDATE(), INTERVAL ? DAY)");
   $due->execute([$windowDays]);
   foreach($due->fetchAll() as $r){
     $ex = $db->prepare("SELECT id FROM reminders WHERE woman_id=? AND due_date=? AND kind='anc'");

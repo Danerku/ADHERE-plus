@@ -80,7 +80,7 @@ try {
   if ($r==='women'){
     if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=?"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }
     if($m==='GET'){ $u=user(); $q='%'.($_GET['q']??'').'%'; $st=db()->prepare("SELECT * FROM women WHERE facility_id=? AND (mrn LIKE ? OR first_name LIKE ?) ORDER BY id DESC LIMIT 100"); $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll()); }
-    if($m==='POST'){ $u=require_role(['recorder','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
+    if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       if(empty($b['mrn'])) err('MRN is required');
       $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
       $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','children_alive','sms_consent','lnmp','edd','facility_id','created_by'])));
@@ -157,7 +157,7 @@ try {
     $ind=[
       'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary WHERE DATE_FORMAT(delivery_datetime,'%Y-%m')=?"),
       'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores WHERE band='red' AND DATE_FORMAT(scored_at,'%Y-%m')=?"),
-      'stillbirths'=>$series("SELECT COUNT(*) c FROM delivery_summary WHERE outcome='fresh_stillbirth' AND DATE_FORMAT(delivery_datetime,'%Y-%m')=?"),
+      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies WHERE outcome='fresh_stillbirth' AND DATE_FORMAT(recorded_at,'%Y-%m')=?"),  // newborn record = source of truth (counts each baby, incl. twins)
       'partographs'=>$series("SELECT COUNT(DISTINCT episode_id) c FROM partograph_obs WHERE DATE_FORMAT(recorded_at,'%Y-%m')=?"),
     ];
     // EWMA anomaly flag: last point > mean + 2*std of the series
@@ -173,7 +173,7 @@ try {
     $one=function($sql,$p){ $st=db()->prepare($sql); $st->execute([$p]); return (int)($st->fetch()['c']??0); };
     $ind=[
       'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary WHERE DATE_FORMAT(delivery_datetime,'%Y-%m')=?",$period),
-      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM delivery_summary WHERE outcome='fresh_stillbirth' AND DATE_FORMAT(delivery_datetime,'%Y-%m')=?",$period),
+      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies WHERE outcome='fresh_stillbirth' AND DATE_FORMAT(recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
       'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores WHERE band='red' AND DATE_FORMAT(scored_at,'%Y-%m')=?",$period),
     ];
     out(['facility'=>$fac,'period'=>$period,'indicators'=>$ind]);
@@ -202,17 +202,19 @@ try {
     if(!$ids){ out(['scope'=>$u['scope']??'facility','facilities'=>[]]); }
     $in=implode(',',array_fill(0,count($ids),'?'));
     $facs=db()->prepare("SELECT id,name,woreda,zone,region FROM facilities WHERE id IN ($in) ORDER BY name"); $facs->execute($ids); $facRows=$facs->fetchAll();
+    $days=(int)($_GET['days']??0); if($days<0)$days=0; if($days>3660)$days=3660;   // 0 = all time; sanitized int, safe to inline
+    $dc=function($col) use($days){ return $days>0 ? " AND $col >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : ""; };
     $grp=function($sql) use($ids){ $st=db()->prepare($sql); $st->execute($ids); $o=[]; foreach($st->fetchAll() as $x){ $o[(int)$x['fid']]=(int)$x['c']; } return $o; };
-    $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE service_category='labour' AND facility_id IN ($in) GROUP BY facility_id");
-    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in) GROUP BY e.facility_id");
-    $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) GROUP BY e.facility_id");
-    $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in) GROUP BY e.facility_id");
-    $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id IN ($in) GROUP BY e.facility_id");
+    $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE service_category='labour' AND facility_id IN ($in)".$dc('created_at')." GROUP BY facility_id");
+    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in)".$dc('o.recorded_at')." GROUP BY e.facility_id");
+    $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
+    $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
+    $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id IN ($in)".$dc('rf.recorded_at')." GROUP BY e.facility_id");
     $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
       $rows[]=['id'=>$fid,'name'=>$f['name'],'woreda'=>$f['woreda'],'zone'=>$f['zone'],
         'labour_episodes'=>$lab,'partographs_started'=>$ps,'partograph_completion'=>$lab?(int)round(100*$ps/$lab):0,
         'deliveries'=>$deliv[$fid]??0,'red_alerts'=>$reds[$fid]??0,'referrals'=>$refs[$fid]??0]; }
-    out(['scope'=>$u['scope']??'facility','base_facility'=>(int)$u['facility_id'],'facilities'=>$rows]);
+    out(['scope'=>$u['scope']??'facility','base_facility'=>(int)$u['facility_id'],'days'=>$days,'facilities'=>$rows]);
   }
 
   // ---- Reminders: list (supervisor/admin) + run scheduler (admin) ----
