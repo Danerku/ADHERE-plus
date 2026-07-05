@@ -142,23 +142,26 @@ try {
   if(isset($simple[$r])){
     [$tbl,$allow]=$simple[$r];
     if($m==='GET'){ require_ep($_GET['episode']??0); $st=db()->prepare("SELECT * FROM `$tbl` WHERE episode_id=? ORDER BY id"); $st->execute([$_GET['episode']]); out($st->fetchAll()); }
-    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
+    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
       foreach($rows as $row){ require_ep($row['episode_id']??0); }
-      $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id']; $ids[]=insert($tbl,array_intersect_key($row,array_flip($allow))); }
+      $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id'];
+        if($tbl==='handovers') $row['from_provider_id']=$u['id'];   // sender identity from the session, never caller-supplied
+        if($tbl==='messages')  $row['from_user_id']=$u['id'];
+        $ids[]=insert($tbl,array_intersect_key($row,array_flip($allow))); }
       audit('create',$tbl,$ids[0]??null); out(['ids'=>$ids],201); }
   }
 
 
   // ---- Module 4: operational intelligence (monthly time-series + anomaly flags) ----
-  if ($r==='analytics' && $m==='GET'){ require_auth();
+  if ($r==='analytics' && $m==='GET'){ $u=require_auth(); $ids=scoped_facility_ids($u); $in=implode(',',array_fill(0,count($ids),'?'));  // scoped to the user's facility (supervisor: their woreda/zone/region)
     $months=[]; for($i=5;$i>=0;$i--){ $months[]=date('Y-m', strtotime("-$i month")); }
-    $series=function($sql) use($months){ $out=[]; foreach($months as $mo){ $st=db()->prepare($sql); $st->execute([$mo]); $out[]=(int)($st->fetch()['c']??0);} return $out; };
+    $series=function($sql) use($months,$ids){ $out=[]; foreach($months as $mo){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$mo])); $out[]=(int)($st->fetch()['c']??0);} return $out; };
     $ind=[
-      'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary WHERE DATE_FORMAT(delivery_datetime,'%Y-%m')=?"),
-      'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores WHERE band='red' AND DATE_FORMAT(scored_at,'%Y-%m')=?"),
-      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies WHERE outcome='fresh_stillbirth' AND DATE_FORMAT(recorded_at,'%Y-%m')=?"),  // newborn record = source of truth (counts each baby, incl. twins)
-      'partographs'=>$series("SELECT COUNT(DISTINCT episode_id) c FROM partograph_obs WHERE DATE_FORMAT(recorded_at,'%Y-%m')=?"),
+      'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
+      'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
+      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
+      'partographs'=>$series("SELECT COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?"),
     ];
     // EWMA anomaly flag: last point > mean + 2*std of the series
     $flags=[]; foreach($ind as $k=>$v){ $n=count($v); $mean=array_sum($v)/max(1,$n);
@@ -168,13 +171,13 @@ try {
   }
 
   // ---- DHIS2 indicator export (aggregate) ----
-  if ($r==='dhis2' && $m==='GET'){ require_auth();
-    $fac=$_GET['facility']??null; $period=$_GET['period']??date('Y-m');
-    $one=function($sql,$p){ $st=db()->prepare($sql); $st->execute([$p]); return (int)($st->fetch()['c']??0); };
+  if ($r==='dhis2' && $m==='GET'){ $u=require_auth(); $ids=scoped_facility_ids($u); $in=implode(',',array_fill(0,count($ids),'?'));  // scoped to the user's facility / supervisor scope
+    $fac=$_GET['facility']??$u['facility_id']; $period=$_GET['period']??date('Y-m');
+    $one=function($sql,$p) use($ids){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$p])); return (int)($st->fetch()['c']??0); };
     $ind=[
-      'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary WHERE DATE_FORMAT(delivery_datetime,'%Y-%m')=?",$period),
-      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies WHERE outcome='fresh_stillbirth' AND DATE_FORMAT(recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
-      'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores WHERE band='red' AND DATE_FORMAT(scored_at,'%Y-%m')=?",$period),
+      'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?",$period),
+      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
+      'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?",$period),
     ];
     out(['facility'=>$fac,'period'=>$period,'indicators'=>$ind]);
   }

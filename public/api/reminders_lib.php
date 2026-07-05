@@ -12,9 +12,11 @@ function sms_send_stub($phone, $message){
   // ---- Integration point -------------------------------------------
   // Example (pseudo): POST to gateway with sender ID + $phone + $message,
   // return true only when the gateway accepts the message for delivery.
-  // For now we simulate acceptance and log so the pipeline is testable.
-  error_log('ADHERE SMS -> '.$phone.' : '.$message);
-  return $phone !== null && strlen(preg_replace('/\D/','',$phone)) >= 7;
+  // For now we simulate acceptance. Log a redacted line only — never the phone or message (PII).
+  $digits = preg_replace('/\D/','',(string)$phone);
+  $masked = strlen($digits) >= 3 ? ('***'.substr($digits,-3)) : '***';
+  error_log('ADHERE SMS queued to '.$masked);
+  return strlen($digits) >= 7;
 }
 
 // Generate due reminders + send any pending ones. Returns a small summary.
