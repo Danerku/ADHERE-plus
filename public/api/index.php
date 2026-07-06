@@ -19,7 +19,8 @@ try {
   }
   if ($r==='logout'){ audit('logout'); $_SESSION=[]; session_destroy(); out(['ok'=>true]); }
   if ($r==='me'){ out(['user'=>user()]); }
-  require_auth(); // everything below requires a session
+  $__me=require_auth(); // everything below requires a session
+  if(($__me['must_change_password']??0)==1 && !in_array($r,['password','logout','me'],true)) err('password change required',403); // server-side enforcement, not just UI
   if(in_array($m,['POST','PATCH','DELETE'],true)) idem_guard(); // dedup offline-replayed writes
 
   // ---- users (admin only) ----

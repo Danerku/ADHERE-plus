@@ -1,7 +1,8 @@
 <?php
 // CORS for the Android/native app origins (credentialed) + preflight
 $__origin=$_SERVER['HTTP_ORIGIN']??'';
-$__allow=['https://localhost','capacitor://localhost','http://localhost','http://localhost:8080'];
+$__allow=['https://localhost','capacitor://localhost'];
+if(!getenv('SITE_DOMAIN')){ $__allow[]='http://localhost'; $__allow[]='http://localhost:8080'; } // dev origins only when not in production
 if(($__d=getenv('SITE_DOMAIN'))) $__allow[]='https://'.$__d;
 if($__origin && in_array($__origin,$__allow,true)){
   header('Access-Control-Allow-Origin: '.$__origin);
@@ -23,7 +24,11 @@ session_set_cookie_params(['httponly'=>true,'samesite'=>$__secure?'None':'Lax','
 session_start();
 header('Content-Type: application/json');
 function body(){ $b=json_decode(file_get_contents('php://input'), true); return is_array($b)?$b:[]; }
-function out($d, $code=200){ http_response_code($code); echo json_encode($d); exit; }
+function out($d, $code=200){
+  // Record the idempotency key ONLY after a successful (2xx) response, so a failed write can be safely retried.
+  if($code<300 && !empty($GLOBALS['__idem_key'])){ try{ db()->prepare("INSERT IGNORE INTO idem_keys(k) VALUES(?)")->execute([$GLOBALS['__idem_key']]); }catch(\PDOException $e){} $GLOBALS['__idem_key']=null; }
+  http_response_code($code); echo json_encode($d); exit;
+}
 function err($m,$code=400){ out(['error'=>$m], $code); }
 function user(){ return $_SESSION['user'] ?? null; }
 function require_auth(){ $u=user(); if(!$u) err('auth required',401); return $u; }
@@ -56,8 +61,12 @@ function scoped_facility_ids($u){
 function idem_guard(){
   $k=$_SERVER['HTTP_X_IDEMPOTENCY_KEY']??'';
   if($k==='' || strlen($k)>64) return;
-  try{ db()->prepare("INSERT INTO idem_keys(k) VALUES(?)")->execute([$k]); }
-  catch(\PDOException $e){ if($e->getCode()==='23000'){ out(['duplicate'=>true],200); } /* else: table missing -> ignore */ }
+  try{
+    $st=db()->prepare("SELECT 1 FROM idem_keys WHERE k=?"); $st->execute([$k]);
+    if($st->fetch()) out(['duplicate'=>true],200);                                  // this write already committed once
+    if(mt_rand(1,50)===1) db()->exec("DELETE FROM idem_keys WHERE at < (NOW() - INTERVAL 7 DAY)"); // opportunistic prune
+  }catch(\PDOException $e){ return; }                                               // table missing pre-migration -> ignore
+  $GLOBALS['__idem_key']=$k;                                                        // committed by out() only on success
 }
 function insert($table,$data){
   $cols=array_keys($data); $ph=implode(',',array_fill(0,count($cols),'?'));
