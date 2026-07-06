@@ -7,10 +7,16 @@ if($__origin && in_array($__origin,$__allow,true)){
   header('Access-Control-Allow-Origin: '.$__origin);
   header('Vary: Origin');
   header('Access-Control-Allow-Credentials: true');
-  header('Access-Control-Allow-Headers: Content-Type');
+  header('Access-Control-Allow-Headers: Content-Type, X-Idempotency-Key');
   header('Access-Control-Allow-Methods: GET,POST,PATCH,DELETE,OPTIONS');
 }
 if(($_SERVER['REQUEST_METHOD']??'')==='OPTIONS'){ http_response_code(204); exit; }
+// CSRF defence: a browser CSRF attack always sends an Origin header; reject cross-origin state changes.
+// (No Origin header at all = non-browser client, e.g. cron/curl — not a CSRF vector, allowed.)
+$__method=$_SERVER['REQUEST_METHOD']??'GET';
+if(in_array($__method,['POST','PUT','PATCH','DELETE'],true) && $__origin!=='' && !in_array($__origin,$__allow,true)){
+  http_response_code(403); header('Content-Type: application/json'); echo json_encode(['error'=>'cross-origin request blocked']); exit;
+}
 $__secure=(!empty($_SERVER['HTTPS'])||($_SERVER['HTTP_X_FORWARDED_PROTO']??'')==='https');
 if(is_dir('/var/adhere-sessions') && is_writable('/var/adhere-sessions')) session_save_path('/var/adhere-sessions'); // persist across container rebuilds
 session_set_cookie_params(['httponly'=>true,'samesite'=>$__secure?'None':'Lax','secure'=>$__secure]);
@@ -44,6 +50,14 @@ function scoped_facility_ids($u){
     }
   }
   return [(int)$u['facility_id']];
+}
+// Idempotency: if the client sends a stable X-Idempotency-Key (used for offline-queued writes),
+// record it once; a replay of the same key short-circuits so a lost-response write can't double-commit.
+function idem_guard(){
+  $k=$_SERVER['HTTP_X_IDEMPOTENCY_KEY']??'';
+  if($k==='' || strlen($k)>64) return;
+  try{ db()->prepare("INSERT INTO idem_keys(k) VALUES(?)")->execute([$k]); }
+  catch(\PDOException $e){ if($e->getCode()==='23000'){ out(['duplicate'=>true],200); } /* else: table missing -> ignore */ }
 }
 function insert($table,$data){
   $cols=array_keys($data); $ph=implode(',',array_fill(0,count($cols),'?'));

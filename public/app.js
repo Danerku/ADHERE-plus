@@ -55,22 +55,25 @@ function riskDrivers(o,feat){ const D=[];
   return D;
 }
 const online=()=>navigator.onLine;
+function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.now()+Math.random().toString(36).slice(2); } }
 
 async function api(method, path, bodyObj){
+  const write=method!=='GET'; const cid=write?newCid():null;   // stable key for idempotent (offline-safe) writes
   try{
-    const res=await fetch(API_BASE+'api/'+path,{method,headers:{'Content-Type':'application/json'},
+    const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
+    const res=await fetch(API_BASE+'api/'+path,{method,headers,
       credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined});
     if(!res.ok) throw new Error((await res.json()).error||res.status);
     return await res.json();
   }catch(e){
-    if(method!=='GET' && !online()){ queue({method,path,bodyObj}); return {queued:true}; }
+    if(write && !online()){ queue({method,path,bodyObj,cid}); return {queued:true}; }
     throw e;
   }
 }
-function queue(item){ const q=JSON.parse(localStorage.qq||'[]'); item.by=(ME&&ME.id)||null; q.push(item); localStorage.qq=JSON.stringify(q); paintNet(); }
+function queue(item){ const q=JSON.parse(localStorage.qq||'[]'); item.by=(ME&&ME.id)||null; if(!item.cid) item.cid=newCid(); q.push(item); localStorage.qq=JSON.stringify(q); paintNet(); }
 async function flush(){ let q=JSON.parse(localStorage.qq||'[]'); if(!q.length)return; const cur=(ME&&ME.id)||null; const keep=[];
   for(const it of q){ if(it.by && cur && it.by!==cur){ keep.push(it); continue; }   // shared tablet: never replay another user's queued writes under this session
-    try{ const res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(it.bodyObj)}); if(!res.ok){ if(res.status>=500) keep.push(it); else { const dl=JSON.parse(localStorage.dlq||'[]'); dl.push(Object.assign({status:res.status,at:Date.now()},it)); localStorage.dlq=JSON.stringify(dl); } } }catch(e){ keep.push(it);} }
+    try{ const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid; const res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:hd,credentials:'include',body:JSON.stringify(it.bodyObj)}); if(!res.ok){ if(res.status>=500) keep.push(it); else { const dl=JSON.parse(localStorage.dlq||'[]'); dl.push(Object.assign({status:res.status,at:Date.now()},it)); localStorage.dlq=JSON.stringify(dl); } } }catch(e){ keep.push(it);} }
   localStorage.qq=JSON.stringify(keep); paintNet(); }
 function paintNet(){ const q=JSON.parse(localStorage.qq||'[]'); const n=$('#net');
   const dl=(JSON.parse(localStorage.dlq||'[]')).length; n.textContent=(online()?(q.length?('sync '+q.length+' pending'):'online'):'offline')+(dl?(' · '+dl+' failed'):'');
@@ -95,10 +98,26 @@ function route(){
   $('#who').textContent = ME?(' — '+ME.full_name+' ['+ME.role+']'+(ME.facility_name?' · '+ME.facility_name:'')+(ME._offline?' · offline':'')):'';
   $('#logout').style.display = ME?'inline-block':'none';
   if(!ME) return login();
+  if(ME.must_change_password==1 && !ME._offline) return forcePw();
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
+}
+
+function forcePw(){
+  $('#logout').style.display='inline-block';
+  app().innerHTML=`<div class="card" style="max-width:390px;margin:44px auto">
+    <h3>Set a new password</h3>
+    <p class="muted">For security, choose a new password before continuing.</p>
+    <label>Current password<input id="cp0" type="password" autocomplete="current-password"></label>
+    <label style="margin-top:8px">New password (min 8 characters)<input id="np1" type="password" autocomplete="new-password"></label>
+    <label style="margin-top:8px">Confirm new password<input id="np2" type="password" autocomplete="new-password"></label>
+    <button class="act" id="setpw" style="margin-top:12px">Save and continue</button> <span class="muted" id="fpm"></span></div>`;
+  $('#setpw').onclick=async()=>{ const a=np1.value,b=np2.value,c=cp0.value;
+    if(a.length<8){ $('#fpm').textContent=' at least 8 characters'; return; }
+    if(a!==b){ $('#fpm').textContent=' passwords do not match'; return; }
+    try{ const r=await api('POST','password',{current:c,new:a}); if(r&&r.ok){ ME.must_change_password=0; localStorage.me=JSON.stringify(ME); location.hash='#home'; route(); } else $('#fpm').textContent=' '+((r&&r.error)||'error'); }catch(e){ $('#fpm').textContent=' '+(e.message||'error'); } };
 }
 
 function login(){
@@ -185,7 +204,7 @@ async function register(){
     <label>Diabetes<select id="dm"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
     <label>Cardiac / renal disease<select id="crd"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
     ${ecPicker('lnmp','Last menstrual period')}
-    <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option><option value="highrisk">High risk</option></select></label>
+    <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option></select></label>
     <label>Ruptured membrane<select id="rm"><option value="0">No</option><option value="1">Yes</option></select></label>
    </div><p class="muted" id="edd"></p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
   const showEdd=()=>{ const l=ecGet('lnmp'); const e=l?addDays(l,280):null; $('#edd').textContent=e?('Estimated delivery date: '+esc(e)+(window.Ethiopian?(' ('+Ethiopian.fmt(new Date(e+'T00:00:00'))+')'):'')):''; };
@@ -206,7 +225,7 @@ async function register(){
 async function labour(){
   const rows=await api('GET','episodes?category=labour').catch(()=>[]);
   app().innerHTML=nav()+`<div class="card"><h3>Labour ward</h3><table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}</td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${r.high_risk==1?' <span class="pill amber">Higher risk</span>':''}</td>
     <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No women in labour. Register one.</td></tr>'}
    </table></div>`;
 }
@@ -533,19 +552,19 @@ async function ancList(){
   const rows=await api('GET','episodes?category=anc').catch(()=>[]);
   app().innerHTML=nav()+`<div class="card"><h3>Antenatal care</h3>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}</td>
-    <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button> <button class="sec" data-w="${r.woman_id}" data-to="highrisk">&rarr; High risk</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
-   </table><p class="muted">"&rarr; Labour / High risk" admits the woman into that stream (recorded as an admission from ANC).</p></div>`;
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${r.high_risk==1?' <span class="pill amber">Higher risk</span>':''}</td>
+    <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
+   </table><p class="muted">"&rarr; Labour" admits the woman into the labour ward. Higher-risk women are flagged automatically (from registration history or ANC screening) and gathered under the High risk tab.</p></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_anc'));
 }
 
 async function highriskList(){
-  const rows=await api('GET','episodes?category=highrisk').catch(()=>[]);
-  app().innerHTML=nav()+`<div class="card"><h3>High-risk &amp; latent care</h3>
-   <p class="muted">Women admitted to close monitoring (high-risk pregnancy or latent-phase labour). The AI risk score on the partograph helps prioritise who to see first.</p>
-   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>From</th><th>Status</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.admitted_from||'new')}</td><td>${esc(r.status)}</td>
-    <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No high-risk women. Admit from Antenatal, or Register with service = High risk.</td></tr>'}
+  const rows=await api('GET','episodes?flag=highrisk').catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>High-risk worklist</h3>
+   <p class="muted">Women in antenatal care or labour who carry a risk factor &mdash; flagged automatically from their registration history or ANC screening. A live worklist to help prioritise who to see first; risk is a status, not a separate ward.</p>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Pathway</th><th>Status</th><th>Actions</th></tr>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.service_category||'')}</td><td>${esc(r.status)} <span class="pill amber">Higher risk</span></td>
+    <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No higher-risk women right now. Women are flagged here automatically from their registration risk history or ANC screening.</td></tr>'}
    </table></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_highrisk'));
 }

@@ -20,6 +20,7 @@ try {
   if ($r==='logout'){ audit('logout'); $_SESSION=[]; session_destroy(); out(['ok'=>true]); }
   if ($r==='me'){ out(['user'=>user()]); }
   require_auth(); // everything below requires a session
+  if(in_array($m,['POST','PATCH','DELETE'],true)) idem_guard(); // dedup offline-replayed writes
 
   // ---- users (admin only) ----
   if ($r==='users'){ require_role(['admin']);
@@ -28,6 +29,7 @@ try {
       foreach($rows as $i=>$row){
         $un=trim($row['username']??''); $pw=(string)($row['password']??''); $role=$row['role']??'';
         if($un===''||$pw===''||$role===''){ $errors[]=['row'=>$i,'error'=>'username, password and role are required']; continue; }
+        if(strlen($pw)<8){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'password must be at least 8 characters']; continue; }
         if(!in_array($role,['recorder','provider','observer','supervisor','admin'])){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'invalid role']; continue; }
         $ex=db()->prepare("SELECT id FROM users WHERE username=?"); $ex->execute([$un]); if($ex->fetch()){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'username already taken']; continue; }
         $scope=in_array(($row['scope']??'facility'),['facility','woreda','zone','region'])?($row['scope']??'facility'):'facility';
@@ -41,7 +43,7 @@ try {
       if(isset($b['is_active'])){ if((int)$id===(int)$me['id'] && !$b['is_active']) err('you cannot deactivate your own account'); db()->prepare("UPDATE users SET is_active=? WHERE id=?")->execute([$b['is_active']?1:0,$id]); }
       if(isset($b['role']) && in_array($b['role'],['recorder','provider','observer','supervisor','admin'])){ db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]); }
       if(isset($b['scope']) && in_array($b['scope'],['facility','woreda','zone','region'])){ db()->prepare("UPDATE users SET scope=? WHERE id=?")->execute([$b['scope'],$id]); }
-      if(!empty($b['password'])){ db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
+      if(!empty($b['password'])){ if(strlen($b['password'])<8) err('password must be at least 8 characters'); db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
       audit('update_user','users',$id); out(['ok'=>true]); }
   }
   if ($r==='facilities'){ require_role(['admin']);
@@ -73,7 +75,8 @@ try {
     if(strlen($b['new'])<8) err('new password must be at least 8 characters');
     $st=db()->prepare("SELECT password_hash FROM users WHERE id=?"); $st->execute([$u['id']]); $row=$st->fetch();
     if(!$row || !password_verify($b['current'],$row['password_hash'])) err('current password is incorrect',403);
-    db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['new'],PASSWORD_DEFAULT),$u['id']]);
+    db()->prepare("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?")->execute([password_hash($b['new'],PASSWORD_DEFAULT),$u['id']]);
+    if(isset($_SESSION['user'])) $_SESSION['user']['must_change_password']=0;
     audit('change_own_password','users',$u['id']); out(['ok'=>true]); }
 
   // ---- women (registration) ----
@@ -96,8 +99,11 @@ try {
 
   // ---- episodes ----
   if ($r==='episodes'){
-    if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.lnmp,w.edd FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.facility_id=?";
-      $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; } $sql.=" ORDER BY e.id DESC LIMIT 200";
+    if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $flag=$_GET['flag']??null;
+      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))"; // derived risk flag (no user input)
+      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.lnmp,w.edd, $hr AS high_risk FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.facility_id=?";
+      $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
+      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
