@@ -20,13 +20,14 @@
       if(d.x)s+='<text x="'+X(i)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="#8a8880">'+d.x+'</text>';});
     return '<svg viewBox="0 0 '+W+' '+H+'" width="100%">'+s+'</svg>';
   }
-  function gauge(pct, o){ o=o||{}; var col=pct>=0.8?'#0f6e56':pct>=0.5?'#854f0b':'#a32d2d';
-    var W=180,H=100,cx=90,cy=92,r=70; function pt(a){return [cx+r*Math.cos(a),cy+r*Math.sin(a)];}
-    var a0=Math.PI, a1=Math.PI+pct*Math.PI; var [x0,y0]=pt(a0),[x1,y1]=pt(a1),[xe,ye]=pt(2*Math.PI);
-    return '<svg viewBox="0 0 '+W+' '+H+'" width="180"><path d="M'+x0+' '+y0+' A'+r+' '+r+' 0 0 1 '+xe+' '+ye+'" fill="none" stroke="#eee" stroke-width="12"/>'
-      +'<path d="M'+x0+' '+y0+' A'+r+' '+r+' 0 '+(pct>0.5?1:0)+' 1 '+x1+' '+y1+'" fill="none" stroke="'+col+'" stroke-width="12"/>'
-      +'<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-size="26" font-weight="600" fill="'+col+'">'+Math.round(pct*100)+'%</text>'
-      +'<text x="'+cx+'" y="'+(cy+12)+'" text-anchor="middle" font-size="11" fill="#8a8880">'+(o.label||'adherence')+'</text></svg>';
+  function gauge(pct, o){ o=o||{}; pct=Math.max(0,Math.min(1,pct||0)); var col=pct>=0.8?'#0f6e56':pct>=0.5?'#854f0b':'#a32d2d';
+    var W=200,H=132,cx=100,cy=104,r=74; function pt(a){return [cx+r*Math.cos(a),cy+r*Math.sin(a)];}
+    var a0=Math.PI, a1=Math.PI+pct*Math.PI; var p0=pt(a0),pe=pt(2*Math.PI),p1=pt(a1);
+    return '<svg viewBox="0 0 '+W+' '+H+'" width="190" style="max-width:100%">'
+      +'<path d="M'+p0[0]+' '+p0[1]+' A'+r+' '+r+' 0 0 1 '+pe[0]+' '+pe[1]+'" fill="none" stroke="#e7ece9" stroke-width="16" stroke-linecap="round"/>'
+      +'<path d="M'+p0[0]+' '+p0[1]+' A'+r+' '+r+' 0 '+(pct>0.5?1:0)+' 1 '+p1[0]+' '+p1[1]+'" fill="none" stroke="'+col+'" stroke-width="16" stroke-linecap="round"/>'
+      +'<text x="'+cx+'" y="'+(cy-14)+'" text-anchor="middle" font-size="34" font-weight="700" fill="'+col+'">'+Math.round(pct*100)+'%</text>'
+      +'<text x="'+cx+'" y="'+(cy+16)+'" text-anchor="middle" font-size="12" fill="#7d8b84">'+(o.label||'adherence')+'</text></svg>';
   }
   function bars(data, o){ o=o||{}; var W=o.w||560,H=o.h||180,mL=38,mR=12,mT=12,mB=40;
     var mx=Math.max(...data.map(d=>d.v),1),n=data.length,bw=(W-mL-mR)/n*0.6;
