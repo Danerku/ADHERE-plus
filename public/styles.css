@@ -259,3 +259,41 @@ main > .card:only-child{box-shadow:var(--shadow-lg)}
   input,select,textarea{height:48px; font-size:16px}
   button.act{min-height:48px; width:100%}
 }
+
+/* ---------- Sticky patient context bar ---------- */
+:root{--i-home:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 11l8-7 8 7'/><path d='M6 10v9h12v-9'/></svg>")}
+.pbar{display:flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--border);
+  border-radius:14px; padding:9px 12px; margin-bottom:14px; box-shadow:var(--shadow-sm);
+  position:sticky; top:52px; z-index:30}
+.pav{width:34px; height:34px; border-radius:50%; background:var(--brand-050); color:var(--brand-700);
+  display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px; letter-spacing:.3px; flex:0 0 auto}
+.pinfo{min-width:0; flex:1}
+.pnm{font-weight:700; font-size:14.5px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.pmeta{font-size:12px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px}
+.pback{flex:0 0 auto; font-size:12.5px; font-weight:600; color:var(--brand-700); text-decoration:none;
+  border:1px solid var(--border-strong); border-radius:var(--radius-pill); padding:6px 13px}
+.pback:hover{background:var(--brand-050); border-color:var(--brand-100)}
+
+/* ---------- Bottom navigation (phones) ---------- */
+.botnav{display:none; position:fixed; left:0; right:0; bottom:0; z-index:60; background:#fff;
+  border-top:1px solid var(--border); box-shadow:0 -2px 12px rgba(16,40,34,.07);
+  padding-bottom:env(safe-area-inset-bottom,0)}
+.bn{flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; padding:8px 2px 7px;
+  text-decoration:none; color:var(--muted); font-size:10.5px; font-weight:600}
+.bn.on{color:var(--brand-700)}
+.bn::before{content:""; width:22px; height:22px; background-color:currentColor;
+  -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; -webkit-mask-position:center; mask-position:center;
+  -webkit-mask-size:contain; mask-size:contain}
+.bn[href='#home']::before{-webkit-mask-image:var(--i-home);mask-image:var(--i-home)}
+.bn[href='#antenatal']::before{-webkit-mask-image:var(--i-calendar);mask-image:var(--i-calendar)}
+.bn[href='#labour']::before{-webkit-mask-image:var(--i-activity);mask-image:var(--i-activity)}
+.bn[href='#pnc']::before{-webkit-mask-image:var(--i-baby);mask-image:var(--i-baby)}
+.bn[href='#dashboard']::before,.bn[href='#supervisor']::before{-webkit-mask-image:var(--i-dashboard);mask-image:var(--i-dashboard)}
+.bn[href='#reminders']::before{-webkit-mask-image:var(--i-bell);mask-image:var(--i-bell)}
+
+@media (max-width:560px){
+  .botnav{display:flex}
+  main{padding-bottom:76px}
+  .pbar{top:46px}
+  .pbar + .navbar{display:none}   /* on a patient screen, the bar + bottom nav replace the top row */
+}
