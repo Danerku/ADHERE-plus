@@ -499,21 +499,51 @@ const ANC_ITEMS=[
  ['MED_CHRONIC_HTN','general_medical','Chronic hypertension'],
  ['MED_OTHER_SEVERE','general_medical','Any other severe medical condition (TB, HIV, cancer, DVT...)']
 ];
+// Recommended action level per risk factor, tuned for Ethiopian PHC (BEmONC) reality.
+// 'here'     = manageable at this facility WITH a birth-preparedness plan + skilled attendance
+// 'hospital' = plan delivery at a hospital (BEmONC/CEmONC) ahead of time
+// 'urgent'   = arrange referral/transfer now
+const ANC_TIER={
+ OBS_PREV_STILLBIRTH:'here', OBS_3_ABORTIONS:'here', OBS_BW_LT2500:'here', OBS_BW_GT4500:'here',
+ OBS_PREV_PREECLAMPSIA:'here', OBS_PREV_SURGERY:'hospital',
+ CUR_MULTIPLE:'hospital', CUR_AGE_LT16:'here', CUR_AGE_GT40:'here', CUR_BLEEDING:'urgent',
+ MED_DIABETES:'hospital', MED_CHRONIC_HTN:'here', MED_OTHER_SEVERE:'hospital'
+};
+const TIER_TXT={here:'manage here with a birth plan', hospital:'plan delivery at a hospital', urgent:'refer now (urgent)'};
+const TIER_CLS={here:'amber', hospital:'amber', urgent:'red'};
+const TIER_RANK={here:1, hospital:2, urgent:3};
+const CARE_PLANS=[['manage_here','Manage here (with birth plan)'],['plan_hospital','Plan hospital delivery'],['refer_now','Refer now'],['refer_not_feasible','Referral advised but not feasible']];
 async function ancScreen(id){
   const existing=await api('GET','anc_screening?episode='+id).catch(()=>[]);
   const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
+  const planPrev=prev['PLAN_DECISION']||''; const notePrev=prev['PLAN_NOTE']||'';
   let html=nav()+`<div class="card"><h3>ANC risk screening — episode ${esc(id)} <span id="ancband" class="pill"></span></h3>
-    <p class="muted">WHO/MCPC classifying form. Any "Yes" means the woman needs specialised (hospital) care rather than basic ANC.</p>`;
+    <p class="muted">WHO/MCPC risk factors. A "Yes" does not mean automatic hospital transfer — most higher-risk women are safely managed at this facility with a birth-preparedness plan. Each flag below shows a suggested action for this setting; the provider records the final plan.</p>`;
   Object.keys(ANC_GROUPS).forEach(gk=>{ html+=`<h4>${ANC_GROUPS[gk]}</h4>`;
     ANC_ITEMS.filter(it=>it[1]===gk).forEach(it=>{ const v=prev[it[0]]||'no';
-      html+=`<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px">${esc(it[2])}
+      html+=`<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>${esc(it[2])} <span class="pill" data-act="${it[0]}" style="display:none"></span></span>
         <select data-code="${it[0]}" data-group="${it[1]}" style="width:132px"><option value="no"${v==='no'?' selected':''}>No</option><option value="yes"${v==='yes'?' selected':''}>Yes</option><option value="unknown"${v==='unknown'?' selected':''}>Unknown</option></select></label></div>`; }); });
+  html+=`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)"><h4>Care plan</h4>
+    <div class="grid"><label>Provider plan<select id="ancplan"><option value="">-</option>${CARE_PLANS.map(p=>`<option value="${p[0]}"${planPrev===p[0]?' selected':''}>${p[1]}</option>`).join('')}</select></label>
+    <label>Plan note / reason<input id="ancnote" value="${esc(notePrev)}" placeholder="birth plan, transport, why referral not feasible..."></label></div></div>`;
   html+=`<button class="act" id="ancsave" style="margin-top:12px">Save screening</button> <span class="muted" id="ancm"></span></div>`;
   app().innerHTML=html;
   const sels=()=>[...document.querySelectorAll('#app select[data-code]')];
-  const evalBand=()=>{ const yes=sels().some(s=>s.value==='yes'); const b=$('#ancband'); b.textContent=yes?'Specialised care needed':'Basic ANC'; b.className='pill '+(yes?'red':'green'); };
+  const evalBand=()=>{
+    let top=0; sels().forEach(s=>{ const code=s.dataset.code; const tag=document.querySelector(`[data-act="${code}"]`);
+      if(s.value==='yes'&&ANC_TIER[code]){ const t=ANC_TIER[code]; tag.textContent='→ '+TIER_TXT[t]; tag.className='pill '+TIER_CLS[t]; tag.style.display='inline-flex'; top=Math.max(top,TIER_RANK[t]); }
+      else { tag.style.display='none'; } });
+    const b=$('#ancband');
+    if(top>=3){ b.textContent='Urgent — arrange referral now'; b.className='pill red'; }
+    else if(top===2){ b.textContent='Plan delivery at a hospital (BEmONC/CEmONC)'; b.className='pill amber'; }
+    else if(top===1){ b.textContent='Higher-risk pregnancy — make a birth-preparedness plan and ensure skilled attendance'; b.className='pill amber'; }
+    else { b.textContent='Routine ANC'; b.className='pill green'; }
+  };
   sels().forEach(s=>s.onchange=evalBand); evalBand();
   $('#ancsave').onclick=async()=>{ const rows=sels().map(s=>({episode_id:+id,item_code:s.dataset.code,item_group:s.dataset.group,response:s.value}));
+    const pv=($('#ancplan').value||''); const nv=($('#ancnote').value||'').slice(0,255);
+    if(pv) rows.push({episode_id:+id,item_code:'PLAN_DECISION',item_group:'care_plan',response:pv});
+    if(nv) rows.push({episode_id:+id,item_code:'PLAN_NOTE',item_group:'care_plan',response:nv});
     const r=await api('POST','anc_screening',rows); $('#ancm').textContent=(r&&r.ids)?' saved ('+rows.length+' items)':' '+((r&&r.error)||'saved offline'); };
 }
 
