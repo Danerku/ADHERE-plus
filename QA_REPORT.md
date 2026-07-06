@@ -46,7 +46,7 @@ caught are now fixed and re-verified (14/14 post-fix E2E checks pass):
 
 | # | Item | Fix |
 |---|---|---|
-| 1 | Docker seed/schema duplicate usernames → first-run failure | Removed all seed inserts from schema.sql / 01-schema.sql; demo seed lives only in 02-seed.sql (0 vs 1 verified) |
+| 1 | Docker seed/schema duplicate usernames → first-run failure | Removed all seed inserts from schema.sql / 01-schema.sql; test seed lives only in 02-seed.sql (0 vs 1 verified) |
 | 3 | PHP API bundled inside Android web assets | Deleted android-app/www/api; added sync-web.sh that excludes api; workflow runs it |
 | 6 | Model non-monotonic / no clinical guardrails / feature subset | Added deterministic clinical red-flag layer that can only ESCALATE the AI band (severe BP, severe/abnormal FHR, moulding, fever, arrested/protracted labour); neutral defaults for uncollected features; "pre-clinical — not for clinical use" banner in the UI |
 | 7 | Acknowledge not persisted | Added PATCH /risk_scores/{id} (sets provider_ack); front-end captures the score id and persists the acknowledgement |

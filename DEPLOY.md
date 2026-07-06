@@ -33,7 +33,7 @@ for local development only).
 3. `docker compose --env-file .env -f docker-compose.prod.yml up -d --build`.
    Caddy issues a Let's Encrypt certificate for `SITE_DOMAIN` automatically.
 4. Sign in as `admin`, change the password immediately, create real users.
-5. Keep any pre-production instance to simulated / de-identified data only.
+5. Keep any pre-production instance to test / de-identified data only.
    Real patient data must stay in an Ethiopia-compliant, data-resident
    environment.
 

@@ -128,11 +128,11 @@ def train_export(X,Y,feats,meta,version,note,path,thr=(0.33,0.60)):
     json.dump(model,open(path,"w")); print(f"    exported {path} trees={len(trees)}")
     return auc
 
-note_m=("Trained on a clinically-grounded simulated labour cohort (~%d labours) whose complication "
+note_m=("Trained on a clinically-grounded model-development labour cohort (~%d labours) whose complication "
         "prevalences are calibrated to Ethiopia/SSA peer-reviewed meta-analyses. Clinical decision "
         "support only; retrain and revalidate on real de-identified records before clinical use." % N)
 note_n=("Newborn resuscitation-need estimate from the intrapartum picture, trained on the same "
-        "clinically-grounded simulated cohort. Decision support only; revalidate on real records.")
+        "clinically-grounded model-development cohort. Decision support only; revalidate on real records.")
 os.makedirs("/tmp/mout",exist_ok=True)
 train_export(X,Y,FEATS,META,"adhere-eth-1.2",note_m,"/tmp/mout/risk_model.json")
 train_export(NX,NY,NB_FEATS,None,"adhere-newborn-eth-1.0",note_n,"/tmp/mout/newborn_model.json",thr=(0.30,0.55))

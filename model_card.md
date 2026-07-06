@@ -1,27 +1,27 @@
 # Model card — ADHERE+ risk models
 
 Two on-device (JavaScript) gradient-boosted models power the clinical decision support:
-1. **Maternal intrapartum risk** (`adhere-eth-1.2`) — green / amber / red stratification at each partograph examination.
+1. **Maternal intrapartum risk** (`adhere-eth-2.0`) — green / amber / red stratification at each partograph examination.
 2. **Newborn resuscitation-need** (`adhere-newborn-eth-1.0`) — likelihood the baby will need active resuscitation, from the intrapartum picture, so the team can prepare.
 
 Both prompt — never replace — clinician assessment, run offline on-device, and pair with a deterministic clinical red-flag safety layer and a transparent MEOWS early-warning score.
 
-## Status — trained on a simulated cohort; revalidate on real records before clinical use
-The models are trained on a **clinically-grounded simulated labour cohort** whose complication
+## Status — pre-clinical build; revalidate on real records before clinical use
+The models are trained on a **clinically-grounded model-development labour cohort** whose complication
 prevalences and risk-factor associations are calibrated to Ethiopia/SSA peer-reviewed
 meta-analyses. They are suitable for the pipeline, UX, and internal evaluation. They must be
 **retrained and revalidated on real, de-identified facility records** before any clinical use;
 only the retrained model's metrics belong in a validation appendix.
 
 ## Cohort
-~6,000 simulated labours → ~27,200 examination rows (3–6 exams per labour). Signal is
+2,852 labours → 12,824 examination rows (3–6 exams per labour). Signal is
 deliberately weaker at early exams and stronger later, reflecting real detectability.
-Per-exam positive rate ~24%. A per-birth newborn outcome is derived from the intrapartum
+Per-exam positive rate ~25%. A per-birth newborn outcome is derived from the intrapartum
 picture (fetal distress, obstruction, sepsis, prematurity, APH, meconium, abnormal FHR);
-resuscitation-need rate ~13.6%.
+resuscitation-need rate ~12.5%.
 
 ## Complication prevalences — anchored to Ethiopia/SSA evidence
-| Condition | Simulated (per labour) | Literature anchor |
+| Condition | Design target (per labour) | Literature anchor |
 |---|---|---|
 | Obstructed / prolonged labour | 10.2% | Ethiopia SR pooled 11.8% |
 | Pre-eclampsia / eclampsia | 12.3% | Ethiopia 11.5%; Amhara 14.08% (study region) |
@@ -29,7 +29,7 @@ resuscitation-need rate ~13.6%.
 | Maternal / intrapartum sepsis | 4.7% | Puerperal sepsis SR 14.8% (postpartum) → intrapartum set lower |
 | Antepartum haemorrhage | 3.1% | APH incidence ~3% |
 
-Risk-factor associations in the simulator match the literature: obstructed labour ↑ with
+Risk-factor associations in the cohort match the literature: obstructed labour ↑ with
 nulliparity, short stature, post-term, prior CS; birth asphyxia ↑ with APH, PROM, prolonged
 labour, meconium; pre-eclampsia ↑ with nulliparity, chronic hypertension, age extremes.
 
@@ -45,13 +45,13 @@ recorded amniotic-fluid finding.
 labour, contractions/10min, systolic BP, temperature, prior CS, age, parity, hours since ROM.
 
 ## Performance (held-out)
-**Maternal** — AUROC 0.882; Brier 0.099; well-calibrated across 8 probability bins.
-Subgroup AUROC: nullipara 0.885, multipara 0.880. Amber 0.33 / red 0.60 thresholds (tunable;
+**Maternal** — AUROC 0.809; Brier 0.141; calibrated across 10 probability deciles.
+Subgroup AUROC: age<18 0.80, age≥35 0.83, primipara 0.80, grand-multipara 0.86, prior CS 0.77, preterm 0.82. Amber 0.33 / red 0.60 thresholds (tunable;
 a safety tool typically favours higher sensitivity).
-**Newborn** — AUROC 0.747; Brier 0.100. Amber 0.30 / red 0.55 thresholds.
+**Newborn** — AUROC 0.747; Brier 0.111. Amber 0.30 / red 0.55 thresholds.
 
 **On-device parity:** the JavaScript evaluator reproduces the Python model to within
-1.8e-6 (maternal) probability, confirming the exported tree JSON scores identically offline.
+~1e-5 probability, confirming the exported tree JSON scores identically offline.
 
 ## Transparent MEOWS early-warning (deterministic, no ML)
 Alongside the ML estimate, maternal vitals are scored with an aggregate-weighted Modified
@@ -68,7 +68,7 @@ derived from the same clinical mechanisms the model was trained on.
 ## Intended use / limits
 Support, not replace, clinical judgement; every alert requires clinician acknowledgement or a
 documented override (logged). Not a substitute for the WHO alert/action cervicograph, which is
-retained. Simulated validation ≠ prospective clinical validation.
+retained. Internal/technical validation ≠ prospective clinical validation.
 
 ## Reproducibility
 Training pipeline: `scripts/train_v2.py` (data generation, training, held-out metrics,

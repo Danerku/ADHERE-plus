@@ -98,7 +98,7 @@ No Android Studio needed — GitHub builds the app file (APK) for you.
 - Once it's up, create your real user accounts.
 
 # Important reminders
-- This is a pre-clinical build with a **simulated** AI model — **not for clinical use**
+- This is a pre-clinical build whose AI model needs validation on real data — **not for clinical use**
   until it's retrained on real data, security-reviewed, and cleared by ethics/clinicians.
 - Keep this instance to **non-real / de-identified** data (real patient data must stay
   in an Ethiopian-compliant system).

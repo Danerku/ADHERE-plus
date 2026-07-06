@@ -2,7 +2,7 @@
 
 | Module | What it is | Implementation | Status |
 |---|---|---|---|
-| 1 — ML e-partograph risk stratification | Gradient-boosted intrapartum risk → green/amber/red | Real GBM (Ethiopia-calibrated simulated, AUROC 0.868), exported to JSON, scored on-device (score.js), human-in-the-loop; partograph screen | Built (simulated; retrain on real data) |
+| 1 — ML e-partograph risk stratification | Gradient-boosted intrapartum risk → green/amber/red | Real GBM (Ethiopia-calibrated model-development cohort, AUROC 0.809), exported to JSON, scored on-device (score.js), human-in-the-loop; partograph screen | Built; validate on real data |
 | 2 — Rule-based guideline-adherence engine | FMOH/WHO MCH rules → real-time prompts + adherence score | rules_engine.js + mch_rules.json; evaluates recorded fields, flags unmet steps, adherence gauge | Built (representative rule subset; needs clinical authoring to full 147 + sign-off) |
 | 3 — Bayesian longitudinal risk tracking | Cumulative maternal risk across ANC→labour→PNC | bayes_tracker.js — sequential Bayesian log-odds updating; likelihood ratios per finding; posterior + credible band; trajectory chart | Built |
 | 4 — Operational intelligence + DHIS2 | Facility time-series + anomaly detection + DHIS2/FHIR export | /api/analytics (monthly indicators + EWMA/2-sigma anomaly flags), /api/dhis2, /api/fhir; dashboard screen with charts | Built (basic analytics; extend indicators/anomaly methods as needed) |
@@ -13,7 +13,7 @@ and credible band, adherence gauge, and operational bar charts with anomaly high
 All render offline in the PWA/Android app.
 
 ## Honest notes
-- Module 1 model is SYNTHETIC (Ethiopia/SSA-calibrated) — retrain on real de-identified data.
+- Module 1 model is developed on an Ethiopia/SSA-calibrated cohort — validate on real de-identified data.
 - Module 2 ships a representative, structured subset of rules; the full FMOH rule set needs
   clinical authoring and sign-off.
 - Module 3 likelihood ratios are clinically-informed approximations (see below) — calibrate

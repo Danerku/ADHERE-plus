@@ -16,7 +16,7 @@
 5. First-run hardening:
    - Sign in as admin, create real users, then remove any bootstrap defaults.
    - Rotate DB passwords; keep .env out of git.
-   - Keep this DEV instance to simulated/de-identified data only (data residency).
+   - Keep this DEV instance to test/de-identified data only (data residency).
 
 ## Option B — Epic cPanel / shared PHP hosting (no Docker)
 1. Create a MySQL database + user in cPanel; import every file in docker/init/ in filename order — 01-schema.sql, 02-seed.sql, then 03/04/05 migration files — so supervisor role, user scope, sms_consent, and reminders tables are all created.
