@@ -7,7 +7,8 @@
     this.index = {}; model.features.forEach((f,i)=>this.index[f]=i);
   }
   RiskModel.prototype.vector = function(obj){
-    return this.m.features.map(f => { var v = obj[f]; return (v===undefined||v===null||v==='')?0:+v; });
+    var d = this.m.defaults||{};
+    return this.m.features.map(f => { var v = obj[f]; return (v===undefined||v===null||v==='')?(d[f]!==undefined?d[f]:0):+v; });
   };
   RiskModel.prototype.predict = function(obj){
     var x = this.vector(obj);
