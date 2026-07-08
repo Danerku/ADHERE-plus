@@ -387,15 +387,40 @@ async function users(){
 }
 
 async function dashboard(){
-  let d; try{ d=await api('GET','analytics'); }catch(e){ d={months:[],indicators:{},anomalies:{}}; }
-  const mo=d.months.map(m=>m.slice(5));
-  const block=(k,label)=>{ const v=(d.indicators[k]||[]); const flag=d.anomalies[k];
-    return `<div class="card"><b>${label}</b> ${flag?'<span class="pill red">anomaly</span>':''}
-      ${Charts.bars(v.map((n,i)=>({x:mo[i],v:n,flag:flag&&i===v.length-1})))}</div>`; };
+  let d; try{ d=await api('GET','analytics'); }catch(e){ app().innerHTML=nav()+'<div class="card">Could not load dashboard: '+esc(e.message||'error')+'</div>'; return; }
+  const I=d.indicators||{}; const g=k=>(I[k]||[]);
+  const MN=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const mo=(d.months||[]).map(m=>MN[(+String(m).slice(5))-1]||String(m).slice(5));
+  const last=mo.length-1;
+  const rateS=(num,den,scale=100)=>g(num).map((x,i)=>{const dd=g(den)[i]; return (dd>0)?Math.round(scale*(x||0)/dd):null;});
+  const pgRate=rateS('partographs','labour'), ckRate=rateS('checklists','deliveries'), amRate=rateS('amtsl','deliveries'), pncRate=rateS('pnc','deliveries');
+  const sbRate=g('births').map((b,i)=> b>0?Math.round(1000*(g('stillbirths')[i]||0)/b):null);
+  // baseline-aware flag: needs >=4 points and >=3 non-zero prior months, then +/-2 SD (suppresses the cold-start roll-up)
+  const anom=(series,bad)=>{ const v=series.filter(x=>x!=null); if(v.length<4) return null; const prior=v.slice(0,-1), lv=v[v.length-1]; if(prior.filter(x=>x>0).length<3) return null; const m=prior.reduce((a,b)=>a+b,0)/prior.length; const sd=Math.sqrt(prior.reduce((a,b)=>a+(b-m)*(b-m),0)/prior.length); if(sd<=0) return null; if(lv>m+2*sd) return {dir:'▲',bad:(bad==='up')}; if(lv<m-2*sd) return {dir:'▼',bad:(bad==='down')}; return null; };
+  const rlast=a=>{for(let i=a.length-1;i>=0;i--) if(a[i]!=null) return a[i]; return null;};
+  const cur=k=>{const a=g(k); return a.length?(a[a.length-1]||0):0;};
+  const delta=k=>{const a=g(k); if(a.length<2) return ''; const dv=(a[a.length-1]||0)-(a[a.length-2]||0); return dv?(' <span class="muted" style="font-size:12px">'+(dv>0?'▲':'▼')+Math.abs(dv)+'</span>'):''; };
+  const pct=v=>v==null?'—':v+'%';
+  const kpi=(label,val,sub)=>`<div class="card" style="flex:1 1 120px;min-width:118px;margin:0"><div class="muted" style="font-size:11px">${label}</div><div style="font-size:22px;font-weight:600;line-height:1.15">${val}</div><div class="muted" style="font-size:11px">${sub||''}</div></div>`;
+  const block=(series,label,bad)=>{ const a=anom(series,bad); const pill=a?`<span class="pill ${a.bad?'red':'amber'}">${a.dir} change vs baseline</span>`:''; 
+    return `<div class="card"><b>${label}</b> ${pill}${Charts.bars(series.map((x,i)=>({x:mo[i],v:(x==null?0:x),flag:!!a&&i===series.length-1})))}</div>`; };
   app().innerHTML=nav()+`<div class="card"><h3>Facility dashboard</h3>
-    <p class="muted">Monthly indicators with automatic anomaly flags. Export: <a class="nav" href="${API_BASE}api/dhis2">DHIS2</a></p></div>
-    ${block('deliveries','Deliveries')}${block('red_alerts','Red AI alerts')}
-    ${block('partographs','Partographs started')}${block('stillbirths','Fresh stillbirths')}`;
+    <p class="muted">Care quality this month, with denominators. Flags mark a real change against an established baseline &mdash; not the initial roll-up when the system was new. Export: <a class="nav" href="${API_BASE}api/dhis2">DHIS2</a></p></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+      ${kpi('Deliveries', cur('deliveries')+delta('deliveries'), mo[last]||'')}
+      ${kpi('Partograph rate', pct(rlast(pgRate)), 'of labours')}
+      ${kpi('Checklist rate', pct(rlast(ckRate)), 'of deliveries')}
+      ${kpi('AMTSL rate', pct(rlast(amRate)), 'uterotonic &lt;1 min')}
+      ${kpi('PNC coverage', pct(rlast(pncRate)), 'of deliveries')}
+      ${kpi('Red AI alerts', cur('red_alerts')+delta('red_alerts'), 'this month')}
+      ${kpi('Referrals', cur('referrals')+delta('referrals'), 'this month')}
+      ${kpi('Stillbirths', cur('stillbirths'), (rlast(sbRate)!=null?rlast(sbRate)+'/1,000 births':'this month'))}
+    </div>
+    ${block(pgRate,'Partograph completion rate (%)','down')}
+    ${block(ckRate,'Safe-birth checklist rate (%)','down')}
+    ${block(g('deliveries'),'Deliveries (count)','neutral')}
+    ${block(sbRate,'Fresh stillbirths per 1,000 births','up')}
+    ${block(g('red_alerts'),'Red AI alerts (count)','up')}`;
 }
 
 function drawPG(id){
