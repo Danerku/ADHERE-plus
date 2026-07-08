@@ -165,16 +165,18 @@ try {
     $months=[]; for($i=5;$i>=0;$i--){ $months[]=date('Y-m', strtotime("-$i month")); }
     $series=function($sql) use($months,$ids){ $out=[]; foreach($months as $mo){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$mo])); $out[]=(int)($st->fetch()['c']??0);} return $out; };
     $ind=[
+      'labour'=>$series("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id IN ($in) AND e.service_category='labour' AND DATE_FORMAT(e.admission_datetime,'%Y-%m')=?"),
       'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
-      'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
-      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
       'partographs'=>$series("SELECT COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?"),
+      'checklists'=>$series("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.id=c.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(c.recorded_at,'%Y-%m')=?"),
+      'amtsl'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND d.amtsl_uterotonic='done' AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
+      'referrals'=>$series("SELECT COUNT(*) c FROM referrals r JOIN episodes e ON e.id=r.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(r.recorded_at,'%Y-%m')=?"),
+      'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
+      'births'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),
+      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
+      'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
     ];
-    // EWMA anomaly flag: last point > mean + 2*std of the series
-    $flags=[]; foreach($ind as $k=>$v){ $n=count($v); $mean=array_sum($v)/max(1,$n);
-      $var=0; foreach($v as $x){$var+=($x-$mean)**2;} $sd=sqrt($var/max(1,$n));
-      $flags[$k] = ($sd>0 && end($v) > $mean+2*$sd); }
-    out(['months'=>$months,'indicators'=>$ind,'anomalies'=>$flags]);
+    out(['months'=>$months,'indicators'=>$ind]);
   }
 
   // ---- DHIS2 indicator export (aggregate) ----
