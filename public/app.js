@@ -193,41 +193,30 @@ async function register(){
     <label>Phone<input id="ph" placeholder="09..."></label><label>Kebele<input id="kb"></label>
     <label>Next of kin<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
     <label>SMS reminders consent<select id="sc"><option value="0">No</option><option value="1">Yes — may send SMS</option></select></label>
-    <label>Gravida<input id="gr" type="number"></label><label>Para<input id="pa" type="number"></label>
-    <label>Height (cm)<input id="ht" type="number"></label>
-    <label>Prior caesarean<select id="pcs"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Prior stillbirth / NND<select id="psb"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Prior PPH<select id="pphx"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Prior pre-eclampsia<select id="ppe"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Prior obstructed labour<select id="pol"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Chronic hypertension<select id="chtn"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Diabetes<select id="dm"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    <label>Cardiac / renal disease<select id="crd"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select></label>
-    ${ecPicker('lnmp','Last menstrual period')}
     <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option></select></label>
-    <label>Ruptured membrane<select id="rm"><option value="0">No</option><option value="1">Yes</option></select></label>
-   </div><p class="muted" id="edd"></p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
-  const showEdd=()=>{ const l=ecGet('lnmp'); const e=l?addDays(l,280):null; $('#edd').textContent=e?('Estimated delivery date: '+esc(e)+(window.Ethiopian?(' ('+Ethiopian.fmt(new Date(e+'T00:00:00'))+')'):'')):''; };
-  ['lnmp_d','lnmp_m','lnmp_y'].forEach(x=>{ const el=$('#'+x); if(el) el.onchange=showEdd; });
+   </div><p class="muted">Clinical history, obstetric details (gravida/para, LMP) and examination are captured by the provider on the service screens.</p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
   $('#save').onclick=async()=>{
     if(!mrn.value.trim()){ $('#m').textContent=' MRN is required'; return; }
-    const lnmp=ecGet('lnmp'); const edd=lnmp?addDays(lnmp,280):null;
     $('#m').textContent=' saving…';
     try{
-      const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,sms_consent:(sc&&sc.value==='1')?1:0,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),prior_cs:(pcs.value||null),prior_stillbirth:(psb.value||null),prior_pph:(pphx.value||null),prior_preeclampsia:(ppe.value||null),prior_obstructed:(pol.value||null),chronic_htn:(chtn.value||null),diabetes:(dm.value||null),cardiac_renal:(crd.value||null),lnmp:lnmp,edd:edd});
+      const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,sms_consent:(sc&&sc.value==='1')?1:0});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
-      await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,ruptured_membrane:+rm.value,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
+      await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
       $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
     }catch(e){ $('#m').textContent=' '+(e.message||'could not register'); }
   };
 }
 
+function provOpts(provs,sel){ return '<option value="">— Not assigned —</option>'+(provs||[]).map(p=>`<option value="${p.id}"${sel==p.id?' selected':''}>${esc(p.full_name)}</option>`).join(''); }
+function wireAssign(){ document.querySelectorAll('select.asgn').forEach(s=>{ s.onchange=async()=>{ const r=await api('PATCH','episodes/'+s.dataset.ep,{provider_id:+s.value||null}); if(r&&(r.ok||r.queued)) toast('Provider updated','ok'); }; }); }
 async function labour(){
-  const rows=await api('GET','episodes?category=labour').catch(()=>[]);
-  app().innerHTML=nav()+`<div class="card"><h3>Labour ward</h3><table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
+  const [rows,provs]=await Promise.all([api('GET','episodes?category=labour').catch(()=>[]),api('GET','providers').catch(()=>[])]);
+  app().innerHTML=nav()+`<div class="card"><h3>Labour ward</h3><table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${r.high_risk==1?' <span class="pill amber">Higher risk</span>':''}</td>
-    <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No women in labour. Register one.</td></tr>'}
+    <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
+    <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No women in labour. Register one.</td></tr>'}
    </table></div>`;
+  wireAssign();
 }
 
 const OB={}; // per-episode in-memory observations for the chart
@@ -503,10 +492,16 @@ async function delivery(id){
 }
 
 async function pnc(){
-  const rows=await api('GET','episodes?category=labour').catch(()=>[]);
+  const [rows,provs]=await Promise.all([api('GET','episodes?category=labour').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   const del=rows.filter(r=>r.status==='delivered');
-  app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3><table><tr><th>MRN</th><th>Name</th><th>Status</th><th>Actions</th></tr>
-   ${del.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.status)}</td><td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=4 class=muted>No postnatal women yet.</td></tr>'}</table></div>`;
+  app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3>
+   <p class="muted">Women after delivery. WHO postnatal contacts: within 24 hours, day 3, day 7, and week 6. Open <b>PNC follow-up</b> to record the mother-and-newborn check.</p>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Provider</th><th>Actions</th></tr>
+   ${del.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td>
+    <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
+    <td><a class="nav" href="#pncvisit/${r.id}">PNC follow-up</a> &middot; <a class="nav" href="#baby/${r.id}">Newborn</a> &middot; <a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No postnatal women yet.</td></tr>'}
+   </table></div>`;
+  wireAssign();
 }
 const ANC_GROUPS={obstetric_history:'Obstetric history',current_pregnancy:'Current pregnancy',general_medical:'General medical'};
 const ANC_ITEMS=[
@@ -516,6 +511,8 @@ const ANC_ITEMS=[
  ['OBS_BW_GT4500','obstetric_history','Birth weight of last baby > 4500 g'],
  ['OBS_PREV_PREECLAMPSIA','obstetric_history','Last pregnancy: admitted for pre-eclampsia or eclampsia'],
  ['OBS_PREV_SURGERY','obstetric_history','Previous surgery on the reproductive tract'],
+ ['OBS_PREV_PPH','obstetric_history','Previous postpartum haemorrhage (PPH)'],
+ ['OBS_PREV_OBSTRUCTED','obstetric_history','Previous obstructed or prolonged labour'],
  ['CUR_MULTIPLE','current_pregnancy','Suspected multiple pregnancy'],
  ['CUR_AGE_LT16','current_pregnancy','Age less than 16 years'],
  ['CUR_AGE_GT40','current_pregnancy','Age more than 40 years'],
@@ -549,24 +546,28 @@ async function ancScreen(id){
 }
 
 async function ancList(){
-  const rows=await api('GET','episodes?category=anc').catch(()=>[]);
+  const [rows,provs]=await Promise.all([api('GET','episodes?category=anc').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   app().innerHTML=nav()+`<div class="card"><h3>Antenatal care</h3>
-   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Actions</th></tr>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${r.high_risk==1?' <span class="pill amber">Higher risk</span>':''}</td>
-    <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
-   </table><p class="muted">"&rarr; Labour" admits the woman into the labour ward. Higher-risk women are flagged automatically (from registration history or ANC screening) and gathered under the High risk tab.</p></div>`;
+    <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
+    <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
+   </table><p class="muted">"&rarr; Labour" admits the woman into the labour ward. Higher-risk women are flagged automatically from their ANC screening and gathered under the High risk tab.</p></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_anc'));
+  wireAssign();
 }
 
 async function highriskList(){
-  const rows=await api('GET','episodes?flag=highrisk').catch(()=>[]);
+  const [rows,provs]=await Promise.all([api('GET','episodes?flag=highrisk').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   app().innerHTML=nav()+`<div class="card"><h3>High-risk worklist</h3>
-   <p class="muted">Women in antenatal care or labour who carry a risk factor &mdash; flagged automatically from their registration history or ANC screening. A live worklist to help prioritise who to see first; risk is a status, not a separate ward.</p>
-   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Pathway</th><th>Status</th><th>Actions</th></tr>
+   <p class="muted">Women in antenatal care or labour who carry a risk factor &mdash; flagged automatically from their ANC risk screening. A live worklist to help prioritise who to see first; risk is a status, not a separate ward.</p>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Pathway</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.service_category||'')}</td><td>${esc(r.status)} <span class="pill amber">Higher risk</span></td>
-    <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No higher-risk women right now. Women are flagged here automatically from their registration risk history or ANC screening.</td></tr>'}
+    <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
+    <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=7 class=muted>No higher-risk women right now. Women are flagged here automatically from their ANC risk screening.</td></tr>'}
    </table></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_highrisk'));
+  wireAssign();
 }
 
 async function transfer(womanId,cat,from){
@@ -756,8 +757,10 @@ async function editWoman(wid){
     <label>Kebele<input id="kb" value="${esc(w.kebele||'')}"></label>
     <label>Gravida<input id="gr" type="number" value="${esc(w.gravida||'')}"></label>
     <label>Para<input id="pa" type="number" value="${esc(w.para||'')}"></label>
+    <label>Height (cm)<input id="ht" type="number" value="${esc(w.height_cm||'')}"></label>
+    ${ecPicker('lnmp','Last menstrual period')}
    </div><button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
-  $('#wsave').onclick=async()=>{ const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null});
+  $('#wsave').onclick=async()=>{ const _ln=ecGet('lnmp'); const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:(_ln||null),edd:(_ln?addDays(_ln,280):null)});
     $('#wm').textContent=(r&&(r.ok||r.queued))?' saved':' '+((r&&r.error)||'error'); };
 }
 
@@ -826,15 +829,17 @@ async function patientHub(id){
   let tiles;
   if(ME.role==='observer') tiles=[tile('#report/'+id,'Care summary')];   // read-only role: view the summary, no data-entry screens
   else if(cat==='anc') tiles=[tile('#anc/'+id,'ANC screening'),tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
-  else if(cat==='pnc') tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else if(cat==='pnc') tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
   let _ga=''; if(e.edd){ const _d=(new Date(e.edd+'T00:00:00')-new Date())/86400000; const _w=Math.round((280-_d)/7); if(_w>0&&_w<=45) _ga=_w+' wga'; }
   window.CTX={id:+id, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,e.status].filter(Boolean).join(' · ')};
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''}</p>
+    ${(cat==='labour'||cat==='highrisk')?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select></p>`:''}
     <div class="hubgrid">${tiles.join('')}</div></div>`;
+  if(cat==='labour'||cat==='highrisk'){ const rs=$('#rmset'); if(rs){ rs.value=String(e.ruptured_membrane||0); rs.onchange=async()=>{ const r=await api('PATCH','episodes/'+id,{ruptured_membrane:+rs.value}); if(r&&(r.ok||r.queued)) toast('Membranes updated','ok'); }; } }
 }
 
 async function supervisorDash(){
