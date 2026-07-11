@@ -1801,5 +1801,24 @@ async function remindersScreen(){
   const b=$('#rrun'); if(b) b.onclick=async()=>{ $('#rmsg').textContent=' running…'; try{ const r=await api('POST','reminders/run'); $('#rmsg').textContent=' generated '+r.generated+', sent '+r.sent+', skipped '+r.skipped+(r.failed?(', failed '+r.failed):''); setTimeout(()=>remindersScreen(),1000); }catch(e){ $('#rmsg').textContent=' '+(e.message||'error'); } };
 }
 
-if('serviceWorker' in navigator){ navigator.serviceWorker.register('./service-worker.js').catch(()=>{}); }
+// ---- Service worker: make sure clients actually GET the new build -------------
+// Bug found in the v16 audit: phones were still running adhere-v29 four deploys later.
+// The browser HTTP-caches service-worker.js, so it never saw the new cache name and
+// kept serving the old app.js. Three things are needed:
+//   1. updateViaCache:'none'  — never take service-worker.js from the HTTP cache
+//   2. reg.update()           — actively check for a new worker on load and hourly
+//   3. skipWaiting + reload   — when a new worker takes over, reload once so the
+//                               user is on the new code immediately
+if('serviceWorker' in navigator){
+  let reloading=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(reloading) return; reloading=true;
+    location.reload();          // the new worker has taken control — run the new code
+  });
+  navigator.serviceWorker.register('./service-worker.js',{updateViaCache:'none'}).then(reg=>{
+    reg.update().catch(()=>{});
+    setInterval(()=>reg.update().catch(()=>{}), 60*60*1000);   // hourly
+    document.addEventListener('visibilitychange',()=>{ if(!document.hidden) reg.update().catch(()=>{}); });
+  }).catch(()=>{});
+}
 boot();

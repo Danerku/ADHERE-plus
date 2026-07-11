@@ -7,4 +7,14 @@
         X-Frame-Options DENY
         Referrer-Policy no-referrer
     }
+
+    # The app shell must never come from the browser's HTTP cache.
+    # Without this the browser keeps the OLD service-worker.js, never sees the new
+    # cache name, and goes on serving a stale app.js. Clients were found running a
+    # build four deploys old. The service worker still does the offline caching —
+    # this only stops the HTTP layer from pinning an old copy of the shell.
+    @shell path /service-worker.js /app.js /index.html / /styles.css /config.js
+    header @shell {
+        Cache-Control "no-cache, must-revalidate"
+    }
 }
