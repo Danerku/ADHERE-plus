@@ -104,11 +104,11 @@ try {
       if(isset($b['age'])&& $b['age']!==null && $b['age']!==''){ $ag=(int)$b['age'];
         if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
       $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
-      $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','facility_id','created_by'],MOH_PERSON_FIELDS))));
+      $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation','facility_id','created_by'],MOH_PERSON_FIELDS))));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
-      $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome'],MOH_PERSON_FIELDS)));
+      $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation'],MOH_PERSON_FIELDS)));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
   }
 
@@ -119,7 +119,7 @@ try {
   if ($r==='episodes'){
     if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $flag=$_GET['flag']??null;
       $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))"; // derived risk flag (no user input)
-      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.lnmp,w.edd, pu.full_name AS provider_name, $hr AS high_risk FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
+      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.lnmp,w.edd, w.ga_first_contact,w.late_anc_initiation, pu.full_name AS provider_name, $hr AS high_risk FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
       if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
@@ -214,6 +214,7 @@ try {
     $from=$_GET['from']??date('Y-m-01'); $to=$_GET['to']??date('Y-m-d');
     if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$from)||!preg_match('/^\d{4}-\d{2}-\d{2}$/',$to)) err('bad date range');
     $W="w.mrn,w.first_name,w.father_name,w.age,w.kebele,w.woreda,w.lnmp,w.edd,
+        w.ga_first_contact,w.late_anc_initiation,
         w.target_pop_code,w.hiv_known_positive,w.hiv_linked_pmtct,w.hiv_linked_pmtct_facility,w.hiv_linked_art,w.art_regimen,
         w.partner_hiv_accepted,w.partner_hiv_result,w.partner_target_pop_code,w.partner_linked_art";
     if($type==='anc'){

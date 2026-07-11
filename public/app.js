@@ -216,9 +216,13 @@ function mrnError(v){ const r=mrnRule(); const s=String(v||'').trim();
 function ageError(v){ const n=+v; if(!v||isNaN(n)) return 'Age is required';
   if(n<10||n>60) return 'Age must be between 10 and 60'; return ''; }
 function ageRisk(n){ n=+n;
-  if(n>0&&n<20) return 'Age '+n+' — adolescent pregnancy. This is a high-risk group: she needs specialised ANC, closer monitoring and screening for pre-eclampsia, anaemia and obstructed labour.';
+  if(n>0&&n<18) return 'Age '+n+' — teenage pregnancy. This is a high-risk group: she needs specialised ANC, closer monitoring, and screening for pre-eclampsia, anaemia and obstructed labour.';
   if(n>=35) return 'Age '+n+' — advanced maternal age. This is a high-risk group: she needs specialised ANC and closer monitoring.';
   return ''; }
+// Booking after the first trimester (>12 completed weeks) is late ANC initiation.
+function lateAnc(ga){ return (+ga>12); }
+function gaRisk(ga){ ga=+ga; if(!ga) return '';
+  return lateAnc(ga) ? ('First ANC contact at '+ga+' weeks — late ANC initiation (after the first trimester). Screening and prophylaxis started late; treat as a risk factor and catch up on the missed ANC package.') : ''; }
 // A modal the user must acknowledge — a toast is too easy to miss for a risk flag.
 function modal(title,body,kind){ const old=document.getElementById('mdl'); if(old) old.remove();
   const c=(kind==='risk')?'#a32d2d':'#0f766e';
@@ -254,7 +258,10 @@ async function register(){
     <label>Para<input id="pa" type="number" min="0"></label>
     <label>Children alive<input id="ca" type="number" min="0"></label>
     <label>Previous pregnancy outcome<select id="ppo">${selOpts([['first','First pregnancy'],['live_birth','Live birth'],['stillbirth','Stillbirth'],['abortion','Abortion / miscarriage'],['neonatal_death','Neonatal death'],['caesarean','Caesarean section']])}</select></label>
+    <label>GA at first ANC contact (weeks) <span class="muted" style="font-weight:400">— booking GA</span><input id="gafc" type="number" min="4" max="42" placeholder="weeks"></label>
    </div>
+   <div id="gabox" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px"></div>
+   <div class="muted" style="font-size:12px;margin-top:6px">If she booked ANC elsewhere or on paper, enter the booking GA here. When ANC contact 1 is recorded in ADHERE+, this fills itself.</div>
    <div class="muted" style="font-size:12px;margin-top:6px">Full risk screening (previous C/S, PPH, pre-eclampsia, obstructed labour, chronic conditions) is done by the provider on the ANC screening screen.</div></details>
 
    <button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
@@ -268,13 +275,21 @@ async function register(){
     if(msg && age.value!==lastWarned){ lastWarned=age.value; modal('High-risk group',msg,'risk'); } });
   mrn.addEventListener('blur',()=>{ const e=mrnError(mrn.value); $('#m').textContent=e?(' '+e):''; });
 
+  const showGa=()=>{ const b=$('#gabox'); const msg=gaRisk(gafc.value);
+    if(msg){ b.style.display=''; b.textContent=msg; } else { b.style.display='none'; } };
+  let gaWarned=null;
+  gafc.addEventListener('input',showGa);
+  gafc.addEventListener('blur',()=>{ const msg=gaRisk(gafc.value);
+    if(msg && gafc.value!==gaWarned){ gaWarned=gafc.value; modal('Late ANC initiation',msg,'risk'); } });
+
   $('#save').onclick=async()=>{
     const em=mrnError(mrn.value); if(em){ $('#m').textContent=' '+em; modal('Check the MRN',em); return; }
     const ea=ageError(age.value); if(ea){ $('#m').textContent=' '+ea; modal('Check the age',ea); return; }
     $('#m').textContent=' saving…';
     try{
       const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
-        gravida:(+gr.value||null),para:(+pa.value||null),children_alive:(+ca.value||null),prev_pregnancy_outcome:(ppo.value||null)});
+        gravida:(+gr.value||null),para:(+pa.value||null),children_alive:(+ca.value||null),prev_pregnancy_outcome:(ppo.value||null),
+        ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null)});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
       await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
       $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
@@ -789,6 +804,14 @@ async function ancVisits(id){
     ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:(+ift.value||null),deworming:tk('dw'),
     hiv_test_accepted:tk('hta'),hiv_test_result:(htr.value||null),hiv_posttest_counselled:tk('hpc'),
     cnsl_danger_signs:tk('c1'),cnsl_nutrition:tk('c2'),cnsl_ecd:tk('c3'),cnsl_infant_feeding:tk('c4'),cnsl_family_planning:tk('c5'),remark:rmk.value});
+    // Contact 1 IS the booking contact: its GA is the booking GA. Store it once on the
+    // woman so it survives even when later contacts are entered out of order.
+    if(r&&r.ids&&String(cno.value)==='1'&&+ga.value){
+      const eps=await api('GET','episodes').catch(()=>[]);
+      const ep=(eps||[]).find(x=>x.id==id);
+      if(ep&&ep.woman_id){ await api('PATCH','women/'+ep.woman_id,{ga_first_contact:+ga.value,first_contact_date:ecGet('vd'),late_anc_initiation:lateAnc(ga.value)?1:0}).catch(()=>{}); }
+      const msg=gaRisk(ga.value); if(msg) modal('Late ANC initiation',msg,'risk');
+    }
     $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); } finally{ b.disabled=false; } };
 }
 
@@ -989,8 +1012,11 @@ async function editWoman(wid){
     <label>Para<input id="pa" type="number" value="${esc(w.para||'')}"></label>
     <label>Height (cm)<input id="ht" type="number" value="${esc(w.height_cm||'')}"></label>
     <label>Woreda<input id="wo" value="${esc(w.woreda||'')}"></label>
+    <label>GA at first ANC contact (weeks)<input id="gafc" type="number" min="4" max="42" value="${esc(w.ga_first_contact||'')}"></label>
     ${ecPicker('lnmp','Last menstrual period')}
    </div>
+   ${w.ga_first_contact?`<div style="background:${lateAnc(w.ga_first_contact)?'#faeeda':'#e1f5ee'};border:1px solid ${lateAnc(w.ga_first_contact)?'#ef9f27':'#5dcaa5'};color:${lateAnc(w.ga_first_contact)?'#633806':'#04342c'};border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+     Booked ANC at <b>${esc(w.ga_first_contact)} weeks</b> &mdash; ${lateAnc(w.ga_first_contact)?'late initiation (after the first trimester).':'timely initiation (first trimester).'}</div>`:''}
 
    <details class="moh" open><summary>HIV &amp; PMTCT <span class="muted">&mdash; held once, used by ANC, Delivery and PNC</span></summary>
     <div class="muted" style="font-size:12px;margin-bottom:6px">The paper registers ask for these at every contact. Recorded here once, they are replayed into every register row automatically.</div>
@@ -1016,7 +1042,8 @@ async function editWoman(wid){
 
    <button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
   $('#wsave').onclick=async()=>{ const _ln=ecGet('lnmp'); const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:(_ln||null),edd:(_ln?addDays(_ln,280):null),
-    woreda:(wo.value||null),target_pop_code:(tp.value||null),hiv_known_positive:tk('hkp'),hiv_linked_pmtct:tk('lpm'),hiv_linked_pmtct_facility:(+lpf.value||null),hiv_linked_art:tk('lar'),art_regimen:(artr.value||null),
+    woreda:(wo.value||null),ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null),
+    target_pop_code:(tp.value||null),hiv_known_positive:tk('hkp'),hiv_linked_pmtct:tk('lpm'),hiv_linked_pmtct_facility:(+lpf.value||null),hiv_linked_art:tk('lar'),art_regimen:(artr.value||null),
     partner_hiv_accepted:tk('pha'),partner_hiv_result:(phr.value||null),partner_target_pop_code:(ptp.value||null),partner_linked_art:tk('pla')});
     $('#wm').textContent=(r&&(r.ok||r.queued))?' saved':' '+((r&&r.error)||'error'); };
 }
@@ -1026,7 +1053,7 @@ async function editWoman(wid){
 // facility can print it instead of hand-writing it. Columns follow the MoH item order.
 const REG_COLS={
   anc:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name',r=>((r.first_name||'')+' '+(r.father_name||'')).trim()],['Kebele','kebele'],
-    ['Age','age'],['LNMP','lnmp'],['EDD','edd'],['Contact','contact_no'],['Date','visit_date'],['GA','ga_weeks'],
+    ['Age','age'],['LNMP','lnmp'],['EDD','edd'],['Booking GA','ga_first_contact'],['Late init',tickCell('late_anc_initiation')],['Contact','contact_no'],['Date','visit_date'],['GA','ga_weeks'],
     ['U/S &lt;24w','ultrasound_lt24w'],['Syphilis','syphilis_result'],['Syph Rx',tickCell('syphilis_treated')],
     ['HepB','hepb_result'],['HepB Rx',tickCell('hepb_treated')],['HepB prophy',tickCell('hepb_prophylaxis')],
     ['Td dose','td_dose_no'],['IFA tabs','ifa_tabs'],['Deworm',tickCell('deworming')],['MUAC','muac'],
@@ -1176,9 +1203,11 @@ async function patientHub(id){
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
   let _ga=''; if(e.edd){ const _d=(new Date(e.edd+'T00:00:00')-new Date())/86400000; const _w=Math.round((280-_d)/7); if(_w>0&&_w<=45) _ga=_w+' wga'; }
-  window.CTX={id:+id, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,e.status].filter(Boolean).join(' · ')};
+  const _book=e.ga_first_contact?('booked '+e.ga_first_contact+'w'+(e.late_anc_initiation==1?' (late)':'')):'';
+  window.CTX={id:+id, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,_book,e.status].filter(Boolean).join(' · ')};
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''}</p>
+    ${e.late_anc_initiation==1?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">Late ANC initiation &mdash; first contact at ${esc(e.ga_first_contact)} weeks.</p>`:''}
     ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select></p>`:''}
     <div class="hubgrid">${tiles.join('')}</div>${fold}</div>`;
   if(isLab&&!delivered){ const rs=$('#rmset'); if(rs){ rs.value=String(e.ruptured_membrane||0); rs.onchange=async()=>{ const r=await api('PATCH','episodes/'+id,{ruptured_membrane:+rs.value}); if(r&&(r.ok||r.queued)) toast('Membranes updated','ok'); }; } }
