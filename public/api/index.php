@@ -167,7 +167,8 @@ try {
            'danger_signs'=>['danger_signs',['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']],
            'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','blood_loss_ml','recorded_by',
              // MoH Delivery register (v12): 7,11,12,15-24,36-38,42,49-51,66
-             'partograph_used','episiotomy','mode_other_text','maternal_status','maternal_death_cause','comp_preeclampsia','comp_eclampsia','comp_aph','comp_pph','comp_other','referred','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_feeding_options','ippfp_acceptor','ippfp_method','remark']],
+             'partograph_used','episiotomy','mode_other_text','maternal_status','maternal_death_cause','comp_preeclampsia','comp_eclampsia','comp_aph','comp_pph','comp_other','referred','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_feeding_options','ippfp_acceptor','ippfp_method','remark',
+             'ippfp_timing']],   // v15 — IUCD is the commonest method at delivery; post-placental vs 48h matters
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
            'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
@@ -175,14 +176,21 @@ try {
              // MoH ANC register (v12): 10-18, 20,21,23, counselling 30-34, remark 35
              'ultrasound_lt24w','syphilis_result','syphilis_treated','hepb_result','hepb_treated','hepb_prophylaxis','td_dose_no','ifa_tabs','deworming','hiv_test_accepted','hiv_test_result','hiv_posttest_counselled','cnsl_danger_signs','cnsl_nutrition','cnsl_ecd','cnsl_infant_feeding','cnsl_family_planning','remark',
              // National ANC Guideline 2022, Annex 6 (ANC card) — migration v14
-             'calcium_given','ifa_tabs_consumed','anti_d_given','pallor','urine_gramstain','ogtt_result','mental_health','ipv_screen','substance_use','cnsl_lifestyle','cnsl_bpcr','bmi','anaemia_grade','muac_flag']],
+             'calcium_given','ifa_tabs_consumed','anti_d_given','pallor','urine_gramstain','ogtt_result','mental_health','ipv_screen','substance_use','cnsl_lifestyle','cnsl_bpcr','bmi','anaemia_grade','muac_flag',
+             // v15 — already-on-ART pathway (no re-testing); unsuppressed VL -> ART clinic
+             'art_continued','viral_load','viral_load_date','art_clinic_linked']],
            'labs'=>['lab_orders',['episode_id','anc_visit_id','test_code','requested','requested_date','result','result_date','note','recorded_by']],
            'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','danger_note','recorded_by',
              // MoH PNC register (v12): 10,12-17, counselling 25-30, newborn 31-37, IPPFP 38-40, remark 42
-             'visit_period','maternal_condition','pph','other_obs_complication','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_danger_signs','cnsl_breastfeeding','cnsl_newborn_care','cnsl_family_planning','cnsl_epi','cnsl_ecd','nb_weight_g','nb_problems','nb_problem_other','nb_treatment','nb_treatment_outcome','nb_death_age_days','nb_death_cause','ippfp_acceptor','ippfp_method','remark']],
+             'visit_period','maternal_condition','pph','other_obs_complication','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_danger_signs','cnsl_breastfeeding','cnsl_newborn_care','cnsl_family_planning','cnsl_epi','cnsl_ecd','nb_weight_g','nb_problems','nb_problem_other','nb_treatment','nb_treatment_outcome','nb_death_age_days','nb_death_cause','ippfp_acceptor','ippfp_method','remark',
+             'baby_id']],   // v15 — PNC is for mother AND newborn: tie each assessment to a specific baby (twins)
            'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','enc_dried','enc_breathing','enc_vitamin_k','enc_eye_ointment','enc_cord_care','enc_arv','recorded_by',
              // MoH Delivery register, newborn level (v12): 31,35,52-64
-             'mrn','vacc_bcg','vacc_opv0','vacc_hbv','prob_prematurity','prob_sepsis_vsd','prob_resp_distress','prob_lbw','prob_congenital','prob_other','prob_other_text','breastfeed_initiated','resuscitated_survived','death_age_days','death_age_hours','death_cause','birth_notification']],
+             'mrn','vacc_bcg','vacc_opv0','vacc_hbv','prob_prematurity','prob_sepsis_vsd','prob_resp_distress','prob_lbw','prob_congenital','prob_other','prob_other_text','breastfeed_initiated','resuscitated_survived','death_age_days','death_age_hours','death_cause','birth_notification',
+             // v15 — HIV exposure pathway (exposed -> ARV -> DBS -> ART clinic), Vit K timing,
+             // conditional care pathways (KMC, phototherapy, NICU, antibiotics, oxygen), free-text "other"
+             'hiv_exposed','arv_prophylaxis','dbs_sample','dbs_date','dbs_result','art_linked','art_linked_date',
+             'vitamin_k_time','cord_care_other','apgar_flag','kmc','phototherapy','nicu','nicu_facility','antibiotics','oxygen']],
            'maternal_vitals'=>['maternal_vitals',['episode_id','obs_datetime','bp_systolic','bp_diastolic','pulse','temperature','resp_rate','spo2','note','recorded_by']],
            'bemonc'=>['bemonc_care',['episode_id','item_code','response','note','recorded_by']],
            'messages'=>['messages',['episode_id','from_user_id','to_user_id','body']]];
@@ -225,6 +233,34 @@ try {
       'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
     ];
     out(['months'=>$months,'indicators'=>$ind]);
+  }
+
+  // ---- Pregnancy test (OPD) and the link into the ANC room -------------------
+  // "If a mother's pregnancy test is positive in OPD, how can we link her to the ANC
+  //  room?" — a positive test can open an ANC episode for her directly, so the
+  //  handoff is recorded rather than relying on her walking down the corridor.
+  if ($r==='pregnancy_tests'){
+    if($m==='GET'){ $u=require_auth();
+      $st=db()->prepare("SELECT p.*, w.mrn, w.first_name, w.father_name, w.age
+                           FROM pregnancy_tests p LEFT JOIN women w ON w.id=p.woman_id
+                          WHERE p.facility_id=? ORDER BY p.id DESC LIMIT 200");
+      $st->execute([$u['facility_id']]); out($st->fetchAll()); }
+    if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
+      $wid=(int)($b['woman_id']??0);
+      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$wid,$u['facility_id']]);
+      if(!$wc->fetch()) err('woman not in your facility',404);
+      $pid=insert('pregnancy_tests',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,
+        'test_date'=>($b['test_date']??date('Y-m-d')),'result'=>($b['result']??null),
+        'note'=>($b['note']??null),'recorded_by'=>$u['id']]);
+      $eid=null;
+      // A positive test with link_to_anc opens the ANC episode in one step.
+      if(($b['result']??'')==='positive' && !empty($b['link_to_anc'])){
+        $eid=insert('episodes',['woman_id'=>$wid,'service_category'=>'anc','status'=>'active',
+          'admitted_from'=>'new','admission_datetime'=>date('Y-m-d H:i:s'),
+          'facility_id'=>$u['facility_id'],'created_by'=>$u['id']]);
+        db()->prepare("UPDATE pregnancy_tests SET linked_episode_id=?, linked_at=NOW() WHERE id=?")->execute([$eid,$pid]);
+      }
+      audit('create','pregnancy_tests',$pid); out(['id'=>$pid,'episode_id'=>$eid],201); }
   }
 
   // ---- MoH paper-register export -------------------------------------------

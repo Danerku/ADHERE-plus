@@ -106,7 +106,7 @@ function route(){
   document.getElementById('mdl')?.remove();
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
-    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
+    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
 function forcePw(){
@@ -152,6 +152,7 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   ${L('#labour','Labour ward')}
   ${L('#highrisk','High risk')}
   ${L('#pnc','Postnatal')}
+  ${L('#pregtest','Pregnancy test')}
   ${L('#dashboard','Dashboard')}
   ${L('#registers','Registers')}
   ${ME.role==='admin'?L('#facilities','Facilities'):''}
@@ -689,9 +690,12 @@ async function delivery(id){
    </div><div class="ticks">${tick('dhta','HIV testing accepted')}${tick('dhrt','HIV re-testing accepted')}${tick('dcfo','Counselled on feeding options')}</div>
    <div class="muted" style="font-size:12px;margin-top:6px">Linkage to PMTCT, ART regimen, target population and partner testing are held on the woman&rsquo;s record.</div></details>
 
-   <details class="moh"><summary>Immediate postpartum family planning (0&ndash;48 hrs)</summary><div class="grid">
+   <details class="moh" open><summary>Immediate postpartum family planning (IPPFP)</summary>
+   <div class="muted" style="font-size:12px;margin-bottom:6px">IUCD is the method most facilities provide at delivery. Timing matters: post-placental insertion is within 10 minutes of placental delivery.</div>
+   <div class="grid">
     <label>Acceptor type<select id="dacc">${selOpts(ACCEPTOR)}</select></label>
     <label>Method received<select id="dmth">${selOpts(IPPFP_METHODS)}</select></label>
+    <label>Timing<select id="dtim">${selOpts([['post_placental','Post-placental (within 10 min)'],['within_48h','Within 48 hours'],['not_given','Not given']])}</select></label>
    </div></details>
 
    <label>Remark<input id="drmk"></label>
@@ -707,7 +711,7 @@ async function delivery(id){
         maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
         comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
         hiv_test_accepted:tk('dhta'),hiv_retest_accepted:tk('dhrt'),hiv_test_result:(dhtr.value||null),cnsl_feeding_options:tk('dcfo'),
-        ippfp_acceptor:(dacc.value||null),ippfp_method:(dmth.value||null),remark:drmk.value});
+        ippfp_acceptor:(dacc.value||null),ippfp_method:(dmth.value||null),ippfp_timing:(dtim.value||null),remark:drmk.value});
       // Newborn record is the source of truth for outcomes/analytics — create baby #1 here if none recorded yet.
       const existing=await api('GET','babies?episode='+id).catch(()=>[]);
       if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0,mrn:(nbmrn.value||null),prob_lbw:((+bw.value||0)>0&&(+bw.value)<2500)?1:0});
@@ -888,6 +892,8 @@ async function ancVisits(id){
   const e=(eps||[]).find(x=>x.id==id)||{};
   const nextNo=Math.min(8,(past||[]).filter(p=>/^\d+$/.test(String(p.contact_no||''))).length+1);
   const rhNeg=String(e.rh_factor||'').toLowerCase()==='neg';
+  // "She was already on ART and then became pregnant" — she is not a testing candidate.
+  const onART=(e.hiv_known_positive==1);
   const opt=(v,n,sel)=>`<option value="${v}"${String(sel)===String(v)?' selected':''}>${n}</option>`;
 
   app().innerHTML=nav()+`<div class="card"><h3>ANC contact — episode ${esc(id)}</h3>
@@ -936,11 +942,27 @@ async function ancVisits(id){
     ${tick('cal','Calcium supplement given (1.5–2.0 g/day)')}${tick('syt','Syphilis treatment given')}${tick('hbt','Hep B treatment given')}${tick('hbp','Hep B prophylaxis given')}${tick('dw','Deworming given (after 1st trimester)')}${tick('and','Anti-D given (Rh negative)')}
    </div></details>
 
+   ${e.hiv_known_positive==1?`
+   <details class="moh" open><summary>HIV — <b>already on ART</b> <span class="muted">&mdash; no re-testing</span></summary>
+    <div style="background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin-bottom:8px;font-size:13px">
+      She is a <b>known HIV positive already on ART</b> (transferred from the ART clinic). She is not a testing candidate &mdash;
+      this contact records <b>ART continuation and viral load</b>. Regimen: <b>${esc(e.art_regimen||'not recorded')}</b>.
+    </div>
+    <div class="grid">
+     <label>Viral load<select id="vl">${selOpts([['suppressed','Suppressed'],['unsuppressed','Unsuppressed'],['pending','Pending'],['not_done','Not done']])}</select></label>
+     ${ecPicker('vld','Viral load date')}
+    </div>
+    <div class="ticks">${tick('artc','ART continued at this contact')}</div>
+    <div id="vlbox" style="display:none">
+      <div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>UNSUPPRESSED viral load</b> &mdash; link her back to the ART clinic for adherence support and regimen review.</div>
+      <div class="ticks">${tick('artcl','Linked back to ART clinic')}</div>
+    </div></details>`:`
    <details class="moh"><summary>HIV</summary><div class="grid">
     <label>HIV test result<select id="htr"><option value="">-</option><option value="P">Positive</option><option value="N">Negative</option></select></label>
    </div><div class="ticks">
     ${tick('hta','HIV test accepted')}${tick('hpc','Result received with post-test counselling')}
-   </div></details>
+   </div>
+   <div class="muted" style="font-size:12px;margin-top:6px">If she is already known positive and on ART, mark that on her record &mdash; this block will then switch to ART continuation instead of testing.</div></details>`}
 
    <details class="moh"><summary>Mental health, safety &amp; substance use <span class="muted">&mdash; Guideline Box 3</span></summary><div class="grid">
     <label>Mental health<select id="mh"><option value="">Not assessed</option><option value="normal">No concern</option><option value="concern">Concern identified</option><option value="referred">Referred</option><option value="declined">Declined</option></select></label>
@@ -996,6 +1018,8 @@ async function ancVisits(id){
     box.innerHTML='<b>Contact '+n+' (~'+ANC_SCHEDULE[n]+' weeks) — the guideline requires:</b><ul style="margin:4px 0 0;padding-left:18px">'+ANC_CONTACT_ACTIONS[n].map(a=>'<li>'+a+'</li>').join('')+'</ul>';
   };
   cno.addEventListener('change',showDue); showDue(); showDerived();
+  // Unsuppressed viral load must trigger linkage back to the ART clinic.
+  if(onART){ const vlEl=$('#vl'); if(vlEl) vlEl.addEventListener('change',()=>{ $('#vlbox').style.display=(vlEl.value==='unsuppressed')?'':'none'; }); }
 
   // ---- laboratory requests & results ----
   $('#labadd').onclick=async()=>{ if(!labt.value) return;
@@ -1023,7 +1047,10 @@ async function ancVisits(id){
       const hbv=+hb_.value||null, muv=+muac.value||null, wtv=+wt.value||null;
       const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:wtv,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:hbv,muac:muv,fetal_movement:(fm.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
     ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:(+ift.value||null),deworming:tk('dw'),
-    hiv_test_accepted:tk('hta'),hiv_test_result:(htr.value||null),hiv_posttest_counselled:tk('hpc'),
+    // A woman already on ART is not re-tested — that block is replaced by ART continuation.
+    hiv_test_accepted:(onART?null:tk('hta')),hiv_test_result:(onART?null:(htr.value||null)),hiv_posttest_counselled:(onART?null:tk('hpc')),
+    art_continued:(onART?tk('artc'):null),viral_load:(onART?(vl.value||null):null),viral_load_date:(onART?(ecGet('vld')||null):null),
+    art_clinic_linked:((onART&&vl.value==='unsuppressed')?tk('artcl'):null),
     calcium_given:tk('cal'),ifa_tabs_consumed:(+ifc2.value||null),anti_d_given:tk('and'),pallor:(pal.value||null),urine_gramstain:(ugs.value||null),ogtt_result:(ogt.value||null),
     mental_health:(mh.value||null),ipv_screen:(ipv.value||null),substance_use:su,
     cnsl_danger_signs:tk('c1'),cnsl_nutrition:tk('c2'),cnsl_lifestyle:tk('cl'),cnsl_bpcr:tk('cb'),cnsl_ecd:tk('c3'),cnsl_infant_feeding:tk('c4'),cnsl_family_planning:tk('c5'),remark:rmk.value,
@@ -1066,7 +1093,10 @@ async function pncVisits(id){
     <label>Breastfeeding (mother)<select id="mbf"><option value="">-</option><option value="exclusive">Exclusive</option><option value="mixed">Mixed</option><option value="none">Not breastfeeding</option></select></label>
     <label>Postpartum FP<select id="ppf"><option value="">-</option><option value="method">Method chosen</option><option value="counselled">Counselled</option><option value="declined">Declined</option></select></label>
     <label>Iron-folic acid continued<select id="ifc"><option value="">-</option><option value="yes">Yes</option><option value="no">No</option></select></label>
-   </div><h4>Newborn</h4><div class="grid">
+   </div><h4>Newborn</h4>
+   <div class="muted" style="font-size:12px;margin-bottom:6px">PNC is for the mother <b>and</b> the newborn. Each assessment below is recorded against a specific baby, so every infant (including each twin) can be followed across the five contacts.</div>
+   <div class="grid">
+    <label>Which newborn?<select id="pbaby"><option value="">— select the baby —</option>${(bbs||[]).map(b=>`<option value="${b.id}">#${esc(b.birth_order||'?')} ${esc(b.sex||'')} ${esc(b.weight_g||'?')}g${b.prob_lbw==1?' (LBW)':''}</option>`).join('')}</select></label>
     <label>Temp °C<input id="nt" type="number" step="0.1"></label>
     <label>Breastfeeding<select id="nf"><option value="well">Feeding well</option><option value="difficulty">Difficulty</option><option value="none">Not feeding</option></select></label>
     <label>Cord<select id="cd"><option value="clean">Clean &amp; dry</option><option value="infected">Red / discharging</option><option value="bleeding">Bleeding</option></select></label>
@@ -1118,6 +1148,7 @@ async function pncVisits(id){
    </table></div>`;
   const csv=(pre,codes)=>codes.filter(c=>tk(pre+c)).join(',')||null;   // MoH multi-code fields are comma-separated
   $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
+    baby_id:(+pbaby.value||null),
     visit_period:(vp.value||null),maternal_condition:(+mc.value||null),pph:tk('ppph'),other_obs_complication:(ooc.value||null),
     hiv_test_accepted:tk('phta'),hiv_retest_accepted:tk('phrt'),hiv_test_result:(phtr.value||null),
     cnsl_danger_signs:tk('pc1'),cnsl_breastfeeding:tk('pc2'),cnsl_newborn_care:tk('pc3'),cnsl_family_planning:tk('pc4'),cnsl_epi:tk('pc5'),cnsl_ecd:tk('pc6'),
@@ -1142,23 +1173,52 @@ async function babiesScreen(id){
     <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Neonatal death</option></select></label>
     <label>Dried &amp; stimulated<select id="dr"><option value="">-</option><option value="done">Done</option><option value="not">Not done</option></select></label>
     <label>Breathing at birth<select id="brb"><option value="">-</option><option value="normal">Normal</option><option value="stimulation">Needed stimulation</option><option value="resus">Needed resuscitation</option></select></label>
-    <label>Vitamin K<select id="vk"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option></select></label>
+    <label>Vitamin K — <b>timing</b> <span class="muted" style="font-weight:400">(timing is critical)</span><select id="vkt">${selOpts([['within_1h','Given within 1 hour'],['1_24h','Given 1–24 hours'],['after_24h','Given after 24 hours'],['not_given','Not given']])}</select></label>
     <label>Eye ointment (TTC)<select id="eo"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option></select></label>
     <label>Cord care<select id="cc"><option value="">-</option><option value="chlorhexidine">Chlorhexidine</option><option value="dry">Dry</option><option value="other">Other</option></select></label>
-    <label>Newborn ARV (HIV-exposed)<select id="arv"><option value="">N/A</option><option value="given">Given</option><option value="not">Not given</option></select></label>
+    <label id="ccow" style="display:none">If other, specify<input id="cco" placeholder="specify"></label>
     <label>Newborn MRN<input id="nmrn" placeholder="infant's MRN"></label>
     <label>Breastfeeding initiated<select id="bfi">${selOpts([['1','1. Within 1 hour'],['2','2. 1-2 hours'],['3','3. After 3 hours'],['4','4. Not at all'],['5','5. Other milk']])}</select></label>
    </div>
+   <div id="nbwarn"></div>
+
+   <details class="moh" open><summary>HIV exposure &amp; early infant diagnosis</summary>
+    <div class="grid">
+     <label>Is the newborn HIV-exposed? <span class="muted" style="font-weight:400">(mother HIV positive)</span><select id="hex">${selOpts([['1','Yes — exposed'],['0','No — not exposed']])}</select></label>
+    </div>
+    <div id="hexblock" style="display:none">
+     <div class="muted" style="font-size:12px;margin:6px 0">Exposed infant pathway: <b>ARV prophylaxis &rarr; DBS for early infant diagnosis &rarr; if positive, link to the ART clinic.</b></div>
+     <div class="grid">
+      <label>ARV prophylaxis<select id="arvp">${selOpts([['given','Given'],['not_given','Not given'],['declined','Declined']])}</select></label>
+      <label>DBS sample (early infant diagnosis)<select id="dbss">${selOpts([['sent','Sent'],['pending','Pending'],['not_sent','Not sent']])}</select></label>
+      <label>DBS result<select id="dbsr">${selOpts([['pending','Pending'],['negative','Negative'],['positive','Positive']])}</select></label>
+     </div>
+     <div id="dbspos" style="display:none">
+      <div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>DBS POSITIVE</b> — the infant must be linked to the ART clinic.</div>
+      <div class="ticks">${tick('artl','Infant linked to ART clinic')}</div>
+     </div>
+    </div></details>
+
+   <details class="moh" open><summary>Newborn care pathways <span class="muted">&mdash; prompted by the problems recorded</span></summary>
+    <div id="pathprompt" class="muted" style="font-size:12px;margin-bottom:6px">Record the newborn's problems below; the care indicated will be prompted here.</div>
+    <div class="grid">
+     <label id="kmcw" style="display:none">KMC <span class="muted" style="font-weight:400">(low birth weight / preterm)</span><select id="kmc">${selOpts([['initiated','Initiated'],['not_initiated','Not initiated'],['not_indicated','Not indicated']])}</select></label>
+     <label id="phw" style="display:none">Phototherapy <span class="muted" style="font-weight:400">(jaundice)</span><select id="pht">${selOpts([['given','Given'],['not_given','Not given'],['referred','Referred for phototherapy'],['not_indicated','Not indicated']])}</select></label>
+     <label id="abw" style="display:none">Antibiotics <span class="muted" style="font-weight:400">(sepsis / VSD)</span><select id="abx">${selOpts([['given','Given'],['not_given','Not given'],['not_indicated','Not indicated']])}</select></label>
+     <label id="oxw" style="display:none">Oxygen <span class="muted" style="font-weight:400">(respiratory distress)</span><select id="oxy">${selOpts([['given','Given'],['not_given','Not given'],['not_indicated','Not indicated']])}</select></label>
+     <label>NICU / referral<select id="nicu">${selOpts([['not_indicated','Not indicated'],['admitted','Admitted to NICU here'],['referred_out','Referred out to NICU'],['referred_declined','Referral declined by family']])}</select></label>
+     <label id="nfw" style="display:none">Referred / admitted to<input id="nicuf" placeholder="facility name"></label>
+    </div></details>
 
    <details class="moh" open><summary>Vaccinated at birth <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
     ${tick('vbcg','BCG')}${tick('vopv','OPV 0')}${tick('vhbv','HBV')}
    </div></details>
 
    <details class="moh" open><summary>Newborn problems identified <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
-    ${tick('bpre','Prematurity')}${tick('bsep','Sepsis / VSD')}${tick('brds','Respiratory distress / asphyxia')}${tick('bcon','Congenital malformation')}${tick('both','Other')}
+    ${tick('bpre','Prematurity')}${tick('bsep','Sepsis / VSD')}${tick('brds','Respiratory distress / asphyxia')}${tick('bjau','Jaundice')}${tick('bcon','Congenital malformation')}${tick('both','Other')}
    </div>
    <label>If other, specify<input id="bpot"></label>
-   <div class="muted" style="font-size:12px;margin-top:6px">Low birth weight is derived automatically from the weight (&lt;2500 g).</div></details>
+   <div class="muted" style="font-size:12px;margin-top:6px">Low birth weight is derived automatically from the weight (&lt;2500 g). Ticking a problem will prompt the care indicated for it.</div></details>
 
    <details class="moh"><summary>Outcome &amp; notification</summary><div class="ticks">
     ${tick('brsv','Resuscitated and survived')}${tick('bnot','Birth notification given to mother')}
@@ -1172,8 +1232,51 @@ async function babiesScreen(id){
    <div class="card"><h3>Babies</h3><table><tr><th>#</th><th>Sex</th><th>Weight</th><th>APGAR</th><th>Resus</th><th>Outcome</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.birth_order||'')}</td><td>${esc(p.sex||'')}</td><td>${esc(p.weight_g||'')}</td><td>${esc((p.apgar_1min||'')+'/'+(p.apgar_5min||''))}</td><td>${p.resuscitated==1?'yes':'no'}</td><td>${esc(p.outcome||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No babies recorded yet.</td></tr>'}
    </table></div>`;
-  $('#bsave').onclick=async()=>{ const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_vitamin_k:(vk.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),enc_arv:(arv.value||null),
+  // ---- live consistency + validation ------------------------------------------
+  // Collaborator caught this: "Resuscitated: No" was accepted alongside
+  // "Breathing at birth: Needed resuscitation". Contradictory data must be blocked.
+  const nbIssues=()=>{ const out=[];
+    const a1v=a1.value===''?null:+a1.value, a5v=a5.value===''?null:+a5.value;
+    if(a1v!==null&&(a1v<0||a1v>10)) out.push({t:'APGAR at 1 minute must be between 0 and 10.',block:true});
+    if(a5v!==null&&(a5v<0||a5v>10)) out.push({t:'APGAR at 5 minutes must be between 0 and 10.',block:true});
+    if(brb.value==='resus' && rs.value!=='1') out.push({t:'Contradiction: breathing at birth is "Needed resuscitation", but Resuscitated is "No". Set Resuscitated to Yes, or change the breathing assessment.',block:true});
+    if(String(oc.value).indexOf('stillbirth')>-1 && (a1v>0||a5v>0)) out.push({t:'Contradiction: a stillbirth cannot have an APGAR above 0.',block:true});
+    if(a5v!==null&&a5v<7) out.push({t:'APGAR '+a5v+' at 5 minutes is LOW (<7) — this newborn needs close monitoring and may need resuscitation, oxygen or referral.',block:false});
+    if((+wg.value||0)>0&&(+wg.value)<2500) out.push({t:'Low birth weight ('+wg.value+' g) — KMC is indicated.',block:false});
+    return out; };
+  const showNb=()=>{
+    const iss=nbIssues();
+    $('#nbwarn').innerHTML=iss.map(i=>`<div style="background:${i.block?'#fcebeb':'#faeeda'};border:1px solid ${i.block?'#f09595':'#ef9f27'};color:${i.block?'#791f1f':'#633806'};border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">${esc(i.t)}</div>`).join('');
+    // conditional care pathways — a recorded problem must get a recorded response
+    const lbw=((+wg.value||0)>0&&(+wg.value)<2500)||tk('bpre');
+    $('#kmcw').style.display=lbw?'':'none';
+    $('#abw').style.display=tk('bsep')?'':'none';
+    $('#oxw').style.display=(tk('brds')||( a5.value!==''&&+a5.value<7))?'':'none';
+    $('#phw').style.display=tk('bjau')?'':'none';
+    $('#nfw').style.display=(nicu.value==='admitted'||nicu.value==='referred_out')?'':'none';
+    $('#ccow').style.display=(cc.value==='other')?'':'none';
+    $('#hexblock').style.display=(hex.value==='1')?'':'none';
+    $('#dbspos').style.display=(hex.value==='1'&&dbsr.value==='positive')?'':'none';
+    const any=lbw||tk('bsep')||tk('brds')||tk('bjau');
+    $('#pathprompt').style.display=any?'none':'';
+  };
+  ['a1','a5','wg','rs','brb','oc','cc','hex','dbsr','nicu','bpre','bsep','brds','bjau'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('change',showNb); el.addEventListener('input',showNb);}});
+  showNb();
+
+  $('#bsave').onclick=async()=>{
+    const blocking=nbIssues().filter(i=>i.block);
+    if(blocking.length){ modal('Check the newborn record',blocking.map(i=>i.t).join('\n\n'),'risk'); return; }
+    const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),
     mrn:(nmrn.value||null),breastfeed_initiated:(+bfi.value||null),
+    vitamin_k_time:(vkt.value||null),cord_care_other:(cc.value==='other'?(cco.value||null):null),
+    apgar_flag:(a5.value!==''?((+a5.value<7)?'low':'normal'):null),
+    hiv_exposed:(hex.value===''?null:+hex.value),
+    arv_prophylaxis:(hex.value==='1'?(arvp.value||null):null),
+    dbs_sample:(hex.value==='1'?(dbss.value||null):null),
+    dbs_result:(hex.value==='1'?(dbsr.value||null):null),
+    art_linked:(hex.value==='1'&&dbsr.value==='positive')?tk('artl'):null,
+    kmc:(kmc.value||null),phototherapy:(pht.value||null),antibiotics:(abx.value||null),oxygen:(oxy.value||null),
+    nicu:(nicu.value||null),nicu_facility:((nicu.value==='admitted'||nicu.value==='referred_out')?(nicuf.value||null):null),
     vacc_bcg:tk('vbcg'),vacc_opv0:tk('vopv'),vacc_hbv:tk('vhbv'),
     prob_prematurity:tk('bpre'),prob_sepsis_vsd:tk('bsep'),prob_resp_distress:tk('brds'),prob_congenital:tk('bcon'),prob_other:tk('both'),prob_other_text:(bpot.value||null),
     prob_lbw:((+wg.value||0)>0&&(+wg.value)<2500)?1:0,   // MoH item 55 — derived, never asked
@@ -1304,7 +1407,8 @@ const REG_COLS={
     ['Uterotonic','amtsl_uterotonic_type'],['CCT','amtsl_cct'],['Mother','maternal_status'],['Death cause','maternal_death_cause'],
     ['PE',tickCell('comp_preeclampsia')],['E',tickCell('comp_eclampsia')],['APH',tickCell('comp_aph')],['PPH',tickCell('comp_pph')],['Other',tickCell('comp_other')],['Referred',tickCell('referred')],
     ['Birth order','birth_order'],['Outcome','outcome'],['APGAR',r=>(r.apgar_1min||'')+'/'+(r.apgar_5min||'')],['Sex','sex'],['Weight (g)','weight_g'],
-    ['NB MRN','mrn_baby'],['Vit K','enc_vitamin_k'],['TTC','enc_eye_ointment'],['Chlorhex','enc_cord_care'],
+    ['NB MRN','mrn_baby'],['Vit K',r=>(r.vitamin_k_time&&r.vitamin_k_time!=='not_given')?'✓':''],['Vit K timing','vitamin_k_time'],['TTC','enc_eye_ointment'],['Chlorhex','enc_cord_care'],
+    ['HIV exposed',tickCell('hiv_exposed')],['ARV prophylaxis','arv_prophylaxis'],['DBS','dbs_sample'],['DBS result','dbs_result'],['KMC','kmc'],['Phototherapy','phototherapy'],['NICU','nicu'],
     ['Vacc',r=>[r.vacc_bcg?'BCG':'',r.vacc_opv0?'OPV0':'',r.vacc_hbv?'HBV':''].filter(Boolean).join('+')],
     ['HIV acc',tickCell('hiv_test_accepted')],['HIV res','hiv_test_result'],['Target pop','target_pop_code'],['ART regimen','art_regimen'],
     ['Prem',tickCell('prob_prematurity')],['Sepsis',tickCell('prob_sepsis_vsd')],['RDS',tickCell('prob_resp_distress')],['LBW',tickCell('prob_lbw')],['Congenital',tickCell('prob_congenital')],
@@ -1366,6 +1470,54 @@ async function registersScreen(){
     const bl=new Blob([window._regCsv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
     a.href=URL.createObjectURL(bl); a.download='moh_'+rt.value+'_register_'+rf.value+'_to_'+rto.value+'.csv'; a.click(); };
   load();
+}
+
+// ---- Pregnancy test (OPD) -> ANC room --------------------------------------
+// "If a mother's pregnancy test became positive from OPD, how can we link her to the
+//  ANC room?" — a positive test opens her ANC episode here, so the handoff is recorded
+//  instead of depending on her finding the ANC room herself.
+async function pregTest(){
+  const past=await api('GET','pregnancy_tests').catch(()=>[]);
+  app().innerHTML=nav()+`<div class="card"><h3>Pregnancy test <span class="muted" style="font-size:13px;font-weight:400">— OPD</span></h3>
+   <p class="muted">Record the test. If it is positive, ADHERE+ can open her ANC episode straight away — she is linked to the ANC room, not just told to go there.</p>
+   <div class="grid">
+    <label>Find the woman (MRN or name)<input id="ptq" placeholder="type to search"></label>
+    <label>&nbsp;<select id="ptw"><option value="">— search first —</option></select></label>
+    ${ecPicker('ptd','Test date',true)}
+    <label>Result<select id="ptr"><option value="">— select —</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
+   </div>
+   <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+     <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
+     <div style="margin-top:4px">A positive test means she needs ANC. Ticking this registers her for antenatal care and she will appear on the ANC worklist immediately.</div>
+   </div>
+   <label>Note<input id="ptn" placeholder="optional"></label>
+   <button class="act" id="ptsave" style="margin-top:10px">Save test</button> <span class="muted" id="ptm"></span></div>
+
+   <div class="card"><h3>Recent tests</h3><table><tr><th>Date</th><th>MRN</th><th>Name</th><th>Result</th><th>Linked to ANC</th></tr>
+    ${(past||[]).map(p=>`<tr><td>${esc(p.test_date||'')}</td><td>${esc(p.mrn||'')}</td><td>${esc((p.first_name||'')+' '+(p.father_name||''))}</td>
+      <td>${p.result==='positive'?'<span class="pill amber">Positive</span>':esc(p.result||'')}</td>
+      <td>${p.linked_episode_id?('<a class="nav" href="#patient/'+p.linked_episode_id+'">ANC episode '+p.linked_episode_id+'</a>'):(p.result==='positive'?'<span class="muted">not linked</span>':'—')}</td></tr>`).join('')
+      ||'<tr><td colspan=5 class=muted>No tests recorded yet.</td></tr>'}
+   </table></div>`;
+
+  let found=[];
+  ptq.addEventListener('input',async()=>{ const q=ptq.value.trim(); if(q.length<2) return;
+    found=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
+    ptw.innerHTML='<option value="">— select the woman —</option>'+(found||[]).map(w=>`<option value="${w.id}">${esc(w.mrn)} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
+  ptr.addEventListener('change',()=>{ $('#ptpos').style.display=(ptr.value==='positive')?'':'none'; });
+
+  $('#ptsave').onclick=async()=>{
+    if(!ptw.value){ modal('Select the woman','Search for her by MRN or name and select her from the list. If she is not registered yet, register her first.'); return; }
+    if(!ptr.value){ modal('Select the result','Record whether the pregnancy test was positive or negative.'); return; }
+    const b=$('#ptsave'); b.disabled=true;
+    try{
+      const r=await api('POST','pregnancy_tests',{woman_id:+ptw.value,test_date:ecGet('ptd'),result:ptr.value,
+        note:(ptn.value||null),link_to_anc:(ptr.value==='positive'&&tk('ptlink'))?1:0});
+      if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+r.episode_id,700); }
+      else if(r&&(r.id||r.queued)){ $('#ptm').textContent=' saved'; setTimeout(()=>pregTest(),600); }
+      else $('#ptm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; }
+  };
 }
 
 async function reportScreen(id){
