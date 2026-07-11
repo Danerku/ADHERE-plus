@@ -127,11 +127,35 @@ try {
       // Late ANC initiation is deliberately NOT included: it is so common here that flagging it
       // would mark most women and cause alarm fatigue. It stays visible on the chart instead.
       $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+      // "For client X, what conditions make her high risk?" — a flag with no reason is a dead end.
+      // Return the ACTUAL reasons as codes so the worklist can explain itself and state the
+      // next intervention, without the provider having to open her record to guess.
+      $rc="CONCAT_WS(',',
+             CASE WHEN w.age IS NOT NULL AND w.age<19 THEN 'AGE_LT19' END,
+             CASE WHEN w.age IS NOT NULL AND w.age>35 THEN 'AGE_GT35' END,
+             CASE WHEN w.pregnancy_planned=0 THEN 'UNPLANNED' END,
+             CASE WHEN w.prior_cs='yes' THEN 'PRIOR_CS' END,
+             CASE WHEN w.prior_stillbirth='yes' THEN 'PRIOR_STILLBIRTH' END,
+             CASE WHEN w.prior_pph='yes' THEN 'PRIOR_PPH' END,
+             CASE WHEN w.prior_preeclampsia='yes' THEN 'PRIOR_PREECLAMPSIA' END,
+             CASE WHEN w.prior_obstructed='yes' THEN 'PRIOR_OBSTRUCTED' END,
+             CASE WHEN w.chronic_htn='yes' THEN 'CHRONIC_HTN' END,
+             CASE WHEN w.diabetes='yes' THEN 'DIABETES' END,
+             CASE WHEN w.cardiac_renal='yes' THEN 'CARDIAC_RENAL' END,
+             CASE WHEN w.rh_factor='neg' THEN 'RH_NEG' END,
+             CASE WHEN w.late_anc_initiation=1 THEN 'LATE_ANC' END,
+             CASE WHEN w.hiv_known_positive=1 THEN 'HIV_POS' END
+           )";
+      $sc="(SELECT GROUP_CONCAT(a.item_code) FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes')";
+      $an="(SELECT av.anaemia_grade FROM anc_visits av WHERE av.episode_id=e.id AND av.anaemia_grade IS NOT NULL AND av.anaemia_grade<>'normal' ORDER BY av.id DESC LIMIT 1)";
+      $mf="(SELECT av.muac_flag FROM anc_visits av WHERE av.episode_id=e.id AND av.muac_flag=1 ORDER BY av.id DESC LIMIT 1)";
       // Person-level items are carried forward here so Delivery and PNC can SHOW what ANC
       // already established (blood group, Rh, HIV, target population) instead of re-asking.
       $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.height_cm,w.lnmp,w.edd, w.ga_first_contact,w.late_anc_initiation,
               w.blood_group,w.rh_factor,w.pregnancy_planned,w.target_pop_code,w.hiv_known_positive,w.hiv_linked_art,w.art_regimen,
-              pu.full_name AS provider_name, $hr AS high_risk FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
+              pu.full_name AS provider_name, $hr AS high_risk,
+              $rc AS risk_codes, $sc AS screen_codes, $an AS anaemia, $mf AS muac_low
+            FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
       if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
@@ -233,6 +257,55 @@ try {
       'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
     ];
     out(['months'=>$months,'indicators'=>$ind]);
+  }
+
+  // ---- Facility overview: themed counts for the dashboard --------------------
+  // Grouped by theme so the dashboard can answer: how many were high risk, what
+  // happened to them, how they delivered, and whether the process of care was followed.
+  if ($r==='overview' && $m==='GET'){ $u=require_auth(); $fid=(int)$u['facility_id'];
+    $days=(int)($_GET['days']??0); if($days<0)$days=0; if($days>3660)$days=3660;
+    $since = $days>0 ? " AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : "";
+    $one=function($sql) use($fid){ $st=db()->prepare($sql); $st->execute([$fid]); $r=$st->fetch(); return (int)($r['c']??0); };
+    $grp=function($sql) use($fid){ $st=db()->prepare($sql); $st->execute([$fid]); $o=[]; foreach($st->fetchAll() as $x){ $o[(string)$x['k']]=(int)$x['c']; } return $o; };
+    $hrx="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+    out([
+     'days'=>$days,
+     'caseload'=>[
+       'anc'      =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id=? AND e.service_category='anc'$since"),
+       'labour'   =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id=? AND e.service_category='labour'$since"),
+       'pnc'      =>$one("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id=?$since"),
+       'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=?$since"),
+       'high_risk'=>$one("SELECT COUNT(*) c FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.facility_id=? AND $hrx$since"),
+       'total'    =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id=?$since"),
+     ],
+     'mode_of_delivery'=>$grp("SELECT d.mode k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.mode IS NOT NULL$since GROUP BY d.mode"),
+     'birth_outcome'  =>$grp("SELECT b.outcome k, COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.outcome IS NOT NULL$since GROUP BY b.outcome"),
+     'maternal_outcome'=>$grp("SELECT d.maternal_status k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.maternal_status IS NOT NULL$since GROUP BY d.maternal_status"),
+     'complications'=>[
+       'pre_eclampsia'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_preeclampsia=1$since"),
+       'eclampsia'    =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_eclampsia=1$since"),
+       'aph'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_aph=1$since"),
+       'pph'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_pph=1$since"),
+       'other'        =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_other=1$since"),
+     ],
+     'process'=>[
+       'partograph_used'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.partograph_used='Y'$since"),
+       'amtsl'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.amtsl_uterotonic='done'$since"),
+       'checklist'      =>$one("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.id=c.episode_id WHERE e.facility_id=?$since"),
+       'referred'       =>$one("SELECT COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id=?$since"),
+       'red_alerts'     =>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id=? AND s.band='red'$since"),
+     ],
+     'ippfp'=>$grp("SELECT d.ippfp_method k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.ippfp_method IS NOT NULL$since GROUP BY d.ippfp_method"),
+     'newborn_care'=>[
+       'lbw'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.prob_lbw=1$since"),
+       'kmc'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.kmc='initiated'$since"),
+       'phototherapy'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.phototherapy='given'$since"),
+       'nicu'        =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.nicu IN ('admitted','referred_out')$since"),
+       'hiv_exposed' =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.hiv_exposed=1$since"),
+       'dbs_sent'    =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.dbs_sample='sent'$since"),
+       'low_apgar'   =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.apgar_flag='low'$since"),
+     ],
+    ]);
   }
 
   // ---- Pregnancy test (OPD) and the link into the ANC room -------------------

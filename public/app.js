@@ -370,16 +370,90 @@ async function register(){
   };
 }
 
+// ---- Why is she high risk? ---------------------------------------------------
+// A flag with no reason is a dead end — the provider had to open her record and guess.
+// Each code carries BOTH the reason and the next intervention.
+const RISK_INFO={
+ AGE_LT19:['Age under 19 — teenage/adolescent pregnancy','Specialised ANC. Screen for pre-eclampsia, anaemia and obstructed labour. Plan facility delivery; expect a longer labour.'],
+ AGE_GT35:['Age over 35 — advanced maternal age','Specialised ANC and closer monitoring. Screen for hypertension and gestational diabetes.'],
+ UNPLANNED:['Unplanned or unwanted pregnancy','Counsel and assess support needs; screen mental health and IPV. Offer postpartum family planning.'],
+ PRIOR_CS:['Previous caesarean section','Plan place of birth with a functioning theatre. Watch for scar rupture in labour. No prolonged augmentation.'],
+ PRIOR_STILLBIRTH:['Previous stillbirth','Increased fetal surveillance. Serial growth and fetal movement counting. Plan facility birth.'],
+ PRIOR_PPH:['Previous postpartum haemorrhage','High PPH risk. Active management of the third stage. Have uterotonics and IV access ready; cross-match if possible.'],
+ PRIOR_PREECLAMPSIA:['Previous pre-eclampsia or eclampsia','Calcium supplementation. Check BP and urine protein at every contact. Low threshold for referral.'],
+ PRIOR_OBSTRUCTED:['Previous obstructed or prolonged labour','Plan facility birth with caesarean capability. Use the partograph from admission.'],
+ CHRONIC_HTN:['Chronic hypertension','BP at every contact. Calcium. Watch for superimposed pre-eclampsia. Specialist review.'],
+ DIABETES:['Diabetes mellitus','Glycaemic control and specialist care. Expect macrosomia; plan the birth.'],
+ CARDIAC_RENAL:['Cardiac or renal disease','Refer for specialist care. This may be a pregnancy that endangers her life — see Guideline Annex 2.'],
+ RH_NEG:['Rh negative','Anti-D prophylaxis if indirect Coombs negative. Check the newborn’s Rh at birth.'],
+ LATE_ANC:['Late ANC initiation (booked after 12 weeks)','Catch up on the missed ANC package: screening, IFA, calcium, Td, deworming.'],
+ HIV_POS:['Known HIV positive','Continue ART; do not re-test. Check viral load. Ensure PMTCT linkage and plan infant ARV + DBS.'],
+ ANAEMIA:['Anaemia on the last contact','Therapeutic iron. If severe (Hb <7), refer and consider transfusion.'],
+ MUAC_LOW:['Acute malnutrition (MUAC <23 cm)','Treat per the national protocol and counsel on nutrition.'],
+};
+function riskReasons(e){
+  const codes=[];
+  String(e.risk_codes||'').split(',').filter(Boolean).forEach(c=>codes.push(c));
+  String(e.screen_codes||'').split(',').filter(Boolean).forEach(c=>{
+    const m={OBS_PREV_STILLBIRTH:'PRIOR_STILLBIRTH',OBS_PREV_PPH:'PRIOR_PPH',OBS_PREV_OBSTRUCTED:'PRIOR_OBSTRUCTED',
+      OBS_PREV_PREECLAMPSIA:'PRIOR_PREECLAMPSIA',OBS_PREV_CS:'PRIOR_CS',CUR_AGE_LT19:'AGE_LT19',CUR_AGE_GT35:'AGE_GT35',
+      CUR_UNPLANNED:'UNPLANNED',MED_CHRONIC_HTN:'CHRONIC_HTN',MED_DIABETES:'DIABETES',MED_CARDIAC_RENAL:'CARDIAC_RENAL',
+      MED_RH_SENSITIZED:'RH_NEG',MED_ANAEMIA:'ANAEMIA'}[c];
+    if(m) codes.push(m); else codes.push('SCREEN:'+c);
+  });
+  if(e.anaemia) codes.push('ANAEMIA');
+  if(e.muac_low==1) codes.push('MUAC_LOW');
+  const seen={}; const out=[];
+  codes.forEach(c=>{ if(seen[c]) return; seen[c]=1;
+    if(RISK_INFO[c]) out.push({code:c,why:RISK_INFO[c][0],action:RISK_INFO[c][1]});
+    else if(c.startsWith('SCREEN:')){ const it=ANC_ITEMS.find(i=>i[0]===c.slice(7));
+      if(it) out.push({code:c,why:it[2],action:'Flagged on the ANC risk screening — review the care plan.'}); }
+  });
+  return out;
+}
+// Clickable "Higher risk" pill that explains itself.
+function riskPill(e){
+  if(e.high_risk!=1) return '';
+  const n=riskReasons(e).length;
+  return ` <span class="pill amber riskx" data-ep="${e.id}" style="cursor:pointer" title="Click to see why">Higher risk${n?(' · '+n):''}</span>`;
+}
+function wireRisk(rows){
+  document.querySelectorAll('span.riskx').forEach(s=>{ s.onclick=()=>{
+    const e=(rows||[]).find(x=>x.id==s.dataset.ep); if(!e) return;
+    const rs=riskReasons(e);
+    const name=((e.first_name||'')+' '+(e.father_name||'')).trim()||('Episode '+e.id);
+    const body=rs.length
+      ? rs.map((r,i)=>`<div style="padding:8px 0;border-bottom:0.5px solid #eee">
+           <div style="font-weight:600;color:#791f1f">${i+1}. ${esc(r.why)}</div>
+           <div style="font-size:13px;color:#334155;margin-top:2px"><b>Next:</b> ${esc(r.action)}</div></div>`).join('')
+      : '<div class="muted">Flagged, but no specific condition is recorded. Complete her ANC risk screening.</div>';
+    const old=document.getElementById('mdl'); if(old) old.remove();
+    const d=document.createElement('div'); d.id='mdl';
+    d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
+    d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:520px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25);max-height:80vh;overflow:auto">
+      <h3 style="margin:0 0 2px;color:#a32d2d;font-size:16px">Why ${esc(name)} is high risk</h3>
+      <p class="muted" style="margin:0 0 10px;font-size:12px">MRN ${esc(e.mrn||'')} &middot; ${rs.length} condition(s) &middot; from her record and ANC risk screening</p>
+      ${body}
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="act" id="mdlok" style="flex:1">Understood</button>
+        <a class="sec" href="#anc/${e.id}" style="flex:1;text-align:center;padding:8px;border-radius:8px;text-decoration:none">Open risk screening</a>
+      </div></div>`;
+    document.body.appendChild(d);
+    d.querySelector('#mdlok').onclick=()=>d.remove();
+    d.onclick=(ev)=>{ if(ev.target===d) d.remove(); };
+  }; });
+}
+
 function provOpts(provs,sel){ return '<option value="">— Not assigned —</option>'+(provs||[]).map(p=>`<option value="${p.id}"${sel==p.id?' selected':''}>${esc(p.full_name)}</option>`).join(''); }
 function wireAssign(){ document.querySelectorAll('select.asgn').forEach(s=>{ s.onchange=async()=>{ const r=await api('PATCH','episodes/'+s.dataset.ep,{provider_id:+s.value||null}); if(r&&(r.ok||r.queued)) toast('Provider updated','ok'); }; }); }
 async function labour(){
   const [rows,provs]=await Promise.all([api('GET','episodes?category=labour').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   app().innerHTML=nav()+`<div class="card"><h3>Labour ward</h3><table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${r.high_risk==1?' <span class="pill amber">Higher risk</span>':''}</td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${riskPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No women in labour. Register one.</td></tr>'}
    </table></div>`;
-  wireAssign();
+  wireAssign(); wireRisk(rows);   // the "Higher risk" pill explains itself on click
 }
 
 const OB={}; // per-episode in-memory observations for the chart
@@ -549,8 +623,100 @@ async function users(){
     else { const pw=prompt('New password for this user:'); if(pw){ await api('PATCH','users/'+id,{password:pw}); alert('Password reset.'); } } });
 }
 
+// ---- Themed facility overview ------------------------------------------------
+// Answers: how many were high risk, what happened to them, how they delivered,
+// and whether the process of care was actually followed.
+const LBL={svd:'SVD',caesarean:'Caesarean',assisted:'Assisted (vacuum/forceps)',other:'Other',
+ live_birth:'Live birth',fresh_stillbirth:'Fresh stillbirth',macerated_stillbirth:'Macerated stillbirth',neonatal_death:'Died after birth',
+ stable:'Stable',unstable_referred:'Unstable — referred',died:'Died',
+ POP:'POP',Imp:'Implant',IUCD:'IUCD',TL:'Tubal ligation',Oth:'Other'};
+function ovBar(obj,goodKeys){
+  const tot=Object.values(obj||{}).reduce((a,b)=>a+b,0);
+  if(!tot) return '<p class="muted" style="font-size:12px">Nothing recorded yet.</p>';
+  const col=k=>(goodKeys&&goodKeys.indexOf(k)>-1)?'#1d9e75':(/still|died|death|unstable/.test(k)?'#a32d2d':'#0f766e');
+  return Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
+    const p=Math.round(100*v/tot);
+    return `<div style="margin:5px 0">
+      <div style="display:flex;justify-content:space-between;font-size:12px"><span>${esc(LBL[k]||k)}</span><span><b>${v}</b> · ${p}%</span></div>
+      <div style="background:#eef2f1;border-radius:5px;height:7px;overflow:hidden"><div style="width:${p}%;height:100%;background:${col(k)}"></div></div>
+    </div>`; }).join('');
+}
+function ovStat(v,l,sub){ return `<div style="background:#f5f9f8;border-radius:10px;padding:10px 12px">
+  <div style="font-size:22px;font-weight:600;color:#0b3d3a">${v}</div>
+  <div style="font-size:12px;color:#5b6663">${esc(l)}</div>${sub?`<div style="font-size:11px;color:#888">${esc(sub)}</div>`:''}</div>`; }
+
+async function overviewSection(){
+  const days=window._ovDays||0;
+  let o; try{ o=await api('GET','overview'+(days?('?days='+days):'')); }catch(e){ return '<div class="card">Could not load overview: '+esc(e.message||'error')+'</div>'; }
+  window._ov=o;
+  const c=o.caseload||{}, pr=o.process||{}, nb=o.newborn_care||{}, cx=o.complications||{};
+  const pct=(a,b)=>b?Math.round(100*a/b)+'%':'—';
+  const hrPct=c.total?Math.round(100*c.high_risk/c.total):0;
+  return `<div class="card">
+    <h3>Facility overview</h3>
+    <p class="muted">Period: <select id="ovp" style="width:auto;display:inline-block">
+      <option value="0"${days===0?' selected':''}>All time</option>
+      <option value="30"${days===30?' selected':''}>Last 30 days</option>
+      <option value="90"${days===90?' selected':''}>Last 90 days</option>
+      <option value="365"${days===365?' selected':''}>Last 12 months</option></select>
+      &nbsp; <button class="sec" id="ovcsv" style="padding:4px 10px;font-size:12px">Download CSV</button>
+      <button class="sec" id="ovprint" style="padding:4px 10px;font-size:12px">Print</button></p>
+
+    <h4>Caseload</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(c.anc||0,'ANC')}${ovStat(c.labour||0,'Labour')}${ovStat(c.deliveries||0,'Deliveries')}${ovStat(c.pnc||0,'PNC')}
+      ${ovStat((c.high_risk||0)+' · '+hrPct+'%','High risk','of all episodes')}
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:14px">
+      <div><h4>Mode of delivery</h4>${ovBar(o.mode_of_delivery)}</div>
+      <div><h4>Birth outcome</h4>${ovBar(o.birth_outcome,['live_birth'])}</div>
+      <div><h4>Maternal outcome</h4>${ovBar(o.maternal_outcome,['stable'])}</div>
+      <div><h4>Immediate postpartum FP</h4>${ovBar(o.ippfp)}</div>
+    </div>
+
+    <h4 style="margin-top:14px">Obstetric complications</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr))">
+      ${ovStat(cx.pre_eclampsia||0,'Pre-eclampsia')}${ovStat(cx.eclampsia||0,'Eclampsia')}${ovStat(cx.aph||0,'APH')}${ovStat(cx.pph||0,'PPH')}${ovStat(cx.other||0,'Other')}
+    </div>
+
+    <h4 style="margin-top:14px">Process of care</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(pct(pr.partograph_used||0,c.deliveries||0),'Partograph used',(pr.partograph_used||0)+' of '+(c.deliveries||0))}
+      ${ovStat(pct(pr.amtsl||0,c.deliveries||0),'AMTSL',(pr.amtsl||0)+' of '+(c.deliveries||0))}
+      ${ovStat(pct(pr.checklist||0,c.labour||0),'Safe-birth checklist',(pr.checklist||0)+' of '+(c.labour||0))}
+      ${ovStat(pr.referred||0,'Referred')}
+      ${ovStat(pr.red_alerts||0,'Red AI alerts')}
+    </div>
+
+    <h4 style="margin-top:14px">Newborn care</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr))">
+      ${ovStat(nb.lbw||0,'Low birth weight')}
+      ${ovStat(pct(nb.kmc||0,nb.lbw||0),'KMC initiated',(nb.kmc||0)+' of '+(nb.lbw||0)+' LBW')}
+      ${ovStat(nb.phototherapy||0,'Phototherapy')}
+      ${ovStat(nb.nicu||0,'NICU / referred')}
+      ${ovStat(nb.low_apgar||0,'APGAR <7 at 5 min')}
+      ${ovStat(pct(nb.dbs_sent||0,nb.hiv_exposed||0),'DBS sent',(nb.dbs_sent||0)+' of '+(nb.hiv_exposed||0)+' exposed')}
+    </div>
+  </div>`;
+}
+function wireOverview(){
+  const p=$('#ovp'); if(p) p.onchange=()=>{ window._ovDays=+p.value; dashboard(); };
+  const pr=$('#ovprint'); if(pr) pr.onclick=()=>window.print();
+  const cs=$('#ovcsv'); if(cs) cs.onclick=()=>{
+    const o=window._ov||{}; const lines=[['Theme','Item','Value']];
+    const push=(t,obj)=>Object.entries(obj||{}).forEach(([k,v])=>lines.push([t,LBL[k]||k,v]));
+    push('Caseload',o.caseload); push('Mode of delivery',o.mode_of_delivery); push('Birth outcome',o.birth_outcome);
+    push('Maternal outcome',o.maternal_outcome); push('Complications',o.complications); push('Process of care',o.process);
+    push('IPPFP',o.ippfp); push('Newborn care',o.newborn_care);
+    const csv=lines.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\n');
+    const bl=new Blob([csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
+    a.href=URL.createObjectURL(bl); a.download='adhere_overview_'+(new Date().toISOString().slice(0,10))+'.csv'; a.click(); };
+}
+
 async function dashboard(){
   let d; try{ d=await api('GET','analytics'); }catch(e){ app().innerHTML=nav()+'<div class="card">Could not load dashboard: '+esc(e.message||'error')+'</div>'; return; }
+  const ovHtml=await overviewSection();
   const I=d.indicators||{}; const g=k=>(I[k]||[]);
   const MN=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const mo=(d.months||[]).map(m=>MN[(+String(m).slice(5))-1]||String(m).slice(5));
@@ -579,11 +745,14 @@ async function dashboard(){
       ${kpi('Referrals', cur('referrals')+delta('referrals'), 'this month')}
       ${kpi('Stillbirths', cur('stillbirths'), (rlast(sbRate)!=null?rlast(sbRate)+'/1,000 births':'this month'))}
     </div>
+    ${ovHtml}
+    <div class="card"><h3>Trends over time</h3><p class="muted">Monthly rates against their denominators. A flag marks a real change against an established baseline &mdash; not the initial roll-up when the system was new.</p></div>
     ${block(pgRate,'Partograph completion rate (%)','down')}
     ${block(ckRate,'Safe-birth checklist rate (%)','down')}
     ${block(g('deliveries'),'Deliveries (count)','neutral')}
     ${block(sbRate,'Fresh stillbirths per 1,000 births','up')}
     ${block(g('red_alerts'),'Red AI alerts (count)','up')}`;
+  wireOverview();
 }
 
 function drawPG(id){
@@ -732,7 +901,7 @@ async function pnc(){
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#pncvisit/${r.id}">PNC follow-up</a> &middot; <a class="nav" href="#baby/${r.id}">Newborn</a> &middot; <a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No postnatal women yet.</td></tr>'}
    </table></div>`;
-  wireAssign();
+  wireAssign(); wireRisk(rows);   // the "Higher risk" pill explains itself on click
 }
 const ANC_GROUPS={obstetric_history:'Obstetric history',current_pregnancy:'Current pregnancy',general_medical:'General medical'};
 // Aligned to the National ANC Guideline (MoH, Feb 2022): Table 4 (high-risk conditions)
@@ -819,12 +988,12 @@ async function ancList(){
   const [rows,provs]=await Promise.all([api('GET','episodes?category=anc').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   app().innerHTML=nav()+`<div class="card"><h3>Antenatal care</h3>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${r.high_risk==1?' <span class="pill amber">Higher risk</span>':''}</td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${riskPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
    </table><p class="muted">"&rarr; Labour" admits the woman into the labour ward. Higher-risk women are flagged automatically from their ANC screening and gathered under the High risk tab.</p></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_anc'));
-  wireAssign();
+  wireAssign(); wireRisk(rows);   // the "Higher risk" pill explains itself on click
 }
 
 async function highriskList(){
@@ -832,12 +1001,12 @@ async function highriskList(){
   app().innerHTML=nav()+`<div class="card"><h3>High-risk worklist</h3>
    <p class="muted">Women in antenatal care or labour who carry a risk factor &mdash; flagged automatically from their ANC risk screening. A live worklist to help prioritise who to see first; risk is a status, not a separate ward.</p>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Pathway</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.service_category||'')}</td><td>${esc(r.status)} <span class="pill amber">Higher risk</span></td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.service_category||'')}</td><td>${esc(r.status)}${riskPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=7 class=muted>No higher-risk women right now. Women are flagged here automatically from their ANC risk screening.</td></tr>'}
    </table></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_highrisk'));
-  wireAssign();
+  wireAssign(); wireRisk(rows);   // the "Higher risk" pill explains itself on click
 }
 
 async function transfer(womanId,cat,from){
