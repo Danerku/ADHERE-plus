@@ -7,10 +7,17 @@ $parts = explode('/', $path);
 $r = $parts[0] ?? '';
 $id = $parts[1] ?? null;
 
+// Person-level fields from the Ethiopian MoH registers (migration v12).
+// The paper registers repeat these at every encounter; we hold one truth per
+// person and let the register export replay them into each row.
+const MOH_PERSON_FIELDS = ['woreda','target_pop_code','hiv_known_positive','hiv_linked_pmtct',
+  'hiv_linked_pmtct_facility','hiv_linked_art','art_regimen','partner_hiv_accepted',
+  'partner_hiv_result','partner_target_pop_code','partner_linked_art'];
+
 try {
   // ---- auth ----
   if ($r==='login' && $m==='POST'){
-    $b=body(); $st=db()->prepare("SELECT u.*, f.name AS facility_name FROM users u LEFT JOIN facilities f ON f.id=u.facility_id WHERE u.username=? AND u.is_active=1");
+    $b=body(); $st=db()->prepare("SELECT u.*, f.name AS facility_name, f.facility_type AS facility_type FROM users u LEFT JOIN facilities f ON f.id=u.facility_id WHERE u.username=? AND u.is_active=1");
     $st->execute([$b['username']??'']); $u=$st->fetch();
     if(!$u || !password_verify($b['password']??'', $u['password_hash'])) err('invalid credentials',401);
     unset($u['password_hash']); session_regenerate_id(true); $_SESSION['user']=$u;
@@ -86,12 +93,22 @@ try {
     if($m==='GET'){ $u=user(); $q='%'.($_GET['q']??'').'%'; $st=db()->prepare("SELECT * FROM women WHERE facility_id=? AND (mrn LIKE ? OR first_name LIKE ?) ORDER BY id DESC LIMIT 100"); $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       if(empty($b['mrn'])) err('MRN is required');
+      // MRN length follows the facility's paper numbering: 5 digits at a health centre, 6 at a hospital.
+      $b['mrn']=trim((string)$b['mrn']);
+      if(!preg_match('/^\d+$/',$b['mrn'])) err('MRN must be digits only');
+      $ft=strtolower((string)($u['facility_type']??''));
+      $len=strlen($b['mrn']);
+      if($ft==='health_center' && $len!==5) err('MRN must be 5 digits at a health centre');
+      if(($ft==='primary_hospital'||$ft==='general_hospital') && $len!==6) err('MRN must be 6 digits at a hospital');
+      if($len<5 || $len>6) err('MRN must be 5 or 6 digits');
+      if(isset($b['age'])&& $b['age']!==null && $b['age']!==''){ $ag=(int)$b['age'];
+        if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
       $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
-      $wid=insert('women',array_intersect_key($b,array_flip(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','facility_id','created_by'])));
+      $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','facility_id','created_by'],MOH_PERSON_FIELDS))));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
-      $fields=array_intersect_key($b,array_flip(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd']));
+      $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome'],MOH_PERSON_FIELDS)));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
   }
 
@@ -109,9 +126,9 @@ try {
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
       $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
-      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','admission_datetime','facility_id','created_by'])));
+      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob'])));
       audit('create','episodes',$eid); out(['id'=>$eid],201); }
-    if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body(); $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane']));
+    if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body(); $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','place_of_delivery','infant_dob']));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE episodes SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','episodes',$id,$fields); out(['ok'=>true]); }
   }
 
@@ -136,13 +153,21 @@ try {
   // ---- checklist / danger signs / delivery / anc screening / handover / messages ----
   $simple=['checklist'=>['checklist_responses',['episode_id','pause_point','item_code','response','recorded_by']],
            'danger_signs'=>['danger_signs',['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']],
-           'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','blood_loss_ml','recorded_by']],
+           'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','blood_loss_ml','recorded_by',
+             // MoH Delivery register (v12): 7,11,12,15-24,36-38,42,49-51,66
+             'partograph_used','episiotomy','mode_other_text','maternal_status','maternal_death_cause','comp_preeclampsia','comp_eclampsia','comp_aph','comp_pph','comp_other','referred','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_feeding_options','ippfp_acceptor','ippfp_method','remark']],
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
            'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
-           'anc_visits'=>['anc_visits',['episode_id','visit_date','contact_no','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','muac','fetal_movement','hiv_status','syphilis','tetanus_td','iron_folic','malaria_assessed','danger_note','next_appointment','recorded_by']],
-           'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','danger_note','recorded_by']],
-           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','enc_dried','enc_breathing','enc_vitamin_k','enc_eye_ointment','enc_cord_care','enc_arv','recorded_by']],
+           'anc_visits'=>['anc_visits',['episode_id','visit_date','contact_no','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','muac','fetal_movement','hiv_status','syphilis','tetanus_td','iron_folic','malaria_assessed','danger_note','next_appointment','recorded_by',
+             // MoH ANC register (v12): 10-18, 20,21,23, counselling 30-34, remark 35
+             'ultrasound_lt24w','syphilis_result','syphilis_treated','hepb_result','hepb_treated','hepb_prophylaxis','td_dose_no','ifa_tabs','deworming','hiv_test_accepted','hiv_test_result','hiv_posttest_counselled','cnsl_danger_signs','cnsl_nutrition','cnsl_ecd','cnsl_infant_feeding','cnsl_family_planning','remark']],
+           'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','danger_note','recorded_by',
+             // MoH PNC register (v12): 10,12-17, counselling 25-30, newborn 31-37, IPPFP 38-40, remark 42
+             'visit_period','maternal_condition','pph','other_obs_complication','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_danger_signs','cnsl_breastfeeding','cnsl_newborn_care','cnsl_family_planning','cnsl_epi','cnsl_ecd','nb_weight_g','nb_problems','nb_problem_other','nb_treatment','nb_treatment_outcome','nb_death_age_days','nb_death_cause','ippfp_acceptor','ippfp_method','remark']],
+           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','enc_dried','enc_breathing','enc_vitamin_k','enc_eye_ointment','enc_cord_care','enc_arv','recorded_by',
+             // MoH Delivery register, newborn level (v12): 31,35,52-64
+             'mrn','vacc_bcg','vacc_opv0','vacc_hbv','prob_prematurity','prob_sepsis_vsd','prob_resp_distress','prob_lbw','prob_congenital','prob_other','prob_other_text','breastfeed_initiated','resuscitated_survived','death_age_days','death_age_hours','death_cause','birth_notification']],
            'maternal_vitals'=>['maternal_vitals',['episode_id','obs_datetime','bp_systolic','bp_diastolic','pulse','temperature','resp_rate','spo2','note','recorded_by']],
            'bemonc'=>['bemonc_care',['episode_id','item_code','response','note','recorded_by']],
            'messages'=>['messages',['episode_id','from_user_id','to_user_id','body']]];
@@ -177,6 +202,45 @@ try {
       'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
     ];
     out(['months'=>$months,'indicators'=>$ind]);
+  }
+
+  // ---- MoH paper-register export -------------------------------------------
+  // Reproduces the official Ethiopian MoH ANC / Delivery / PNC registers from the
+  // captured record, so a facility no longer hand-writes them. Person-level items
+  // (target population, HIV linkage, partner) are replayed from `women` onto every
+  // row, exactly as the paper repeats them.
+  if ($r==='registers' && $m==='GET'){ $u=require_auth();
+    $type=$_GET['type']??'anc'; $fac=(int)$u['facility_id'];
+    $from=$_GET['from']??date('Y-m-01'); $to=$_GET['to']??date('Y-m-d');
+    if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$from)||!preg_match('/^\d{4}-\d{2}-\d{2}$/',$to)) err('bad date range');
+    $W="w.mrn,w.first_name,w.father_name,w.age,w.kebele,w.woreda,w.lnmp,w.edd,
+        w.target_pop_code,w.hiv_known_positive,w.hiv_linked_pmtct,w.hiv_linked_pmtct_facility,w.hiv_linked_art,w.art_regimen,
+        w.partner_hiv_accepted,w.partner_hiv_result,w.partner_target_pop_code,w.partner_linked_art";
+    if($type==='anc'){
+      $st=db()->prepare("SELECT a.*, $W FROM anc_visits a
+        JOIN episodes e ON e.id=a.episode_id JOIN women w ON w.id=e.woman_id
+        WHERE e.facility_id=? AND a.visit_date BETWEEN ? AND ? ORDER BY w.mrn, a.contact_no, a.visit_date");
+    } elseif($type==='delivery'){
+      // one row per newborn — the register says "use consecutive rows for each newborn"
+      // b.mrn is the NEWBORN's; w.mrn is the mother's. Alias the newborn's so the
+      // mother's (selected later in $W) doesn't overwrite it in the fetched row.
+      $st=db()->prepare("SELECT b.*, b.mrn AS mrn_baby, d.delivery_datetime, d.mode, d.mode_other_text, d.partograph_used, d.episiotomy,
+          d.amtsl_uterotonic_type, d.amtsl_cct, d.maternal_status, d.maternal_death_cause,
+          d.comp_preeclampsia, d.comp_eclampsia, d.comp_aph, d.comp_pph, d.comp_other, d.referred,
+          d.hiv_test_accepted, d.hiv_retest_accepted, d.hiv_test_result, d.cnsl_feeding_options,
+          d.ippfp_acceptor, d.ippfp_method, d.remark AS delivery_remark, $W
+        FROM babies b
+        JOIN episodes e ON e.id=b.episode_id JOIN women w ON w.id=e.woman_id
+        LEFT JOIN delivery_summary d ON d.episode_id=b.episode_id
+        WHERE e.facility_id=? AND DATE(COALESCE(d.delivery_datetime,b.recorded_at)) BETWEEN ? AND ?
+        ORDER BY d.delivery_datetime, w.mrn, b.birth_order");
+    } elseif($type==='pnc'){
+      $st=db()->prepare("SELECT p.*, e.place_of_delivery, e.infant_dob, $W FROM pnc_visits p
+        JOIN episodes e ON e.id=p.episode_id JOIN women w ON w.id=e.woman_id
+        WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY w.mrn, p.visit_date");
+    } else err('unknown register type');
+    $st->execute([$fac,$from,$to]); $rows=$st->fetchAll();
+    out(['type'=>$type,'from'=>$from,'to'=>$to,'facility'=>$u['facility_name']??'','count'=>count($rows),'rows'=>$rows]);
   }
 
   // ---- DHIS2 indicator export (aggregate) ----

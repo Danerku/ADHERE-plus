@@ -102,7 +102,7 @@ function route(){
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
-    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
+    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
 function forcePw(){
@@ -149,6 +149,7 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   ${L('#highrisk','High risk')}
   ${L('#pnc','Postnatal')}
   ${L('#dashboard','Dashboard')}
+  ${L('#registers','Registers')}
   ${ME.role==='admin'?L('#facilities','Facilities'):''}
   ${ME.role==='admin'?L('#users','Users'):''}
   ${ME.role==='admin'?L('#reminders','Reminders'):''}</nav>`;
@@ -168,6 +169,22 @@ function home(){
   $('#chpw').onclick=async()=>{ const r=await api('POST','password',{current:cpw.value,new:npw.value}); if(r&&r.ok){ $('#pwm').textContent=' updated'; cpw.value='';npw.value=''; } else $('#pwm').textContent=' '+((r&&r.error)||'error'); };
 }
 
+// ---- MoH register helpers ----------------------------------------------------
+// A tick box on the paper register is a boolean. tick() renders it, tk() reads it.
+function tick(id,label){ return `<label class="tick"><input type="checkbox" id="${id}"> ${label}</label>`; }
+function tk(id){ const el=document.getElementById(id); return (el&&el.checked)?1:0; }
+
+// Targeted population category — the 9-code list (A-I) from the MoH instruction page.
+// (The register footer prints a contradictory 7-code list; MoH to confirm.)
+const TARGET_POP=[['A','Female commercial sex workers'],['B','Long distance drivers'],['C','Mobile / daily labourers'],
+  ['D','Prisoners'],['E','OVC'],['F','Children of PLHIV'],['G','Partners of PLHIV'],['H','Other MARPS'],['I','General population']];
+function tpSel(id,label,val){ return `<label>${label}<select id="${id}"><option value="">-</option>`+
+  TARGET_POP.map(([c,n])=>`<option value="${c}"${val===c?' selected':''}>${c}. ${n}</option>`).join('')+`</select></label>`; }
+function selOpts(list,val){ return `<option value="">-</option>`+list.map(([v,n])=>`<option value="${v}"${String(val)===String(v)?' selected':''}>${n}</option>`).join(''); }
+
+const IPPFP_METHODS=[['POP','POP — progestin-only pill'],['Imp','Implant'],['IUCD','IUCD'],['TL','Tubal ligation'],['Oth','Other']];
+const ACCEPTOR=[['new','New acceptor'],['repeat','Repeat acceptor']];
+
 // Ethiopian-calendar date entry: 3 selects (day/month/year E.C.) -> stores Gregorian YYYY-MM-DD
 function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
 function ecPicker(id,label,def){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
@@ -183,23 +200,81 @@ function ecGet(id){ const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).v
   return (d&&m&&y&&window.Ethiopian)?Ethiopian.toGreg(+y,+m,+d):null; }
 function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
 
+// ---- registration validation -------------------------------------------------
+// MRN length follows the facility's paper numbering: 5 digits at a health centre,
+// 6 at a hospital. Anything else is a transcription slip and is worth catching here.
+function mrnRule(){ const t=String((ME&&ME.facility_type)||'').toLowerCase();
+  if(t==='health_center') return {min:5,max:5,label:'5 digits (health centre)'};
+  if(t==='primary_hospital'||t==='general_hospital') return {min:6,max:6,label:'6 digits (hospital)'};
+  return {min:5,max:6,label:'5 or 6 digits'}; }
+function mrnError(v){ const r=mrnRule(); const s=String(v||'').trim();
+  if(!s) return 'MRN is required';
+  if(!/^\d+$/.test(s)) return 'MRN must be digits only';
+  if(s.length<r.min||s.length>r.max) return 'MRN must be '+r.label+' — you entered '+s.length;
+  return ''; }
+// Age extremes are a risk factor in their own right, so we stop and say so.
+function ageError(v){ const n=+v; if(!v||isNaN(n)) return 'Age is required';
+  if(n<10||n>60) return 'Age must be between 10 and 60'; return ''; }
+function ageRisk(n){ n=+n;
+  if(n>0&&n<20) return 'Age '+n+' — adolescent pregnancy. This is a high-risk group: she needs specialised ANC, closer monitoring and screening for pre-eclampsia, anaemia and obstructed labour.';
+  if(n>=35) return 'Age '+n+' — advanced maternal age. This is a high-risk group: she needs specialised ANC and closer monitoring.';
+  return ''; }
+// A modal the user must acknowledge — a toast is too easy to miss for a risk flag.
+function modal(title,body,kind){ const old=document.getElementById('mdl'); if(old) old.remove();
+  const c=(kind==='risk')?'#a32d2d':'#0f766e';
+  const d=document.createElement('div'); d.id='mdl';
+  d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
+  d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25)">
+    <h3 style="margin:0 0 8px;color:${c};font-size:16px">${esc(title)}</h3>
+    <p style="margin:0 0 14px;font-size:14px;line-height:1.5;color:#334155">${esc(body)}</p>
+    <button class="act" id="mdlok" style="width:100%">Understood</button></div>`;
+  document.body.appendChild(d);
+  d.querySelector('#mdlok').onclick=()=>d.remove();
+  d.onclick=(e)=>{ if(e.target===d) d.remove(); };
+}
+
 async function register(){
+  const r=mrnRule();
   app().innerHTML=nav()+`<div class="card"><h3>Register / admit</h3>
    <div class="grid">
-    <label>MRN<input id="mrn"></label><label>First name<input id="fn"></label>
+    <label>MRN <span class="muted" style="font-weight:400">(${esc(r.label)})</span><input id="mrn" inputmode="numeric" maxlength="${r.max}" placeholder="${'0'.repeat(r.min)}"></label>
+    <label>First name<input id="fn"></label>
     <label>Father name<input id="fa"></label><label>Grandfather<input id="gf"></label>
-    <label>Age<input id="age" type="number"></label>
+    <label>Age<input id="age" type="number" min="10" max="60"></label>
     <label>Marital status<select id="ms"><option value="married">Married</option><option value="single">Single</option><option value="divorced">Divorced</option><option value="widowed">Widowed</option></select></label>
     <label>Phone<input id="ph" placeholder="09..."></label><label>Kebele<input id="kb"></label>
-    <label>Next of kin<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
-    <label>SMS reminders consent<select id="sc"><option value="0">No</option><option value="1">Yes — may send SMS</option></select></label>
+    <label>Next of kin / husband<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
+    <label>Emergency contact address<input id="kad" placeholder="kebele, woreda, landmark"></label>
     <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option></select></label>
-   </div><p class="muted">Clinical history, obstetric details (gravida/para, LMP) and examination are captured by the provider on the service screens.</p><button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
+   </div>
+   <div id="riskbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
+
+   <details class="moh" open><summary>Obstetric history</summary><div class="grid">
+    <label>Gravida<input id="gr" type="number" min="0"></label>
+    <label>Para<input id="pa" type="number" min="0"></label>
+    <label>Children alive<input id="ca" type="number" min="0"></label>
+    <label>Previous pregnancy outcome<select id="ppo">${selOpts([['first','First pregnancy'],['live_birth','Live birth'],['stillbirth','Stillbirth'],['abortion','Abortion / miscarriage'],['neonatal_death','Neonatal death'],['caesarean','Caesarean section']])}</select></label>
+   </div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Full risk screening (previous C/S, PPH, pre-eclampsia, obstructed labour, chronic conditions) is done by the provider on the ANC screening screen.</div></details>
+
+   <button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
+
+  const showRisk=()=>{ const b=$('#riskbox'); const msg=ageRisk(age.value);
+    if(msg){ b.style.display=''; b.textContent=msg; } else { b.style.display='none'; } };
+  let lastWarned=null;
+  age.addEventListener('input',showRisk);
+  age.addEventListener('blur',()=>{ const e=ageError(age.value); if(e && age.value){ $('#m').textContent=' '+e; return; }
+    const msg=ageRisk(age.value);
+    if(msg && age.value!==lastWarned){ lastWarned=age.value; modal('High-risk group',msg,'risk'); } });
+  mrn.addEventListener('blur',()=>{ const e=mrnError(mrn.value); $('#m').textContent=e?(' '+e):''; });
+
   $('#save').onclick=async()=>{
-    if(!mrn.value.trim()){ $('#m').textContent=' MRN is required'; return; }
+    const em=mrnError(mrn.value); if(em){ $('#m').textContent=' '+em; modal('Check the MRN',em); return; }
+    const ea=ageError(age.value); if(ea){ $('#m').textContent=' '+ea; modal('Check the age',ea); return; }
     $('#m').textContent=' saving…';
     try{
-      const w=await api('POST','women',{mrn:mrn.value,first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,sms_consent:(sc&&sc.value==='1')?1:0});
+      const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
+        gravida:(+gr.value||null),para:(+pa.value||null),children_alive:(+ca.value||null),prev_pregnancy_outcome:(ppo.value||null)});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
       await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
       $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
@@ -488,27 +563,61 @@ async function danger(id){
 }
 
 async function delivery(id){
+  // MoH item 7 (Partograph used) is derived, not asked: Y only if maternal condition,
+  // fetal condition AND progress of labour were all monitored.
+  const obs=await api('GET','observations?episode='+id).catch(()=>[]);
+  const pUsed=(obs||[]).some(o=>o.fetal_heart_rate) && (obs||[]).some(o=>o.cervix_cm!=null) &&
+              (obs||[]).some(o=>o.bp_systolic||o.pulse||o.temperature) ? 'Y' : 'N';
   app().innerHTML=nav()+`<div class="card"><h3>Delivery summary — episode ${esc(id)}</h3><div class="grid">
-   <label>Mode<select id="md"><option value="svd">SVD</option><option value="assisted">Assisted</option><option value="caesarean">Caesarean</option></select></label>
+   <label>Mode<select id="md"><option value="svd">SVD — spontaneous vaginal</option><option value="assisted">Forceps / vacuum assisted</option><option value="caesarean">Caesarean section</option><option value="other">Other</option></select></label>
+   <label>If other, specify<input id="mot" placeholder="assisted breech, destructive…"></label>
    <label>Baby weight g<input id="bw" type="number" value="3000"></label>
    <label>Sex<select id="sx"><option value="female">Female</option><option value="male">Male</option></select></label>
    <label>APGAR 1<input id="a1" type="number" value="8"></label><label>APGAR 5<input id="a5" type="number" value="9"></label>
-   <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="neonatal_death">Neonatal death</option></select></label>
-   <label>Mother<select id="mo"><option value="well">Well</option><option value="near_miss">Near miss</option><option value="referred">Referred</option></select></label>
+   <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Died after birth in facility</option></select></label>
+   <label>Mother's status<select id="mo"><option value="well">Stable</option><option value="near_miss">Survived a near-miss</option><option value="referred">Unstable / deteriorated — referred</option><option value="death">Died</option></select></label>
+   <label id="mdcw" style="display:none">Cause of maternal death<select id="mdc">${selOpts([['1','1. Haemorrhage'],['2','2. Pre-eclampsia / eclampsia'],['3','3. Obstructed labour'],['4','4. Sepsis'],['5','5. Anaemia'],['6','6. Other']])}</select></label>
    <label>Uterotonic within 1 min<select id="ut1"><option value="">-</option><option value="done">Done</option><option value="delayed">Delayed</option><option value="not">Not done</option></select></label>
-   <label>Uterotonic type<select id="utt"><option value="">-</option><option value="oxytocin">Oxytocin</option><option value="misoprostol">Misoprostol</option><option value="ergometrine">Ergometrine</option></select></label>
+   <label>Uterotonic type<select id="utt"><option value="">-</option><option value="oxytocin">Oxytocin</option><option value="misoprostol">Misoprostol</option><option value="ergometrine">Ergometrine</option><option value="other">Other</option></select></label>
    <label>Controlled cord traction<select id="cct"><option value="">-</option><option value="done">Done</option><option value="not">Not done</option><option value="noskill">Not done (no skilled attendant)</option></select></label>
    <label>Uterine tone<select id="utn"><option value="">Not assessed</option><option value="firm">Firm</option><option value="atonic">Atonic</option></select></label>
    <label>Massage if atony<select id="umsg"><option value="">-</option><option value="done">Done</option><option value="not_needed">Not needed</option><option value="not">Not done</option></select></label>
    <label>Placenta<select id="plc"><option value="">-</option><option value="complete">Complete</option><option value="incomplete">Incomplete</option><option value="retained">Retained</option></select></label>
    <label>Est. blood loss (ml)<input id="ebl" type="number" placeholder="ml"></label>
-   </div><button class="act" id="s" style="margin-top:10px">Save &amp; send to PNC</button><span class="muted" id="m"></span></div>`;
+   </div>
+   <div class="ticks" style="margin-top:8px">${tick('epis','Episiotomy performed')}</div>
+
+   <details class="moh" open><summary>Obstetric complications <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
+    ${tick('cpe','Pre-eclampsia')}${tick('cec','Eclampsia')}${tick('cap','APH')}${tick('cpp','PPH')}${tick('cot','Other (obstructed labour, sepsis…)')}${tick('cref','Referred')}
+   </div></details>
+
+   <details class="moh"><summary>HIV <span class="muted">&mdash; MoH Delivery register</span></summary><div class="grid">
+    <label>HIV test result<select id="dhtr">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+   </div><div class="ticks">${tick('dhta','HIV testing accepted')}${tick('dhrt','HIV re-testing accepted')}${tick('dcfo','Counselled on feeding options')}</div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Linkage to PMTCT, ART regimen, target population and partner testing are held on the woman&rsquo;s record.</div></details>
+
+   <details class="moh"><summary>Immediate postpartum family planning (0&ndash;48 hrs)</summary><div class="grid">
+    <label>Acceptor type<select id="dacc">${selOpts(ACCEPTOR)}</select></label>
+    <label>Method received<select id="dmth">${selOpts(IPPFP_METHODS)}</select></label>
+   </div></details>
+
+   <label>Remark<input id="drmk"></label>
+   <div class="muted" style="font-size:12px;margin-top:8px">Partograph used (MoH item 7): <b>${pUsed==='Y'?'Yes':'No'}</b> &mdash; derived from the partograph record (maternal + fetal + progress all monitored).</div>
+   <button class="act" id="s" style="margin-top:10px">Save &amp; send to PNC</button><span class="muted" id="m"></span></div>`;
+  const syncDeath=()=>{ $('#mdcw').style.display=(mo.value==='death')?'':'none'; };
+  mo.addEventListener('change',syncDeath); syncDeath();
+  const MOH_STATUS={well:'stable',near_miss:'stable',referred:'unstable_referred',death:'died'};
   $('#s').onclick=async()=>{ const btn=$('#s'); btn.disabled=true;
     try{
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,baby_weight_g:+bw.value,baby_sex:sx.value,apgar_1min:+a1.value,apgar_5min:+a5.value,outcome:oc.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null)});
+      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,baby_weight_g:+bw.value,baby_sex:sx.value,apgar_1min:+a1.value,apgar_5min:+a5.value,outcome:oc.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null),
+        partograph_used:pUsed,episiotomy:tk('epis'),mode_other_text:(md.value==='other'?mot.value:null),
+        maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
+        comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
+        hiv_test_accepted:tk('dhta'),hiv_retest_accepted:tk('dhrt'),hiv_test_result:(dhtr.value||null),cnsl_feeding_options:tk('dcfo'),
+        ippfp_acceptor:(dacc.value||null),ippfp_method:(dmth.value||null),remark:drmk.value});
       // Newborn record is the source of truth for outcomes/analytics — create baby #1 here if none recorded yet.
       const existing=await api('GET','babies?episode='+id).catch(()=>[]);
-      if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0});
+      if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0,prob_lbw:((+bw.value||0)>0&&(+bw.value)<2500)?1:0});
       await api('PATCH','episodes/'+id,{status:'delivered'});
       $('#m').textContent=' saved → PNC'; toast('Delivery recorded','ok'); setTimeout(()=>location.hash='#pnc',700);
     }catch(e){ toast('Could not save delivery — '+(e.message||'error')+'. Not saved.'); }
@@ -646,6 +755,29 @@ async function ancVisits(id){
     <label>Malaria assessed<select id="mal"><option value="">Not assessed</option><option value="no">No symptoms/risk</option><option value="yes">Symptoms/risk - test</option></select></label>
     ${ecPicker('na','Next appointment')}
    </div><label>Danger signs / note<input id="dn"></label>
+
+   <details class="moh" open><summary>Tests &amp; prophylaxis <span class="muted">&mdash; MoH ANC register</span></summary><div class="grid">
+    <label>Ultrasound within 24 wks GA<select id="us"><option value="">-</option><option value="Y">Yes</option><option value="N">No</option></select></label>
+    <label>Syphilis test result<select id="syr"><option value="">-</option><option value="R">Reactive</option><option value="NR">Non-reactive</option><option value="ND">Not done</option></select></label>
+    <label>Hepatitis B test result<select id="hbr"><option value="">-</option><option value="R">Reactive</option><option value="NR">Non-reactive</option><option value="ND">Not done</option></select></label>
+    <label>Td dose number<input id="tdn" type="number" min="1" max="5" placeholder="1-5"></label>
+    <label>IFA tablets provided<input id="ift" type="number" min="0" placeholder="tablets"></label>
+   </div><div class="ticks">
+    ${tick('syt','Syphilis treatment given')}${tick('hbt','Hep B treatment given')}${tick('hbp','Hep B prophylaxis given')}${tick('dw','Deworming given (2nd/3rd trimester)')}
+   </div></details>
+
+   <details class="moh"><summary>HIV <span class="muted">&mdash; MoH ANC register</span></summary><div class="grid">
+    <label>HIV test result<select id="htr"><option value="">-</option><option value="P">Positive</option><option value="N">Negative</option></select></label>
+   </div><div class="ticks">
+    ${tick('hta','HIV test accepted')}${tick('hpc','Result received with post-test counselling')}
+   </div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Target population, linkage to PMTCT/ART and partner testing are held once on the woman&rsquo;s record &mdash; edit them from her profile.</div></details>
+
+   <details class="moh"><summary>Counselling provided at this contact <span class="muted">&mdash; MoH ANC register</span></summary><div class="ticks">
+    ${tick('c1','Danger signs')}${tick('c2','Maternal nutrition')}${tick('c3','Early childhood development')}${tick('c4','Breast / infant feeding')}${tick('c5','Family planning')}
+   </div></details>
+
+   <label>Remark<input id="rmk" placeholder="appointment or anything not covered above"></label>
    <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span><div class="muted" id="anccomp" style="margin-top:8px;font-size:12px"></div></div>
    <div class="card"><h3>Previous visits</h3><table><tr><th>Date</th><th>GA</th><th>Wt</th><th>BP</th><th>FH</th><th>FHR</th><th>Next</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.fundal_height_cm||'')}</td><td>${esc(p.fetal_heart_rate||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No visits yet.</td></tr>'}
@@ -653,7 +785,10 @@ async function ancVisits(id){
   const ancRec=['cno','ga','bps','muac','fm','hiv','syph','tt','ifa','up','hb'];
   const updComp=()=>{ let n=0; ancRec.forEach(k=>{const el=$('#'+k); if(el&&el.value&&el.value!=='') n++;}); const c=$('#anccomp'); if(c) c.textContent='ANC package: '+n+' of '+ancRec.length+' recommended items recorded'; };
   ancRec.forEach(k=>{const el=$('#'+k); if(el){ el.addEventListener('input',updComp); el.addEventListener('change',updComp); }}); updComp();
-  $('#asave').onclick=async()=>{ const b=$('#asave'); b.disabled=true; try{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,muac:(+muac.value||null),fetal_movement:(fm.value||null),hiv_status:(hiv.value||null),syphilis:(syph.value||null),tetanus_td:(tt.value||null),iron_folic:(ifa.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na')});
+  $('#asave').onclick=async()=>{ const b=$('#asave'); b.disabled=true; try{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,muac:(+muac.value||null),fetal_movement:(fm.value||null),hiv_status:(hiv.value||null),syphilis:(syph.value||null),tetanus_td:(tt.value||null),iron_folic:(ifa.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
+    ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:(+ift.value||null),deworming:tk('dw'),
+    hiv_test_accepted:tk('hta'),hiv_test_result:(htr.value||null),hiv_posttest_counselled:tk('hpc'),
+    cnsl_danger_signs:tk('c1'),cnsl_nutrition:tk('c2'),cnsl_ecd:tk('c3'),cnsl_infant_feeding:tk('c4'),cnsl_family_planning:tk('c5'),remark:rmk.value});
     $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); } finally{ b.disabled=false; } };
 }
 
@@ -667,7 +802,9 @@ async function pncVisits(id){
    </div>
    <h4>Mother</h4><div class="grid">
     ${ecPicker('vd','Visit date',true)}
-    <label>PNC day<input id="pd" type="number" placeholder="1 / 3 / 7 / 42"></label>
+    <label>Visit period <span class="muted" style="font-weight:400">(MoH)</span><select id="vp">${selOpts([['24h','Within 24 hrs'],['25-48h','25-48 hrs'],['49-72h','49-72 hrs'],['73h-7d','73 hrs - 7 days'],['8-42d','8-42 days']])}</select></label>
+    <label>Maternal condition<select id="mc">${selOpts([['1','1. Normal'],['2','2. Complicated and managed'],['3','3. Complicated and referred'],['4','4. Died']])}</select></label>
+    <label>Other obstetric complication<select id="ooc">${selOpts([['PE','PE — pre-eclampsia'],['E','E — eclampsia'],['SEP','SEP — sepsis'],['OTH','OTH — other']])}</select></label>
     <label>Temp °C<input id="mt" type="number" step="0.1"></label>
     <label>BP systolic<input id="bps" type="number"></label>
     <label>BP diastolic<input id="bpd" type="number"></label>
@@ -692,12 +829,52 @@ async function pncVisits(id){
     <label>KMC (if LBW)<select id="nkmc"><option value="">N/A</option><option value="initiated">Initiated</option><option value="not">Not</option></select></label>
     <label>Birth immunisation<select id="nimm"><option value="">-</option><option value="given">BCG/OPV-0 given</option><option value="not">Not given</option></select></label>
     <label>EID (HIV-exposed)<select id="neid"><option value="">N/A</option><option value="taken">Sample taken</option><option value="not">Not taken</option></select></label>
+    <label>Newborn weight (g)<input id="nwt" type="number" placeholder="grams"></label>
    </div><label>Danger signs / note<input id="dn"></label>
+
+   <details class="moh" open><summary>Newborn assessment <span class="muted">&mdash; MoH PNC register</span></summary>
+    <div class="muted" style="font-size:12px;margin-bottom:6px">Problem identified &mdash; tick all that apply.</div>
+    <div class="ticks">
+     ${[[1,'Normal'],[2,'Prematurity'],[3,'Sepsis / VSD'],[4,'Respiratory distress'],[5,'Perinatal asphyxia'],[6,'Low birth weight'],[7,'Congenital malformation'],[8,'Absence of reflex'],[9,'Jaundice'],[10,'Head circumference &lt;33cm'],[11,'Other']].map(([c,n])=>tick('np'+c,n)).join('')}
+    </div>
+    <label>If other, specify<input id="npo"></label>
+    <div class="muted" style="font-size:12px;margin:8px 0 6px">Treatment given &mdash; tick all that apply.</div>
+    <div class="ticks">
+     ${[[1,'Oxygen resuscitation'],[2,'KMC'],[3,'Antibiotic'],[4,'Chlorhexidine'],[5,'Blood transfusion'],[6,'Other']].map(([c,n])=>tick('nt'+c,n)).join('')}
+    </div>
+    <div class="grid" style="margin-top:8px">
+     <label>Treatment outcome<select id="nto">${selOpts([['1','1. Improved'],['2','2. No change'],['3','3. Died'],['4','4. Referral'],['5','5. Unknown'],['6','6. Resuscitated and survived']])}</select></label>
+     <label>If died — age at death (days)<input id="ndd" type="number"></label>
+     <label>If died — cause<select id="ndc">${selOpts([['1','1. Prematurity'],['2','2. Infection'],['3','3. Asphyxia'],['4','4. Other']])}</select></label>
+    </div></details>
+
+   <details class="moh"><summary>HIV <span class="muted">&mdash; MoH PNC register</span></summary><div class="grid">
+    <label>HIV test result<select id="phtr">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+   </div><div class="ticks">${tick('phta','HIV test accepted')}${tick('phrt','HIV re-testing accepted')}${tick('ppph','PPH')}</div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Linkage to ART, target population and partner testing are held on the woman&rsquo;s record.</div></details>
+
+   <details class="moh"><summary>Counselling provided at this visit <span class="muted">&mdash; MoH PNC register</span></summary><div class="ticks">
+    ${tick('pc1','Danger signs')}${tick('pc2','Breast feeding / nutrition')}${tick('pc3','Newborn care (incl. cord care)')}${tick('pc4','Family planning')}${tick('pc5','EPI')}${tick('pc6','Early childhood development')}
+   </div></details>
+
+   <details class="moh"><summary>Immediate postpartum family planning (0&ndash;48 hrs)</summary><div class="grid">
+    <label>Acceptor type<select id="pacc">${selOpts(ACCEPTOR)}</select></label>
+    <label>Method received<select id="pmth">${selOpts(IPPFP_METHODS)}</select></label>
+   </div></details>
+
+   <label>Remark<input id="prmk"></label>
    <button class="act" id="psave" style="margin-top:10px">Save PNC visit</button> <span class="muted" id="pm"></span></div>
-   <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Day</th><th>M temp</th><th>M BP</th><th>Bleeding</th><th>NB feeding</th></tr>
-    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(p.bleeding||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
+   <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Period</th><th>M temp</th><th>M BP</th><th>Condition</th><th>NB feeding</th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.visit_period||p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(({'1':'Normal','2':'Complicated, managed','3':'Complicated, referred','4':'Died'})[String(p.maternal_condition||'')]||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
    </table></div>`;
-  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:+pd.value||null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value});
+  const csv=(pre,codes)=>codes.filter(c=>tk(pre+c)).join(',')||null;   // MoH multi-code fields are comma-separated
+  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
+    visit_period:(vp.value||null),maternal_condition:(+mc.value||null),pph:tk('ppph'),other_obs_complication:(ooc.value||null),
+    hiv_test_accepted:tk('phta'),hiv_retest_accepted:tk('phrt'),hiv_test_result:(phtr.value||null),
+    cnsl_danger_signs:tk('pc1'),cnsl_breastfeeding:tk('pc2'),cnsl_newborn_care:tk('pc3'),cnsl_family_planning:tk('pc4'),cnsl_epi:tk('pc5'),cnsl_ecd:tk('pc6'),
+    nb_weight_g:(+nwt.value||null),nb_problems:csv('np',[1,2,3,4,5,6,7,8,9,10,11]),nb_problem_other:(npo.value||null),nb_treatment:csv('nt',[1,2,3,4,5,6]),
+    nb_treatment_outcome:(+nto.value||null),nb_death_age_days:(+ndd.value||null),nb_death_cause:(+ndc.value||null),
+    ippfp_acceptor:(pacc.value||null),ippfp_method:(pmth.value||null),remark:prmk.value});
     $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); } finally{ b.disabled=false; } };
 }
 
@@ -720,11 +897,39 @@ async function babiesScreen(id){
     <label>Eye ointment (TTC)<select id="eo"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option></select></label>
     <label>Cord care<select id="cc"><option value="">-</option><option value="chlorhexidine">Chlorhexidine</option><option value="dry">Dry</option><option value="other">Other</option></select></label>
     <label>Newborn ARV (HIV-exposed)<select id="arv"><option value="">N/A</option><option value="given">Given</option><option value="not">Not given</option></select></label>
-   </div><button class="act" id="bsave" style="margin-top:10px">Add baby</button> <span class="muted" id="bm"></span></div>
+    <label>Newborn MRN<input id="nmrn" placeholder="infant's MRN"></label>
+    <label>Breastfeeding initiated<select id="bfi">${selOpts([['1','1. Within 1 hour'],['2','2. 1-2 hours'],['3','3. After 3 hours'],['4','4. Not at all'],['5','5. Other milk']])}</select></label>
+   </div>
+
+   <details class="moh" open><summary>Vaccinated at birth <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
+    ${tick('vbcg','BCG')}${tick('vopv','OPV 0')}${tick('vhbv','HBV')}
+   </div></details>
+
+   <details class="moh" open><summary>Newborn problems identified <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
+    ${tick('bpre','Prematurity')}${tick('bsep','Sepsis / VSD')}${tick('brds','Respiratory distress / asphyxia')}${tick('bcon','Congenital malformation')}${tick('both','Other')}
+   </div>
+   <label>If other, specify<input id="bpot"></label>
+   <div class="muted" style="font-size:12px;margin-top:6px">Low birth weight is derived automatically from the weight (&lt;2500 g).</div></details>
+
+   <details class="moh"><summary>Outcome &amp; notification</summary><div class="ticks">
+    ${tick('brsv','Resuscitated and survived')}${tick('bnot','Birth notification given to mother')}
+   </div><div class="grid" style="margin-top:8px">
+    <label>If died — age (days)<input id="bdd" type="number"></label>
+    <label>If died — age (hours)<input id="bdh" type="number"></label>
+    <label>If died — cause<select id="bdc">${selOpts([['1','1. Prematurity'],['2','2. Infection'],['3','3. Asphyxia'],['4','4. Other']])}</select></label>
+   </div></details>
+
+   <button class="act" id="bsave" style="margin-top:10px">Add baby</button> <span class="muted" id="bm"></span></div>
    <div class="card"><h3>Babies</h3><table><tr><th>#</th><th>Sex</th><th>Weight</th><th>APGAR</th><th>Resus</th><th>Outcome</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.birth_order||'')}</td><td>${esc(p.sex||'')}</td><td>${esc(p.weight_g||'')}</td><td>${esc((p.apgar_1min||'')+'/'+(p.apgar_5min||''))}</td><td>${p.resuscitated==1?'yes':'no'}</td><td>${esc(p.outcome||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No babies recorded yet.</td></tr>'}
    </table></div>`;
-  $('#bsave').onclick=async()=>{ const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_vitamin_k:(vk.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),enc_arv:(arv.value||null)});
+  $('#bsave').onclick=async()=>{ const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_vitamin_k:(vk.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),enc_arv:(arv.value||null),
+    mrn:(nmrn.value||null),breastfeed_initiated:(+bfi.value||null),
+    vacc_bcg:tk('vbcg'),vacc_opv0:tk('vopv'),vacc_hbv:tk('vhbv'),
+    prob_prematurity:tk('bpre'),prob_sepsis_vsd:tk('bsep'),prob_resp_distress:tk('brds'),prob_congenital:tk('bcon'),prob_other:tk('both'),prob_other_text:(bpot.value||null),
+    prob_lbw:((+wg.value||0)>0&&(+wg.value)<2500)?1:0,   // MoH item 55 — derived, never asked
+    resuscitated_survived:tk('brsv'),birth_notification:tk('bnot'),
+    death_age_days:(+bdd.value||null),death_age_hours:(+bdh.value||null),death_cause:(+bdc.value||null)});
     $('#bm').textContent=(r&&(r.ids||r.queued))?' added':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>babiesScreen(id),400); } finally{ b.disabled=false; } };
 }
 
@@ -783,10 +988,119 @@ async function editWoman(wid){
     <label>Gravida<input id="gr" type="number" value="${esc(w.gravida||'')}"></label>
     <label>Para<input id="pa" type="number" value="${esc(w.para||'')}"></label>
     <label>Height (cm)<input id="ht" type="number" value="${esc(w.height_cm||'')}"></label>
+    <label>Woreda<input id="wo" value="${esc(w.woreda||'')}"></label>
     ${ecPicker('lnmp','Last menstrual period')}
-   </div><button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
-  $('#wsave').onclick=async()=>{ const _ln=ecGet('lnmp'); const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:(_ln||null),edd:(_ln?addDays(_ln,280):null)});
+   </div>
+
+   <details class="moh" open><summary>HIV &amp; PMTCT <span class="muted">&mdash; held once, used by ANC, Delivery and PNC</span></summary>
+    <div class="muted" style="font-size:12px;margin-bottom:6px">The paper registers ask for these at every contact. Recorded here once, they are replayed into every register row automatically.</div>
+    <div class="grid">
+     ${tpSel('tp','Targeted population category',w.target_pop_code)}
+     <label>Linked to PMTCT at<select id="lpf">${selOpts([['1','1. Same facility'],['2','2. Other facility']],w.hiv_linked_pmtct_facility)}</select></label>
+     <label>ART regimen<input id="artr" value="${esc(w.art_regimen||'')}" placeholder="free text — awaiting national code list"></label>
+    </div>
+    <div class="ticks">
+     <label class="tick"><input type="checkbox" id="hkp" ${w.hiv_known_positive==1?'checked':''}> Known HIV positive (transferred from ART)</label>
+     <label class="tick"><input type="checkbox" id="lpm" ${w.hiv_linked_pmtct==1?'checked':''}> HIV positive — linked to PMTCT</label>
+     <label class="tick"><input type="checkbox" id="lar" ${w.hiv_linked_art==1?'checked':''}> HIV positive — linked to ART</label>
+    </div></details>
+
+   <details class="moh"><summary>Partner testing</summary><div class="grid">
+     <label>Partner HIV test result<select id="phr">${selOpts([['P','Positive'],['N','Negative'],['I','Indeterminate']],w.partner_hiv_result)}</select></label>
+     ${tpSel('ptp','Partner targeted population category',w.partner_target_pop_code)}
+    </div>
+    <div class="ticks">
+     <label class="tick"><input type="checkbox" id="pha" ${w.partner_hiv_accepted==1?'checked':''}> Partner HIV test accepted</label>
+     <label class="tick"><input type="checkbox" id="pla" ${w.partner_linked_art==1?'checked':''}> HIV positive partner linked to ART</label>
+    </div></details>
+
+   <button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
+  $('#wsave').onclick=async()=>{ const _ln=ecGet('lnmp'); const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:(_ln||null),edd:(_ln?addDays(_ln,280):null),
+    woreda:(wo.value||null),target_pop_code:(tp.value||null),hiv_known_positive:tk('hkp'),hiv_linked_pmtct:tk('lpm'),hiv_linked_pmtct_facility:(+lpf.value||null),hiv_linked_art:tk('lar'),art_regimen:(artr.value||null),
+    partner_hiv_accepted:tk('pha'),partner_hiv_result:(phr.value||null),partner_target_pop_code:(ptp.value||null),partner_linked_art:tk('pla')});
     $('#wm').textContent=(r&&(r.ok||r.queued))?' saved':' '+((r&&r.error)||'error'); };
+}
+
+// ---- MoH paper-register export ----------------------------------------------
+// Renders the official ANC / Delivery / PNC register from captured data, so the
+// facility can print it instead of hand-writing it. Columns follow the MoH item order.
+const REG_COLS={
+  anc:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name',r=>((r.first_name||'')+' '+(r.father_name||'')).trim()],['Kebele','kebele'],
+    ['Age','age'],['LNMP','lnmp'],['EDD','edd'],['Contact','contact_no'],['Date','visit_date'],['GA','ga_weeks'],
+    ['U/S &lt;24w','ultrasound_lt24w'],['Syphilis','syphilis_result'],['Syph Rx',tickCell('syphilis_treated')],
+    ['HepB','hepb_result'],['HepB Rx',tickCell('hepb_treated')],['HepB prophy',tickCell('hepb_prophylaxis')],
+    ['Td dose','td_dose_no'],['IFA tabs','ifa_tabs'],['Deworm',tickCell('deworming')],['MUAC','muac'],
+    ['HIV acc',tickCell('hiv_test_accepted')],['HIV res','hiv_test_result'],['Target pop','target_pop_code'],
+    ['Post-test',tickCell('hiv_posttest_counselled')],['PMTCT',tickCell('hiv_linked_pmtct')],['Known+',tickCell('hiv_known_positive')],
+    ['Ptnr acc',tickCell('partner_hiv_accepted')],['Ptnr res','partner_hiv_result'],['Ptnr pop','partner_target_pop_code'],['Ptnr ART',tickCell('partner_linked_art')],
+    ['C:Danger',tickCell('cnsl_danger_signs')],['C:Nutr',tickCell('cnsl_nutrition')],['C:ECD',tickCell('cnsl_ecd')],['C:Feed',tickCell('cnsl_infant_feeding')],['C:FP',tickCell('cnsl_family_planning')],['Remark','remark']],
+  delivery:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name',r=>((r.first_name||'')+' '+(r.father_name||'')).trim()],['Age','age'],['Kebele','kebele'],
+    ['Delivery date/time','delivery_datetime'],['Partograph','partograph_used'],['Mode','mode'],['Episiotomy',tickCell('episiotomy')],
+    ['Uterotonic','amtsl_uterotonic_type'],['CCT','amtsl_cct'],['Mother','maternal_status'],['Death cause','maternal_death_cause'],
+    ['PE',tickCell('comp_preeclampsia')],['E',tickCell('comp_eclampsia')],['APH',tickCell('comp_aph')],['PPH',tickCell('comp_pph')],['Other',tickCell('comp_other')],['Referred',tickCell('referred')],
+    ['Birth order','birth_order'],['Outcome','outcome'],['APGAR',r=>(r.apgar_1min||'')+'/'+(r.apgar_5min||'')],['Sex','sex'],['Weight (g)','weight_g'],
+    ['NB MRN','mrn_baby'],['Vit K','enc_vitamin_k'],['TTC','enc_eye_ointment'],['Chlorhex','enc_cord_care'],
+    ['Vacc',r=>[r.vacc_bcg?'BCG':'',r.vacc_opv0?'OPV0':'',r.vacc_hbv?'HBV':''].filter(Boolean).join('+')],
+    ['HIV acc',tickCell('hiv_test_accepted')],['HIV res','hiv_test_result'],['Target pop','target_pop_code'],['ART regimen','art_regimen'],
+    ['Prem',tickCell('prob_prematurity')],['Sepsis',tickCell('prob_sepsis_vsd')],['RDS',tickCell('prob_resp_distress')],['LBW',tickCell('prob_lbw')],['Congenital',tickCell('prob_congenital')],
+    ['BF init','breastfeed_initiated'],['Resus survived',tickCell('resuscitated_survived')],['Death age',r=>(r.death_age_days!=null?r.death_age_days+'d ':'')+(r.death_age_hours!=null?r.death_age_hours+'h':'')],
+    ['Death cause','death_cause'],['Birth notif',tickCell('birth_notification')],
+    ['IPPFP','ippfp_acceptor'],['Method','ippfp_method'],['Remark','delivery_remark']],
+  pnc:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name',r=>((r.first_name||'')+' '+(r.father_name||'')).trim()],['Age','age'],['Woreda/Kebele',r=>[r.woreda,r.kebele].filter(Boolean).join(' / ')],
+    ['Infant DOB','infant_dob'],['Place','place_of_delivery'],['Period','visit_period'],['Date','visit_date'],
+    ['Condition','maternal_condition'],['PPH',tickCell('pph')],['Other comp','other_obs_complication'],
+    ['HIV acc',tickCell('hiv_test_accepted')],['Retest',tickCell('hiv_retest_accepted')],['HIV res','hiv_test_result'],['Target pop','target_pop_code'],
+    ['ART',tickCell('hiv_linked_art')],['Known+',tickCell('hiv_known_positive')],
+    ['Ptnr acc',tickCell('partner_hiv_accepted')],['Ptnr res','partner_hiv_result'],['Ptnr ART',tickCell('partner_linked_art')],
+    ['C:Danger',tickCell('cnsl_danger_signs')],['C:BF',tickCell('cnsl_breastfeeding')],['C:NB care',tickCell('cnsl_newborn_care')],['C:FP',tickCell('cnsl_family_planning')],['C:EPI',tickCell('cnsl_epi')],['C:ECD',tickCell('cnsl_ecd')],
+    ['NB weight','nb_weight_g'],['Problems','nb_problems'],['Treatment','nb_treatment'],['Outcome','nb_treatment_outcome'],
+    ['Death age','nb_death_age_days'],['Death cause','nb_death_cause'],
+    ['IPPFP','ippfp_acceptor'],['Method','ippfp_method'],['Remark','remark']]
+};
+function tickCell(k){ return r=>(r[k]==1?'✓':''); }   // renders a boolean as the paper's tick
+
+async function registersScreen(){
+  const t=window._regType||'anc';
+  const from=window._regFrom||new Date().toISOString().slice(0,8)+'01';
+  const to=window._regTo||new Date().toISOString().slice(0,10);
+  const opt=(v,n)=>`<option value="${v}"${t===v?' selected':''}>${n}</option>`;
+  app().innerHTML=nav()+`<div class="card">
+   <h3>MoH register export</h3>
+   <p class="muted">The official Ethiopian MoH register, generated from what has been recorded. Print it, or export to CSV. Person-level items (target population, HIV linkage, partner testing) are filled in automatically on every row.</p>
+   <div class="grid">
+    <label>Register<select id="rt">${opt('anc','3. Antenatal care (ANC)')}${opt('delivery','4. Delivery')}${opt('pnc','5. Postnatal care (PNC)')}</select></label>
+    <label>From<input id="rf" type="date" value="${from}"></label>
+    <label>To<input id="rto" type="date" value="${to}"></label>
+   </div>
+   <button class="act" id="rgen" style="margin-top:8px">Generate</button>
+   <button class="sec" id="rprint" style="margin-top:8px">Print</button>
+   <button class="sec" id="rcsv" style="margin-top:8px">Export CSV</button>
+   <span class="muted" id="rm"></span></div>
+   <div id="regout"></div>`;
+  const load=async()=>{
+    window._regType=rt.value; window._regFrom=rf.value; window._regTo=rto.value;
+    $('#rm').textContent=' loading…';
+    let d; try{ d=await api('GET','registers?type='+rt.value+'&from='+rf.value+'&to='+rto.value); }
+    catch(e){ $('#rm').textContent=' '+(e.message||'error'); return; }
+    const cols=REG_COLS[d.type]||[]; const rows=d.rows||[];
+    const cell=(r,c,i)=>{ const g=c[1]; const v=(typeof g==='function')?g(r,i):r[g]; return (v===null||v===undefined)?'':String(v); };
+    window._regCsv=[cols.map(c=>c[0].replace(/&lt;/g,'<')).join(',')]
+      .concat(rows.map((r,i)=>cols.map(c=>'"'+cell(r,c,i).replace(/"/g,'""')+'"').join(','))).join('\n');
+    $('#rm').textContent=' '+d.count+' row(s)';
+    $('#regout').innerHTML=`<div class="card"><h3>${esc(({anc:'ANC register',delivery:'Delivery register',pnc:'PNC register'})[d.type])}</h3>
+      <p class="muted">${esc(d.facility||'')} &middot; ${esc(d.from)} to ${esc(d.to)} &middot; ${d.count} row(s)</p>
+      <div style="overflow-x:auto"><table style="font-size:11px;white-space:nowrap">
+      <tr>${cols.map(c=>'<th>'+c[0]+'</th>').join('')}</tr>
+      ${rows.map((r,i)=>'<tr>'+cols.map(c=>'<td>'+esc(cell(r,c,i))+'</td>').join('')+'</tr>').join('')
+        ||('<tr><td colspan='+cols.length+' class=muted>Nothing recorded in this period.</td></tr>')}
+      </table></div></div>`;
+  };
+  $('#rgen').onclick=load;
+  $('#rprint').onclick=()=>window.print();
+  $('#rcsv').onclick=()=>{ if(!window._regCsv){ toast('Generate the register first'); return; }
+    const bl=new Blob([window._regCsv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
+    a.href=URL.createObjectURL(bl); a.download='moh_'+rt.value+'_register_'+rf.value+'_to_'+rto.value+'.csv'; a.click(); };
+  load();
 }
 
 async function reportScreen(id){
