@@ -100,6 +100,10 @@ function route(){
   if(!ME) return login();
   if(ME.must_change_password==1 && !ME._offline) return forcePw();
   const h=(location.hash||'#home').slice(1); const [screen,arg]=h.split('/');
+  // Modals live on document.body, not inside #app, so a route change does not clear them.
+  // Without this, a risk popup raised for one woman stays on screen over the NEXT patient's
+  // chart — showing her data and blocking the UI. Always tear it down on navigation.
+  document.getElementById('mdl')?.remove();
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
@@ -185,6 +189,24 @@ function selOpts(list,val){ return `<option value="">-</option>`+list.map(([v,n]
 const IPPFP_METHODS=[['POP','POP — progestin-only pill'],['Imp','Implant'],['IUCD','IUCD'],['TL','Tubal ligation'],['Oth','Other']];
 const ACCEPTOR=[['new','New acceptor'],['repeat','Repeat acceptor']];
 
+// De-duplication: anything established once (at ANC or registration) is SHOWN at
+// delivery and PNC rather than asked again. The MoH registers still require a
+// per-encounter HIV test event, so that stays on each form — but blood group, Rh,
+// target population, ART linkage and booking GA are asked once and carried forward.
+// For a woman not followed at this facility these will read "—", and the provider
+// fills them on her record.
+function carryForward(w,rhNeg){
+  const known=[w.blood_group?('Blood group <b>'+esc(w.blood_group)+(w.rh_factor?(' '+(rhNeg?'negative':'positive')):'')+'</b>'):'',
+    w.ga_first_contact?('Booked <b>'+esc(w.ga_first_contact)+'w</b>'+(w.late_anc_initiation==1?' (late)':'')):'',
+    (w.hiv_known_positive==1)?'HIV <b>known positive</b>':'',
+    w.art_regimen?('ART <b>'+esc(w.art_regimen)+'</b>'):'',
+    w.target_pop_code?('Target pop <b>'+esc(w.target_pop_code)+'</b>'):''].filter(Boolean);
+  return `<div style="background:#e1f5ee;border:1px solid #5dcaa5;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:13px;color:#04342c">
+    <b>Known from her record</b> &mdash; not re-asked here. ${known.length?known.join(' &middot; '):'<span class="muted">nothing recorded yet &mdash; add it on her record</span>'}
+    ${rhNeg?'<div style="margin-top:4px;color:#a32d2d"><b>Rh NEGATIVE</b> &mdash; Anti-D indicated postpartum if the baby is Rh positive.</div>':''}
+   </div>`;
+}
+
 // Ethiopian-calendar date entry: 3 selects (day/month/year E.C.) -> stores Gregorian YYYY-MM-DD
 function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
 function ecPicker(id,label,def){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
@@ -215,14 +237,35 @@ function mrnError(v){ const r=mrnRule(); const s=String(v||'').trim();
 // Age extremes are a risk factor in their own right, so we stop and say so.
 function ageError(v){ const n=+v; if(!v||isNaN(n)) return 'Age is required';
   if(n<10||n>60) return 'Age must be between 10 and 60'; return ''; }
+// ---- National ANC Guideline (MoH, Feb 2022) clinical rules --------------------
+// Table 4: high-risk age is <19 OR >35. Not <18/>=35 — an 18-year-old and a
+// 36-year-old both qualify. "Teenage pregnancy" is the label used below 18.
 function ageRisk(n){ n=+n;
-  if(n>0&&n<18) return 'Age '+n+' — teenage pregnancy. This is a high-risk group: she needs specialised ANC, closer monitoring, and screening for pre-eclampsia, anaemia and obstructed labour.';
-  if(n>=35) return 'Age '+n+' — advanced maternal age. This is a high-risk group: she needs specialised ANC and closer monitoring.';
+  if(n>0&&n<18) return 'Age '+n+' — teenage pregnancy. High-risk group (National ANC Guideline, Table 4): she needs specialised ANC, closer monitoring, and screening for pre-eclampsia, anaemia and obstructed labour.';
+  if(n===18)    return 'Age 18 — adolescent pregnancy (under 19). High-risk group (National ANC Guideline, Table 4): she needs specialised ANC and closer monitoring.';
+  if(n>35)      return 'Age '+n+' — advanced maternal age (over 35). High-risk group (National ANC Guideline, Table 4): she needs specialised ANC and closer monitoring.';
   return ''; }
 // Booking after the first trimester (>12 completed weeks) is late ANC initiation.
 function lateAnc(ga){ return (+ga>12); }
 function gaRisk(ga){ ga=+ga; if(!ga) return '';
   return lateAnc(ga) ? ('First ANC contact at '+ga+' weeks — late ANC initiation (after the first trimester). Screening and prophylaxis started late; treat as a risk factor and catch up on the missed ANC package.') : ''; }
+
+// Anaemia — Guideline section 5.2.2 / Table 7 (the operative clinical table).
+// NB the Annex 6 ANC card says "<11.5 g/dl or Hct <36%"; the guideline contradicts
+// itself. We follow Table 7 (matches WHO). Flagged to MoH for correction.
+function anaemiaGrade(hb){ hb=+hb; if(!hb) return '';
+  if(hb>=11) return 'normal'; if(hb>=9) return 'mild'; if(hb>=7) return 'moderate'; return 'severe'; }
+function anaemiaAction(g){ return ({
+  normal:'Hb normal (≥11 g/dl) — continue prophylactic iron-folate.',
+  mild:'MILD anaemia (Hb 9–10.9 g/dl) — start THERAPEUTIC iron (60 mg elemental iron BID) and request peripheral RBC morphology.',
+  moderate:'MODERATE anaemia (Hb 7–8.9 g/dl) — start THERAPEUTIC iron (60 mg elemental iron BID) and request peripheral RBC morphology.',
+  severe:'SEVERE anaemia (Hb <7 g/dl) — REFER. Consider blood transfusion, then continue therapeutic iron.'
+})[g]||''; }
+// Acute malnutrition — Guideline 5.2.2d
+function muacFlag(m){ return (+m>0 && +m<23); }
+// BMI — Table 4 / Annex 7. Derived from height + weight, never asked.
+function bmiCalc(kg,cm){ kg=+kg; cm=+cm; if(!kg||!cm) return null; return Math.round((kg/Math.pow(cm/100,2))*10)/10; }
+function bmiFlag(b){ if(!b) return ''; if(b<18.5) return 'underweight'; if(b>25) return 'overweight'; return 'normal'; }
 // A modal the user must acknowledge — a toast is too easy to miss for a risk flag.
 function modal(title,body,kind){ const old=document.getElementById('mdl'); if(old) old.remove();
   const c=(kind==='risk')?'#a32d2d':'#0f766e';
@@ -233,8 +276,12 @@ function modal(title,body,kind){ const old=document.getElementById('mdl'); if(ol
     <p style="margin:0 0 14px;font-size:14px;line-height:1.5;color:#334155">${esc(body)}</p>
     <button class="act" id="mdlok" style="width:100%">Understood</button></div>`;
   document.body.appendChild(d);
-  d.querySelector('#mdlok').onclick=()=>d.remove();
-  d.onclick=(e)=>{ if(e.target===d) d.remove(); };
+  const close=()=>{ d.remove(); document.removeEventListener('keydown',esc); };
+  const esc=(e)=>{ if(e.key==='Escape') close(); };
+  document.addEventListener('keydown',esc);
+  d.querySelector('#mdlok').onclick=close;
+  d.onclick=(e)=>{ if(e.target===d) close(); };
+  d.querySelector('#mdlok').focus();
 }
 
 async function register(){
@@ -253,15 +300,29 @@ async function register(){
    </div>
    <div id="riskbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
 
-   <details class="moh" open><summary>Obstetric history</summary><div class="grid">
+   <details class="moh" open><summary>Obstetric history <span class="muted">&mdash; ANC card, Annex 6</span></summary><div class="grid">
     <label>Gravida<input id="gr" type="number" min="0"></label>
     <label>Para<input id="pa" type="number" min="0"></label>
+    <label>Abortion<input id="ab" type="number" min="0"></label>
+    <label>Ectopic pregnancy<input id="ecp" type="number" min="0"></label>
+    <label>GTD<input id="gtd" type="number" min="0"></label>
     <label>Children alive<input id="ca" type="number" min="0"></label>
     <label>Previous pregnancy outcome<select id="ppo">${selOpts([['first','First pregnancy'],['live_birth','Live birth'],['stillbirth','Stillbirth'],['abortion','Abortion / miscarriage'],['neonatal_death','Neonatal death'],['caesarean','Caesarean section']])}</select></label>
+    <label>Is this pregnancy planned?<select id="pp">${selOpts([['1','Yes — planned'],['0','No — unplanned / unwanted']])}</select></label>
     <label>GA at first ANC contact (weeks) <span class="muted" style="font-weight:400">— booking GA</span><input id="gafc" type="number" min="4" max="42" placeholder="weeks"></label>
    </div>
    <div id="gabox" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px"></div>
-   <div class="muted" style="font-size:12px;margin-top:6px">If she booked ANC elsewhere or on paper, enter the booking GA here. When ANC contact 1 is recorded in ADHERE+, this fills itself.</div>
+   <div id="ppbox" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px"></div>
+   <div class="muted" style="font-size:12px;margin-top:6px">If she booked ANC elsewhere or on paper, enter the booking GA here. When ANC contact 1 is recorded in ADHERE+, this fills itself.</div></details>
+
+   <details class="moh"><summary>Blood group, residence &amp; occupation</summary><div class="grid">
+    <label>Blood group<select id="bg">${selOpts([['A','A'],['B','B'],['AB','AB'],['O','O']])}</select></label>
+    <label>Rh factor<select id="rh">${selOpts([['pos','Positive'],['neg','Negative']])}</select></label>
+    <label>Residence<select id="res">${selOpts([['urban','Urban'],['rural','Rural']])}</select></label>
+    <label>Occupation<input id="occ"></label>
+   </div>
+   <div id="rhbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px"></div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Blood group and Rh are required for every pregnant woman (Guideline 4.2.2a). Rh-negative women need Anti-D.</div>
    <div class="muted" style="font-size:12px;margin-top:6px">Full risk screening (previous C/S, PPH, pre-eclampsia, obstructed labour, chronic conditions) is done by the provider on the ANC screening screen.</div></details>
 
    <button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
@@ -281,6 +342,14 @@ async function register(){
   gafc.addEventListener('input',showGa);
   gafc.addEventListener('blur',()=>{ const msg=gaRisk(gafc.value);
     if(msg && gafc.value!==gaWarned){ gaWarned=gafc.value; modal('Late ANC initiation',msg,'risk'); } });
+  // Unplanned/unwanted pregnancy is a high-risk condition (Guideline Table 4).
+  pp.addEventListener('change',()=>{ const b=$('#ppbox');
+    if(pp.value==='0'){ b.style.display=''; b.textContent='Unplanned or unwanted pregnancy — a high-risk condition (National ANC Guideline, Table 4). She will appear in the High Risk list.'; }
+    else b.style.display='none'; });
+  // Rh-negative drives Anti-D.
+  rh.addEventListener('change',()=>{ const b=$('#rhbox');
+    if(rh.value==='neg'){ b.style.display=''; b.textContent='Rh NEGATIVE — Anti-D prophylaxis is indicated (if indirect Coombs negative). This will be flagged at every ANC contact.'; }
+    else b.style.display='none'; });
 
   $('#save').onclick=async()=>{
     const em=mrnError(mrn.value); if(em){ $('#m').textContent=' '+em; modal('Check the MRN',em); return; }
@@ -289,6 +358,9 @@ async function register(){
     try{
       const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
         gravida:(+gr.value||null),para:(+pa.value||null),children_alive:(+ca.value||null),prev_pregnancy_outcome:(ppo.value||null),
+        abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
+        pregnancy_planned:(pp.value===''?null:+pp.value),
+        blood_group:(bg.value||null),rh_factor:(rh.value||null),residence:(res.value||null),occupation:(occ.value||null),
         ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null)});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
       await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
@@ -583,10 +655,16 @@ async function delivery(id){
   const obs=await api('GET','observations?episode='+id).catch(()=>[]);
   const pUsed=(obs||[]).some(o=>o.fetal_heart_rate) && (obs||[]).some(o=>o.cervix_cm!=null) &&
               (obs||[]).some(o=>o.bp_systolic||o.pulse||o.temperature) ? 'Y' : 'N';
-  app().innerHTML=nav()+`<div class="card"><h3>Delivery summary — episode ${esc(id)}</h3><div class="grid">
+  const eps0=await api('GET','episodes').catch(()=>[]);
+  const W=(eps0||[]).find(x=>x.id==id)||{};
+  const rhNegD=String(W.rh_factor||'').toLowerCase()==='neg';
+  app().innerHTML=nav()+`<div class="card"><h3>Delivery summary — episode ${esc(id)}</h3>
+   ${carryForward(W,rhNegD)}
+   <div class="grid">
    <label>Mode<select id="md"><option value="svd">SVD — spontaneous vaginal</option><option value="assisted">Forceps / vacuum assisted</option><option value="caesarean">Caesarean section</option><option value="other">Other</option></select></label>
    <label>If other, specify<input id="mot" placeholder="assisted breech, destructive…"></label>
    <label>Baby weight g<input id="bw" type="number" value="3000"></label>
+   <label>Newborn MRN<input id="nbmrn" placeholder="infant's MRN"></label>
    <label>Sex<select id="sx"><option value="female">Female</option><option value="male">Male</option></select></label>
    <label>APGAR 1<input id="a1" type="number" value="8"></label><label>APGAR 5<input id="a5" type="number" value="9"></label>
    <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Died after birth in facility</option></select></label>
@@ -632,7 +710,7 @@ async function delivery(id){
         ippfp_acceptor:(dacc.value||null),ippfp_method:(dmth.value||null),remark:drmk.value});
       // Newborn record is the source of truth for outcomes/analytics — create baby #1 here if none recorded yet.
       const existing=await api('GET','babies?episode='+id).catch(()=>[]);
-      if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0,prob_lbw:((+bw.value||0)>0&&(+bw.value)<2500)?1:0});
+      if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0,mrn:(nbmrn.value||null),prob_lbw:((+bw.value||0)>0&&(+bw.value)<2500)?1:0});
       await api('PATCH','episodes/'+id,{status:'delivered'});
       $('#m').textContent=' saved → PNC'; toast('Delivery recorded','ok'); setTimeout(()=>location.hash='#pnc',700);
     }catch(e){ toast('Could not save delivery — '+(e.message||'error')+'. Not saved.'); }
@@ -653,42 +731,81 @@ async function pnc(){
   wireAssign();
 }
 const ANC_GROUPS={obstetric_history:'Obstetric history',current_pregnancy:'Current pregnancy',general_medical:'General medical'};
+// Aligned to the National ANC Guideline (MoH, Feb 2022): Table 4 (high-risk conditions)
+// and Annex 6 (the ANC card's past- and current-pregnancy history).
+// Thresholds corrected: age <19 / >35 (was <16 / >40); macrosomia >=4000 g (was >4500 g).
 const ANC_ITEMS=[
- ['OBS_PREV_STILLBIRTH','obstetric_history','Previous stillbirth or neonatal loss'],
- ['OBS_3_ABORTIONS','obstetric_history','History of 3 or more consecutive spontaneous abortions'],
- ['OBS_BW_LT2500','obstetric_history','Birth weight of last baby < 2500 g'],
- ['OBS_BW_GT4500','obstetric_history','Birth weight of last baby > 4500 g'],
- ['OBS_PREV_PREECLAMPSIA','obstetric_history','Last pregnancy: admitted for pre-eclampsia or eclampsia'],
- ['OBS_PREV_SURGERY','obstetric_history','Previous surgery on the reproductive tract'],
+ ['OBS_PREV_STILLBIRTH','obstetric_history','Previous stillbirth'],
+ ['OBS_NEONATAL_DEATH','obstetric_history','Previous early neonatal death'],
+ ['OBS_3_ABORTIONS','obstetric_history','Three or more abortions (spontaneous or induced)'],
+ ['OBS_CONGENITAL','obstetric_history','Previous baby with a congenital anomaly'],
+ ['OBS_BW_LT2500','obstetric_history','Birth weight of previous baby < 2500 g'],
+ ['OBS_BW_GTE4000','obstetric_history','Birth weight of previous baby ≥ 4000 g (macrosomia)'],
+ ['OBS_PRETERM','obstetric_history','Previous preterm birth'],
+ ['OBS_PROM','obstetric_history','Previous leakage of fluid per vagina (PROM)'],
+ ['OBS_APH','obstetric_history','Previous vaginal bleeding after 7 months (antepartum haemorrhage)'],
+ ['OBS_PREV_PREECLAMPSIA','obstetric_history','Previous hypertensive disease / pre-eclampsia or eclampsia'],
+ ['OBS_PREV_CS','obstetric_history','Previous delivery by caesarean section'],
+ ['OBS_PREV_ASSISTED','obstetric_history','Previous delivery by vacuum or forceps'],
+ ['OBS_PREV_SURGERY','obstetric_history','Other surgery on the reproductive tract (myomectomy, LEEP, cerclage)'],
  ['OBS_PREV_PPH','obstetric_history','Previous postpartum haemorrhage (PPH)'],
  ['OBS_PREV_OBSTRUCTED','obstetric_history','Previous obstructed or prolonged labour'],
+ ['CUR_AGE_LT19','current_pregnancy','Age under 19 years'],
+ ['CUR_AGE_GT35','current_pregnancy','Age over 35 years'],
+ ['CUR_UNPLANNED','current_pregnancy','Unplanned and/or unwanted pregnancy'],
  ['CUR_MULTIPLE','current_pregnancy','Suspected multiple pregnancy'],
- ['CUR_AGE_LT16','current_pregnancy','Age less than 16 years'],
- ['CUR_AGE_GT40','current_pregnancy','Age more than 40 years'],
  ['CUR_BLEEDING','current_pregnancy','Vaginal bleeding'],
+ ['CUR_SHORT_STATURE','current_pregnancy','Short stature or severe physical deformity'],
+ ['CUR_BMI','current_pregnancy','Underweight (BMI < 18.5) or overweight/obese (BMI > 25)'],
+ ['CUR_MALARIA_AREA','current_pregnancy','From a malaria-endemic area'],
  ['MED_DIABETES','general_medical','Diabetes mellitus'],
  ['MED_CHRONIC_HTN','general_medical','Chronic hypertension'],
- ['MED_OTHER_SEVERE','general_medical','Any other severe medical condition (TB, HIV, cancer, DVT...)']
+ ['MED_CARDIAC_RENAL','general_medical','Cardiac or renal disease'],
+ ['MED_ANAEMIA','general_medical','Anaemia'],
+ ['MED_RH_SENSITIZED','general_medical','Rh-sensitised mother'],
+ ['MED_PSYCH','general_medical','Psychiatric illness'],
+ ['MED_HIV_TB_SYPH','general_medical','HIV (high viral load), acute hepatitis, syphilis, TB, or other systemic infection'],
+ ['MED_OTHER_SEVERE','general_medical','Any other severe or chronic medical condition']
 ];
 async function ancScreen(id){
-  const existing=await api('GET','anc_screening?episode='+id).catch(()=>[]);
+  const [existing,eps]=await Promise.all([api('GET','anc_screening?episode='+id).catch(()=>[]),api('GET','episodes').catch(()=>[])]);
+  const e=(eps||[]).find(x=>x.id==id)||{};
   const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
   const notePrev=prev['PLAN_NOTE']||'';
+  // Items we can answer from data already held — prefilled, but the provider may override.
+  const derived={};
+  if(e.age){ derived.CUR_AGE_LT19=(+e.age<19)?'yes':'no'; derived.CUR_AGE_GT35=(+e.age>35)?'yes':'no'; }
+  if(e.pregnancy_planned!==null&&e.pregnancy_planned!==undefined&&e.pregnancy_planned!=='') derived.CUR_UNPLANNED=(+e.pregnancy_planned===0)?'yes':'no';
+
   let html=nav()+`<div class="card"><h3>ANC risk screening — episode ${esc(id)} <span id="ancband" class="pill"></span></h3>
-    <p class="muted">WHO/MCPC risk factors. This is decision support — a "Yes" flags a factor for the clinician's attention; the clinical decision and plan are the provider's.</p>`;
+    <p class="muted">Risk conditions from the National ANC Guideline (MoH, Feb 2022), Table 4 and Annex 6. <b>Every item must be answered</b> — an unanswered item is not the same as "No". Prefilled items were derived from her record; change them if they are wrong.</p>
+    <div id="ancreq" style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:8px 12px;margin:8px 0;font-size:13px"></div>`;
   Object.keys(ANC_GROUPS).forEach(gk=>{ html+=`<h4>${ANC_GROUPS[gk]}</h4>`;
-    ANC_ITEMS.filter(it=>it[1]===gk).forEach(it=>{ const v=prev[it[0]]||'no';
-      html+=`<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>${esc(it[2])}</span>
-        <select data-code="${it[0]}" data-group="${it[1]}" style="width:132px"><option value="no"${v==='no'?' selected':''}>No</option><option value="yes"${v==='yes'?' selected':''}>Yes</option><option value="unknown"${v==='unknown'?' selected':''}>Unknown</option></select></label></div>`; }); });
+    ANC_ITEMS.filter(it=>it[1]===gk).forEach(it=>{ const v=prev[it[0]]||derived[it[0]]||'';
+      const auto=(!prev[it[0]]&&derived[it[0]])?' <span class="muted" style="font-size:11px">(from her record)</span>':'';
+      html+=`<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>${esc(it[2])}${auto}</span>
+        <select data-code="${it[0]}" data-group="${it[1]}" style="width:132px"><option value=""${v===''?' selected':''}>— select —</option><option value="no"${v==='no'?' selected':''}>No</option><option value="yes"${v==='yes'?' selected':''}>Yes</option><option value="unknown"${v==='unknown'?' selected':''}>Unknown</option></select></label></div>`; }); });
   html+=`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)"><h4>Care plan</h4>
     <label>Notes (clinician's plan)<textarea id="ancnote" rows="3" placeholder="Birth plan, monitoring, referral decision, or any notes...">${esc(notePrev)}</textarea></label></div>`;
   html+=`<button class="act" id="ancsave" style="margin-top:12px">Save screening</button> <span class="muted" id="ancm"></span></div>`;
   app().innerHTML=html;
   const sels=()=>[...document.querySelectorAll('#app select[data-code]')];
+  const unanswered=()=>sels().filter(s=>!s.value);
   const evalBand=()=>{ const yes=sels().some(s=>s.value==='yes'); const b=$('#ancband');
-    b.textContent=yes?'Higher-risk pregnancy':'Routine ANC'; b.className='pill '+(yes?'amber':'green'); };
+    b.textContent=yes?'Higher-risk pregnancy':'Routine ANC'; b.className='pill '+(yes?'amber':'green');
+    const u=unanswered(); const box=$('#ancreq');
+    if(u.length){ box.style.display=''; box.textContent=u.length+' of '+sels().length+' items still unanswered. All items are required before this screening can be saved.';
+      u.forEach(s=>s.style.borderColor='#ef9f27'); }
+    else { box.style.display='none'; }
+    sels().forEach(s=>{ if(s.value) s.style.borderColor=''; });
+    $('#ancsave').textContent = u.length?('Save screening ('+u.length+' left)'):'Save screening';
+  };
   sels().forEach(s=>s.onchange=evalBand); evalBand();
-  $('#ancsave').onclick=async()=>{ const rows=sels().map(s=>({episode_id:+id,item_code:s.dataset.code,item_group:s.dataset.group,response:s.value}));
+  $('#ancsave').onclick=async()=>{
+    const u=unanswered();
+    if(u.length){ modal('Screening incomplete', u.length+' item(s) are still unanswered. The National ANC Guideline requires every risk condition to be assessed — leaving an item blank is not the same as answering "No". Please complete them all.','risk');
+      u[0].scrollIntoView({block:'center'}); return; }
+    const rows=sels().map(s=>({episode_id:+id,item_code:s.dataset.code,item_group:s.dataset.group,response:s.value}));
     const nv=($('#ancnote').value||'').slice(0,255);
     if(nv) rows.push({episode_id:+id,item_code:'PLAN_NOTE',item_group:'care_plan',response:nv});
     const r=await api('POST','anc_screening',rows); $('#ancm').textContent=(r&&r.ids)?' saved ('+rows.length+' items)':' '+((r&&r.error)||'saved offline'); };
@@ -746,64 +863,171 @@ async function referralScreen(id){
     if(r&&(r.ids||r.queued)){ try{ await api('PATCH','episodes/'+id,{status:'referred'}); }catch(e){} $('#rm').textContent=' referred'; setTimeout(()=>referralScreen(id),500); } else $('#rm').textContent=' '+((r&&r.error)||'error'); };
 }
 
+// Guideline Table 2: contacts at <=12, 20, 26, 30, 34, 36, 38, 40 weeks.
+const ANC_SCHEDULE={1:12,2:20,3:26,4:30,5:34,6:36,7:38,8:40};
+// Guideline Table 5: what each contact specifically requires.
+const ANC_CONTACT_ACTIONS={
+ 1:['Full history and physical examination','Hb/Hct, blood group + Rh, urine analysis','HIV, syphilis, HBV','Td-1','Counsel on danger signs and lifestyle'],
+ 2:['Ultrasound (before 24 weeks)','Initiate IFA <b>and calcium</b>','Deworming','Assess mental health and intimate partner violence','MUAC and weight'],
+ 3:['Urinalysis for proteinuria + urine gram stain','OGTT if high risk','No ultrasound needed'],
+ 4:['<b>Repeat syphilis and HIV</b> if earlier result was negative','<b>Repeat Hb</b>','Counsel on birth preparedness (BPCR)','Counsel on breastfeeding'],
+ 5:['<b>Determine fetal presentation</b>','Repeat syphilis/HIV if not done at 30 weeks','Urine protein if high risk','Counsel on immunisation and early childhood development'],
+ 6:['All 34-week activities','<b>Assess mental health</b>'],
+ 7:['<b>Repeat Hb</b>','Ask about fears and worries about labour','Advise fetal movement counting'],
+ 8:['Ultrasound for fetal wellbeing','Review fetal movement counting']
+};
+const LAB_TESTS=[['HGB','Haemoglobin / haematocrit'],['BLOOD_GROUP_RH','Blood group and Rh'],['URINE_DIP','Urine dipstick (protein)'],
+ ['URINE_GRAM','Urine microscopy / gram stain'],['HIV','HIV test'],['SYPHILIS','Syphilis (RPR/VDRL)'],['HBV','Hepatitis B (HBsAg)'],
+ ['OGTT','OGTT (75g, 2-hour)'],['USS','Obstetric ultrasound'],['OTHER','Other']];
+
 async function ancVisits(id){
-  const past=await api('GET','anc_visits?episode='+id).catch(()=>[]);
-  app().innerHTML=nav()+`<div class="card"><h3>ANC follow-up visit — episode ${esc(id)}</h3>
+  const [past,eps,labs]=await Promise.all([
+    api('GET','anc_visits?episode='+id).catch(()=>[]),
+    api('GET','episodes').catch(()=>[]),
+    api('GET','labs?episode='+id).catch(()=>[])]);
+  const e=(eps||[]).find(x=>x.id==id)||{};
+  const nextNo=Math.min(8,(past||[]).filter(p=>/^\d+$/.test(String(p.contact_no||''))).length+1);
+  const rhNeg=String(e.rh_factor||'').toLowerCase()==='neg';
+  const opt=(v,n,sel)=>`<option value="${v}"${String(sel)===String(v)?' selected':''}>${n}</option>`;
+
+  app().innerHTML=nav()+`<div class="card"><h3>ANC contact — episode ${esc(id)}</h3>
+
+   <div style="background:#e1f5ee;border:1px solid #5dcaa5;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:13px;color:#04342c">
+     <b>Carried forward from her record</b> &mdash; not re-asked here.
+     Blood group: <b>${esc(e.blood_group||'—')}${e.rh_factor?(' '+(rhNeg?'negative':'positive')):''}</b> &middot;
+     Booking GA: <b>${e.ga_first_contact?esc(e.ga_first_contact)+'w':'—'}</b>${e.late_anc_initiation==1?' <span style="color:#a32d2d">(late)</span>':''} &middot;
+     HIV: <b>${e.hiv_known_positive==1?'known positive':'—'}</b> &middot; Target pop: <b>${esc(e.target_pop_code||'—')}</b>
+     ${rhNeg?' <div style="margin-top:4px;color:#a32d2d"><b>Rh NEGATIVE</b> — Anti-D indicated if indirect Coombs negative.</div>':''}
+     ${!e.blood_group?' <div style="margin-top:4px;color:#854f0b">Blood group / Rh not yet recorded — request it below and enter it on her record.</div>':''}
+   </div>
+
    <div class="grid">
     ${ecPicker('vd','Visit date',true)}
-    <label>ANC contact<select id="cno"><option value="">-</option><option value="1">1st</option><option value="2">2nd</option><option value="3">3rd</option><option value="4">4th</option><option value="5">5th</option><option value="6">6th</option><option value="7">7th</option><option value="8">8th</option><option value="unscheduled">Unscheduled</option><option value="special">Special</option></select></label>
-    <label>GA (weeks)<input id="ga" type="number"></label>
-    <label>Weight (kg)<input id="wt" type="number" step="0.1"></label>
-    <label>BP systolic<input id="bps" type="number"></label>
-    <label>BP diastolic<input id="bpd" type="number"></label>
+    <label>ANC contact <span style="color:#a32d2d">*</span><select id="cno"><option value="">— select —</option>${[1,2,3,4,5,6,7,8].map(i=>opt(i,i+(['st','nd','rd'][i-1]||'th')+' contact (~'+ANC_SCHEDULE[i]+' wks)',nextNo)).join('')}<option value="unscheduled">Unscheduled</option></select></label>
+    <label>GA (weeks) <span style="color:#a32d2d">*</span><input id="ga" type="number" min="4" max="45"></label>
+    <label>Weight (kg) <span style="color:#a32d2d">*</span><input id="wt" type="number" step="0.1"></label>
+    <label>BP systolic <span style="color:#a32d2d">*</span><input id="bps" type="number"></label>
+    <label>BP diastolic <span style="color:#a32d2d">*</span><input id="bpd" type="number"></label>
+    <label>MUAC (cm) <span style="color:#a32d2d">*</span><input id="muac" type="number" step="0.1"></label>
     <label>Fundal height (cm)<input id="fh" type="number"></label>
     <label>Fetal HR<input id="fhr" type="number"></label>
-    <label>Presentation<input id="pres" placeholder="cephalic / breech"></label>
-    <label>Urine protein<input id="up" placeholder="nil / +"></label>
+    <label>Presentation<input id="pres" placeholder="cephalic / breech / transverse"></label>
+    <label>Pallor (palm &amp; conjunctiva)<select id="pal"><option value="">-</option><option value="pink">Pink</option><option value="pale">Pale</option></select></label>
+    <label>Urine protein<input id="up" placeholder="nil / + / ++"></label>
     <label>Hgb (g/dl)<input id="hb" type="number" step="0.1"></label>
-    <label>MUAC (cm)<input id="muac" type="number" step="0.1"></label>
     <label>Fetal movement<select id="fm"><option value="">Not assessed</option><option value="normal">Normal</option><option value="reduced">Reduced</option><option value="absent">Absent</option></select></label>
-    <label>HIV status<select id="hiv"><option value="">Not tested</option><option value="negative">Negative</option><option value="positive">Positive</option><option value="unknown">Unknown</option></select></label>
-    <label>Syphilis (RPR)<select id="syph"><option value="">Not done</option><option value="nonreactive">Non-reactive</option><option value="reactive">Reactive</option></select></label>
-    <label>Tetanus / Td<select id="tt"><option value="">-</option><option value="TT1">TT1</option><option value="TT2">TT2</option><option value="TT3">TT3</option><option value="TT4">TT4</option><option value="TT5">TT5</option><option value="none">None</option></select></label>
-    <label>Iron-folic acid<select id="ifa"><option value="">-</option><option value="given">Given</option><option value="not">Not given</option><option value="declined">Declined</option></select></label>
     <label>Malaria assessed<select id="mal"><option value="">Not assessed</option><option value="no">No symptoms/risk</option><option value="yes">Symptoms/risk - test</option></select></label>
     ${ecPicker('na','Next appointment')}
-   </div><label>Danger signs / note<input id="dn"></label>
+   </div>
+   <div id="ancderived"></div>
+   <div id="ancdue" style="background:#eef6f5;border:1px solid #dbe7e4;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
+   <label>Danger signs / note<input id="dn"></label>
 
-   <details class="moh" open><summary>Tests &amp; prophylaxis <span class="muted">&mdash; MoH ANC register</span></summary><div class="grid">
+   <details class="moh" open><summary>Tests, prophylaxis &amp; supplementation</summary><div class="grid">
     <label>Ultrasound within 24 wks GA<select id="us"><option value="">-</option><option value="Y">Yes</option><option value="N">No</option></select></label>
     <label>Syphilis test result<select id="syr"><option value="">-</option><option value="R">Reactive</option><option value="NR">Non-reactive</option><option value="ND">Not done</option></select></label>
     <label>Hepatitis B test result<select id="hbr"><option value="">-</option><option value="R">Reactive</option><option value="NR">Non-reactive</option><option value="ND">Not done</option></select></label>
+    <label>Urine gram stain<select id="ugs"><option value="">-</option><option value="negative">Negative</option><option value="positive">Positive</option><option value="not_done">Not done</option></select></label>
+    <label>OGTT (if high risk)<select id="ogt"><option value="">-</option><option value="normal">Normal</option><option value="gdm">Gestational diabetes</option><option value="not_done">Not done</option></select></label>
     <label>Td dose number<input id="tdn" type="number" min="1" max="5" placeholder="1-5"></label>
-    <label>IFA tablets provided<input id="ift" type="number" min="0" placeholder="tablets"></label>
+    <label>IFA tablets <b>provided</b><input id="ift" type="number" min="0" placeholder="tablets"></label>
+    <label>IFA tablets <b>consumed</b> <span class="muted" style="font-weight:400">(adherence)</span><input id="ifc2" type="number" min="0" placeholder="tablets"></label>
    </div><div class="ticks">
-    ${tick('syt','Syphilis treatment given')}${tick('hbt','Hep B treatment given')}${tick('hbp','Hep B prophylaxis given')}${tick('dw','Deworming given (2nd/3rd trimester)')}
+    ${tick('cal','Calcium supplement given (1.5–2.0 g/day)')}${tick('syt','Syphilis treatment given')}${tick('hbt','Hep B treatment given')}${tick('hbp','Hep B prophylaxis given')}${tick('dw','Deworming given (after 1st trimester)')}${tick('and','Anti-D given (Rh negative)')}
    </div></details>
 
-   <details class="moh"><summary>HIV <span class="muted">&mdash; MoH ANC register</span></summary><div class="grid">
+   <details class="moh"><summary>HIV</summary><div class="grid">
     <label>HIV test result<select id="htr"><option value="">-</option><option value="P">Positive</option><option value="N">Negative</option></select></label>
    </div><div class="ticks">
     ${tick('hta','HIV test accepted')}${tick('hpc','Result received with post-test counselling')}
-   </div>
-   <div class="muted" style="font-size:12px;margin-top:6px">Target population, linkage to PMTCT/ART and partner testing are held once on the woman&rsquo;s record &mdash; edit them from her profile.</div></details>
-
-   <details class="moh"><summary>Counselling provided at this contact <span class="muted">&mdash; MoH ANC register</span></summary><div class="ticks">
-    ${tick('c1','Danger signs')}${tick('c2','Maternal nutrition')}${tick('c3','Early childhood development')}${tick('c4','Breast / infant feeding')}${tick('c5','Family planning')}
    </div></details>
 
+   <details class="moh"><summary>Mental health, safety &amp; substance use <span class="muted">&mdash; Guideline Box 3</span></summary><div class="grid">
+    <label>Mental health<select id="mh"><option value="">Not assessed</option><option value="normal">No concern</option><option value="concern">Concern identified</option><option value="referred">Referred</option><option value="declined">Declined</option></select></label>
+    <label>Intimate partner violence<select id="ipv"><option value="">Not assessed</option><option value="no">No</option><option value="disclosed">Disclosed</option><option value="referred">Referred</option><option value="declined">Declined to answer</option></select></label>
+   </div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Substance use — tick all that apply:</div>
+   <div class="ticks">${tick('su_none','None')}${tick('su_alcohol','Alcohol')}${tick('su_tobacco','Tobacco')}${tick('su_khat','Khat')}${tick('su_caffeine','Heavy caffeine')}${tick('su_other','Other')}</div>
+   <div class="muted" style="font-size:12px;margin-top:6px">Ask these in private. If IPV is disclosed, follow the facility referral pathway &mdash; do not record details here.</div></details>
+
+   <details class="moh"><summary>Counselling provided at this contact</summary><div class="ticks">
+    ${tick('c1','Danger signs')}${tick('c2','Maternal nutrition')}${tick('cl','Lifestyle modification')}${tick('cb','Birth preparedness &amp; complication readiness')}${tick('c3','Early childhood development')}${tick('c4','Breast / infant feeding')}${tick('c5','Family planning')}
+   </div></details>
+
+   <details class="moh"><summary>Laboratory — requests &amp; results</summary>
+    <div class="muted" style="font-size:12px;margin-bottom:6px">Request a test now; enter the result here or at a later contact.</div>
+    <div class="grid">
+     <label>Request test<select id="labt"><option value="">— select —</option>${LAB_TESTS.map(t=>`<option value="${t[0]}">${t[1]}</option>`).join('')}</select></label>
+     <label>&nbsp;<button class="sec" id="labadd" type="button">Add request</button></label>
+    </div>
+    <table id="labtbl" style="font-size:12px"><tr><th>Test</th><th>Requested</th><th>Result</th><th></th></tr>
+    ${(labs||[]).map(l=>`<tr><td>${esc((LAB_TESTS.find(t=>t[0]===l.test_code)||[,l.test_code])[1])}</td><td>${esc(l.requested_date||'')}</td>
+      <td><input data-lab="${l.id}" value="${esc(l.result||'')}" placeholder="enter result" style="font-size:12px"></td>
+      <td><button class="sec" data-labsave="${l.id}" type="button" style="font-size:12px;padding:3px 8px">Save</button></td></tr>`).join('')
+      ||'<tr><td colspan=4 class=muted>No tests requested yet.</td></tr>'}
+    </table></details>
+
    <label>Remark<input id="rmk" placeholder="appointment or anything not covered above"></label>
-   <button class="act" id="asave" style="margin-top:10px">Save visit</button> <span class="muted" id="am"></span><div class="muted" id="anccomp" style="margin-top:8px;font-size:12px"></div></div>
-   <div class="card"><h3>Previous visits</h3><table><tr><th>Date</th><th>GA</th><th>Wt</th><th>BP</th><th>FH</th><th>FHR</th><th>Next</th></tr>
-    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.fundal_height_cm||'')}</td><td>${esc(p.fetal_heart_rate||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No visits yet.</td></tr>'}
+   <div id="ancreqbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
+   <button class="act" id="asave" style="margin-top:10px">Save contact</button> <span class="muted" id="am"></span></div>
+   <div class="card"><h3>Previous contacts</h3><table><tr><th>Date</th><th>#</th><th>GA</th><th>Wt</th><th>BP</th><th>MUAC</th><th>Hb</th><th>Anaemia</th><th>Next</th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.contact_no||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.muac||'')}${p.muac_flag==1?' <span class="pill amber">&lt;23</span>':''}</td><td>${esc(p.hgb||'')}</td><td>${p.anaemia_grade&&p.anaemia_grade!=='normal'?('<span class="pill amber">'+esc(p.anaemia_grade)+'</span>'):esc(p.anaemia_grade||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=9 class=muted>No contacts yet.</td></tr>'}
    </table></div>`;
-  const ancRec=['cno','ga','bps','muac','fm','hiv','syph','tt','ifa','up','hb'];
-  const updComp=()=>{ let n=0; ancRec.forEach(k=>{const el=$('#'+k); if(el&&el.value&&el.value!=='') n++;}); const c=$('#anccomp'); if(c) c.textContent='ANC package: '+n+' of '+ancRec.length+' recommended items recorded'; };
-  ancRec.forEach(k=>{const el=$('#'+k); if(el){ el.addEventListener('input',updComp); el.addEventListener('change',updComp); }}); updComp();
-  $('#asave').onclick=async()=>{ const b=$('#asave'); b.disabled=true; try{ const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:+wt.value||null,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:+hb.value||null,muac:(+muac.value||null),fetal_movement:(fm.value||null),hiv_status:(hiv.value||null),syphilis:(syph.value||null),tetanus_td:(tt.value||null),iron_folic:(ifa.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
+
+  // ---- derived clinical classification, shown live and stored on save ----
+  const showDerived=()=>{
+    const hb=+hb_.value||null, mu=+muac.value||null, wtv=+wt.value||null;
+    const bmi=bmiCalc(wtv,e.height_cm); const g=anaemiaGrade(hb);
+    let out='';
+    if(g&&g!=='normal') out+=`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">${esc(anaemiaAction(g))}</div>`;
+    else if(g==='normal') out+=`<div style="background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">${esc(anaemiaAction(g))}</div>`;
+    if(muacFlag(mu)) out+=`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">MUAC ${mu} cm — ACUTE MALNUTRITION (&lt;23 cm). Treat per the national protocol and counsel on nutrition.</div>`;
+    if(bmi){ const f=bmiFlag(bmi);
+      out+=`<div style="background:${f==='normal'?'#e1f5ee':'#faeeda'};border:1px solid ${f==='normal'?'#5dcaa5':'#ef9f27'};color:${f==='normal'?'#04342c':'#633806'};border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">BMI ${bmi} — ${f}${f!=='normal'?' (a high-risk condition, Guideline Table 4)':''}.</div>`; }
+    $('#ancderived').innerHTML=out;
+  };
+  const hb_=$('#hb');
+  ['hb','muac','wt'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('input',showDerived);}});
+
+  // ---- what this contact requires (Guideline Table 5) ----
+  const showDue=()=>{ const n=+cno.value; const box=$('#ancdue');
+    if(!n||!ANC_CONTACT_ACTIONS[n]){ box.style.display='none'; return; }
+    box.style.display='';
+    box.innerHTML='<b>Contact '+n+' (~'+ANC_SCHEDULE[n]+' weeks) — the guideline requires:</b><ul style="margin:4px 0 0;padding-left:18px">'+ANC_CONTACT_ACTIONS[n].map(a=>'<li>'+a+'</li>').join('')+'</ul>';
+  };
+  cno.addEventListener('change',showDue); showDue(); showDerived();
+
+  // ---- laboratory requests & results ----
+  $('#labadd').onclick=async()=>{ if(!labt.value) return;
+    const r=await api('POST','labs',{episode_id:+id,test_code:labt.value,requested:1,requested_date:ecGet('vd')||new Date().toISOString().slice(0,10)});
+    if(r&&(r.ids||r.queued)){ toast('Test requested','ok'); ancVisits(id); } };
+  document.querySelectorAll('[data-labsave]').forEach(b=>{ b.onclick=async()=>{ const lid=b.dataset.labsave;
+    const inp=document.querySelector('[data-lab="'+lid+'"]');
+    const r=await api('PATCH','labs/'+lid,{result:inp.value,result_date:new Date().toISOString().slice(0,10)});
+    if(r&&(r.ok||r.queued)) toast('Result saved','ok'); }; });
+
+  // ---- MANDATORY fields (collaborator request; guideline requires these every contact) ----
+  const REQ=[['vd','Visit date'],['cno','ANC contact number'],['ga','Gestational age'],['wt','Weight'],['bps','BP systolic'],['bpd','BP diastolic'],['muac','MUAC']];
+  const missing=()=>REQ.filter(([k])=> k==='vd' ? !ecGet('vd') : !($('#'+k)&&$('#'+k).value));
+
+  $('#asave').onclick=async()=>{
+    const miss=missing();
+    if(miss.length){ $('#ancreqbox').style.display='';
+      $('#ancreqbox').textContent='Required: '+miss.map(m=>m[1]).join(', ')+'. The guideline requires blood pressure, weight and MUAC at every contact.';
+      modal('Contact incomplete','These required fields are missing: '+miss.map(m=>m[1]).join(', ')+'.\n\nThe National ANC Guideline requires blood pressure, weight and MUAC to be measured at every contact.','risk');
+      return; }
+    $('#ancreqbox').style.display='none';
+    const b=$('#asave'); b.disabled=true;
+    try{
+      const su=['none','alcohol','tobacco','khat','caffeine','other'].filter(s=>tk('su_'+s)).join(',')||null;
+      const hbv=+hb_.value||null, muv=+muac.value||null, wtv=+wt.value||null;
+      const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:wtv,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:hbv,muac:muv,fetal_movement:(fm.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
     ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:(+ift.value||null),deworming:tk('dw'),
     hiv_test_accepted:tk('hta'),hiv_test_result:(htr.value||null),hiv_posttest_counselled:tk('hpc'),
-    cnsl_danger_signs:tk('c1'),cnsl_nutrition:tk('c2'),cnsl_ecd:tk('c3'),cnsl_infant_feeding:tk('c4'),cnsl_family_planning:tk('c5'),remark:rmk.value});
+    calcium_given:tk('cal'),ifa_tabs_consumed:(+ifc2.value||null),anti_d_given:tk('and'),pallor:(pal.value||null),urine_gramstain:(ugs.value||null),ogtt_result:(ogt.value||null),
+    mental_health:(mh.value||null),ipv_screen:(ipv.value||null),substance_use:su,
+    cnsl_danger_signs:tk('c1'),cnsl_nutrition:tk('c2'),cnsl_lifestyle:tk('cl'),cnsl_bpcr:tk('cb'),cnsl_ecd:tk('c3'),cnsl_infant_feeding:tk('c4'),cnsl_family_planning:tk('c5'),remark:rmk.value,
+    bmi:bmiCalc(wtv,e.height_cm),anaemia_grade:(anaemiaGrade(hbv)||null),muac_flag:(muv?(muacFlag(muv)?1:0):null)});
     // Contact 1 IS the booking contact: its GA is the booking GA. Store it once on the
     // woman so it survives even when later contacts are entered out of order.
     if(r&&r.ids&&String(cno.value)==='1'&&+ga.value){
@@ -816,9 +1040,11 @@ async function ancVisits(id){
 }
 
 async function pncVisits(id){
-  const [past,delv,bbs]=await Promise.all([api('GET','pnc_visits?episode='+id).catch(()=>[]),api('GET','delivery?episode='+id).catch(()=>[]),api('GET','babies?episode='+id).catch(()=>[])]);
+  const [past,delv,bbs,epsP]=await Promise.all([api('GET','pnc_visits?episode='+id).catch(()=>[]),api('GET','delivery?episode='+id).catch(()=>[]),api('GET','babies?episode='+id).catch(()=>[]),api('GET','episodes').catch(()=>[])]);
   const dv=(delv&&delv[0])||null;
+  const WP=(epsP||[]).find(x=>x.id==id)||{};
   app().innerHTML=nav()+`<div class="card"><h3>PNC follow-up visit — episode ${esc(id)}</h3>
+   ${carryForward(WP,String(WP.rh_factor||'').toLowerCase()==='neg')}
    <div style="background:#e9f8f4;border-radius:10px;padding:8px 12px;margin-bottom:10px">
      <b>Delivery report</b> ${dv?('&middot; '+esc(dv.delivery_datetime||'')+' &middot; mode '+esc(dv.mode||'?')+' &middot; outcome '+esc(dv.outcome||'?')+' &middot; mother '+esc(dv.maternal_outcome||'?')):'<span class="muted">no delivery recorded yet</span>'}
      <div style="margin-top:4px"><b>Newborn record(s)</b> ${(bbs&&bbs.length)?bbs.map(b=>('#'+esc(b.birth_order||'?')+' '+esc(b.sex||'')+' '+esc(b.weight_g||'?')+'g Apgar '+esc(b.apgar_1min||'?')+'/'+esc(b.apgar_5min||'?')+' '+esc(b.outcome||''))).join(' &middot; '):'<span class="muted">no newborn record yet</span>'}</div>
@@ -1013,8 +1239,17 @@ async function editWoman(wid){
     <label>Height (cm)<input id="ht" type="number" value="${esc(w.height_cm||'')}"></label>
     <label>Woreda<input id="wo" value="${esc(w.woreda||'')}"></label>
     <label>GA at first ANC contact (weeks)<input id="gafc" type="number" min="4" max="42" value="${esc(w.ga_first_contact||'')}"></label>
+    <label>Blood group<select id="bg">${selOpts([['A','A'],['B','B'],['AB','AB'],['O','O']],w.blood_group)}</select></label>
+    <label>Rh factor<select id="rh">${selOpts([['pos','Positive'],['neg','Negative']],w.rh_factor)}</select></label>
+    <label>Is this pregnancy planned?<select id="pp">${selOpts([['1','Yes — planned'],['0','No — unplanned / unwanted']],w.pregnancy_planned)}</select></label>
+    <label>Abortion<input id="ab" type="number" min="0" value="${esc(w.abortions??'')}"></label>
+    <label>Ectopic<input id="ecp" type="number" min="0" value="${esc(w.ectopic??'')}"></label>
+    <label>GTD<input id="gtd" type="number" min="0" value="${esc(w.gtd??'')}"></label>
+    <label>Residence<select id="res">${selOpts([['urban','Urban'],['rural','Rural']],w.residence)}</select></label>
+    <label>Occupation<input id="occ" value="${esc(w.occupation||'')}"></label>
     ${ecPicker('lnmp','Last menstrual period')}
    </div>
+   ${String(w.rh_factor||'')==='neg'?`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>Rh NEGATIVE</b> &mdash; Anti-D prophylaxis is indicated (if indirect Coombs negative).</div>`:''}
    ${w.ga_first_contact?`<div style="background:${lateAnc(w.ga_first_contact)?'#faeeda':'#e1f5ee'};border:1px solid ${lateAnc(w.ga_first_contact)?'#ef9f27':'#5dcaa5'};color:${lateAnc(w.ga_first_contact)?'#633806':'#04342c'};border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
      Booked ANC at <b>${esc(w.ga_first_contact)} weeks</b> &mdash; ${lateAnc(w.ga_first_contact)?'late initiation (after the first trimester).':'timely initiation (first trimester).'}</div>`:''}
 
@@ -1043,6 +1278,9 @@ async function editWoman(wid){
    <button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
   $('#wsave').onclick=async()=>{ const _ln=ecGet('lnmp'); const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:(_ln||null),edd:(_ln?addDays(_ln,280):null),
     woreda:(wo.value||null),ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null),
+    blood_group:(bg.value||null),rh_factor:(rh.value||null),pregnancy_planned:(pp.value===''?null:+pp.value),
+    abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
+    residence:(res.value||null),occupation:(occ.value||null),
     target_pop_code:(tp.value||null),hiv_known_positive:tk('hkp'),hiv_linked_pmtct:tk('lpm'),hiv_linked_pmtct_facility:(+lpf.value||null),hiv_linked_art:tk('lar'),art_regimen:(artr.value||null),
     partner_hiv_accepted:tk('pha'),partner_hiv_result:(phr.value||null),partner_target_pop_code:(ptp.value||null),partner_linked_art:tk('pla')});
     $('#wm').textContent=(r&&(r.ok||r.queued))?' saved':' '+((r&&r.error)||'error'); };

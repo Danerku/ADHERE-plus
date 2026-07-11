@@ -104,11 +104,13 @@ try {
       if(isset($b['age'])&& $b['age']!==null && $b['age']!==''){ $ag=(int)$b['age'];
         if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
       $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
-      $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation','facility_id','created_by'],MOH_PERSON_FIELDS))));
+      $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
+        'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation','facility_id','created_by'],MOH_PERSON_FIELDS))));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
-      $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation'],MOH_PERSON_FIELDS)));
+      $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
+        'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation'],MOH_PERSON_FIELDS)));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
   }
 
@@ -118,8 +120,18 @@ try {
   // ---- episodes ----
   if ($r==='episodes'){
     if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $flag=$_GET['flag']??null;
-      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))"; // derived risk flag (no user input)
-      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.lnmp,w.edd, w.ga_first_contact,w.late_anc_initiation, pu.full_name AS provider_name, $hr AS high_risk FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
+      // Derived risk flag (no user input).
+      // Age: National ANC Guideline 2022, Table 4 — high risk is age <19 OR >35.
+      // (Not <18/>=35. The guideline is explicit; an 18-year-old and a 36-year-old both qualify.)
+      // Unplanned/unwanted pregnancy is also a Table 4 high-risk condition.
+      // Late ANC initiation is deliberately NOT included: it is so common here that flagging it
+      // would mark most women and cause alarm fatigue. It stays visible on the chart instead.
+      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+      // Person-level items are carried forward here so Delivery and PNC can SHOW what ANC
+      // already established (blood group, Rh, HIV, target population) instead of re-asking.
+      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.height_cm,w.lnmp,w.edd, w.ga_first_contact,w.late_anc_initiation,
+              w.blood_group,w.rh_factor,w.pregnancy_planned,w.target_pop_code,w.hiv_known_positive,w.hiv_linked_art,w.art_regimen,
+              pu.full_name AS provider_name, $hr AS high_risk FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
       if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
@@ -161,7 +173,10 @@ try {
            'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
            'anc_visits'=>['anc_visits',['episode_id','visit_date','contact_no','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','muac','fetal_movement','hiv_status','syphilis','tetanus_td','iron_folic','malaria_assessed','danger_note','next_appointment','recorded_by',
              // MoH ANC register (v12): 10-18, 20,21,23, counselling 30-34, remark 35
-             'ultrasound_lt24w','syphilis_result','syphilis_treated','hepb_result','hepb_treated','hepb_prophylaxis','td_dose_no','ifa_tabs','deworming','hiv_test_accepted','hiv_test_result','hiv_posttest_counselled','cnsl_danger_signs','cnsl_nutrition','cnsl_ecd','cnsl_infant_feeding','cnsl_family_planning','remark']],
+             'ultrasound_lt24w','syphilis_result','syphilis_treated','hepb_result','hepb_treated','hepb_prophylaxis','td_dose_no','ifa_tabs','deworming','hiv_test_accepted','hiv_test_result','hiv_posttest_counselled','cnsl_danger_signs','cnsl_nutrition','cnsl_ecd','cnsl_infant_feeding','cnsl_family_planning','remark',
+             // National ANC Guideline 2022, Annex 6 (ANC card) — migration v14
+             'calcium_given','ifa_tabs_consumed','anti_d_given','pallor','urine_gramstain','ogtt_result','mental_health','ipv_screen','substance_use','cnsl_lifestyle','cnsl_bpcr','bmi','anaemia_grade','muac_flag']],
+           'labs'=>['lab_orders',['episode_id','anc_visit_id','test_code','requested','requested_date','result','result_date','note','recorded_by']],
            'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','danger_note','recorded_by',
              // MoH PNC register (v12): 10,12-17, counselling 25-30, newborn 31-37, IPPFP 38-40, remark 42
              'visit_period','maternal_condition','pph','other_obs_complication','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_danger_signs','cnsl_breastfeeding','cnsl_newborn_care','cnsl_family_planning','cnsl_epi','cnsl_ecd','nb_weight_g','nb_problems','nb_problem_other','nb_treatment','nb_treatment_outcome','nb_death_age_days','nb_death_cause','ippfp_acceptor','ippfp_method','remark']],
@@ -174,7 +189,15 @@ try {
   if(isset($simple[$r])){
     [$tbl,$allow]=$simple[$r];
     if($m==='GET'){ require_ep($_GET['episode']??0); $st=db()->prepare("SELECT * FROM `$tbl` WHERE episode_id=? ORDER BY id"); $st->execute([$_GET['episode']]); out($st->fetchAll()); }
-    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
+    // PATCH is used to fill in a laboratory RESULT against a test requested earlier.
+    if($m==='PATCH' && $tbl==='lab_orders' && $id){ $u=require_role(['provider','admin']); $b=body();
+      $q=db()->prepare("SELECT episode_id FROM lab_orders WHERE id=?"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('lab order not found',404);
+      require_ep($row['episode_id']);
+      $f=array_intersect_key($b,array_flip(['result','result_date','note']));
+      foreach($f as $k=>$v){ db()->prepare("UPDATE lab_orders SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      audit('result','lab_orders',$id,array_keys($f)); out(['ok'=>true]); }
+    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers','lab_orders']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
       foreach($rows as $row){ require_ep($row['episode_id']??0); }
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id'];
