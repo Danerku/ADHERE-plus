@@ -126,7 +126,7 @@ try {
       // Unplanned/unwanted pregnancy is also a Table 4 high-risk condition.
       // Late ANC initiation is deliberately NOT included: it is so common here that flagging it
       // would mark most women and cause alarm fatigue. It stays visible on the chart instead.
-      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1 OR EXISTS(SELECT 1 FROM anc_visits av WHERE av.episode_id=e.id AND (av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1)) OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
       // "For client X, what conditions make her high risk?" — a flag with no reason is a dead end.
       // Return the ACTUAL reasons as codes so the worklist can explain itself and state the
       // next intervention, without the provider having to open her record to guess.
@@ -189,14 +189,20 @@ try {
   // ---- checklist / danger signs / delivery / anc screening / handover / messages ----
   $simple=['checklist'=>['checklist_responses',['episode_id','pause_point','item_code','response','recorded_by']],
            'danger_signs'=>['danger_signs',['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']],
-           'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','baby_weight_g','baby_sex','apgar_1min','apgar_5min','outcome','maternal_outcome','complications','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','blood_loss_ml','recorded_by',
+           // PURGED (v17): baby_weight_g, baby_sex, apgar_1min, apgar_5min, outcome — these duplicated the
+           // `babies` table, which is the single source of truth for newborn data (and the only one that
+           // supports twins). Nothing reads them. Columns kept so historical rows are not lost.
+           'delivery'=>['delivery_summary',['episode_id','delivery_datetime','mode','maternal_outcome','complications','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','blood_loss_ml','recorded_by',
              // MoH Delivery register (v12): 7,11,12,15-24,36-38,42,49-51,66
              'partograph_used','episiotomy','mode_other_text','maternal_status','maternal_death_cause','comp_preeclampsia','comp_eclampsia','comp_aph','comp_pph','comp_other','referred','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_feeding_options','ippfp_acceptor','ippfp_method','remark',
              'ippfp_timing']],   // v15 — IUCD is the commonest method at delivery; post-placental vs 48h matters
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
            'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
-           'anc_visits'=>['anc_visits',['episode_id','visit_date','contact_no','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','muac','fetal_movement','hiv_status','syphilis','tetanus_td','iron_folic','malaria_assessed','danger_note','next_appointment','recorded_by',
+           // PURGED (v17): hiv_status, syphilis, tetanus_td, iron_folic — legacy fields superseded by the
+           // MoH register fields below (hiv_test_result, syphilis_result, td_dose_no, ifa_tabs). No form
+           // writes them and nothing reads them. The DB columns stay so historical rows are not lost.
+           'anc_visits'=>['anc_visits',['episode_id','visit_date','contact_no','ga_weeks','weight_kg','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','urine_protein','hgb','muac','fetal_movement','malaria_assessed','danger_note','next_appointment','recorded_by',
              // MoH ANC register (v12): 10-18, 20,21,23, counselling 30-34, remark 35
              'ultrasound_lt24w','syphilis_result','syphilis_treated','hepb_result','hepb_treated','hepb_prophylaxis','td_dose_no','ifa_tabs','deworming','hiv_test_accepted','hiv_test_result','hiv_posttest_counselled','cnsl_danger_signs','cnsl_nutrition','cnsl_ecd','cnsl_infant_feeding','cnsl_family_planning','remark',
              // National ANC Guideline 2022, Annex 6 (ANC card) — migration v14
@@ -204,17 +210,21 @@ try {
              // v15 — already-on-ART pathway (no re-testing); unsuppressed VL -> ART clinic
              'art_continued','viral_load','viral_load_date','art_clinic_linked']],
            'labs'=>['lab_orders',['episode_id','anc_visit_id','test_code','requested','requested_date','result','result_date','note','recorded_by']],
-           'pnc_visits'=>['pnc_visits',['episode_id','visit_date','pnc_day','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','danger_note','recorded_by',
+           // PURGED (v17): pnc_day — superseded by visit_period (the five MoH PNC periods). Column kept.
+           'pnc_visits'=>['pnc_visits',['episode_id','visit_date','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','breast','mood','uterine_tone','perineum','mother_breastfeeding','pp_fp','ifa_continued','nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','danger_note','recorded_by',
              // MoH PNC register (v12): 10,12-17, counselling 25-30, newborn 31-37, IPPFP 38-40, remark 42
              'visit_period','maternal_condition','pph','other_obs_complication','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_danger_signs','cnsl_breastfeeding','cnsl_newborn_care','cnsl_family_planning','cnsl_epi','cnsl_ecd','nb_weight_g','nb_problems','nb_problem_other','nb_treatment','nb_treatment_outcome','nb_death_age_days','nb_death_cause','ippfp_acceptor','ippfp_method','remark',
              'baby_id']],   // v15 — PNC is for mother AND newborn: tie each assessment to a specific baby (twins)
-           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','enc_dried','enc_breathing','enc_vitamin_k','enc_eye_ointment','enc_cord_care','enc_arv','recorded_by',
+           // PURGED (v17): enc_vitamin_k -> vitamin_k_time (timing is what matters clinically);
+           // enc_arv -> the hiv_exposed / arv_prophylaxis / dbs_* pathway. Columns kept for history.
+           'babies'=>['babies',['episode_id','birth_order','sex','weight_g','apgar_1min','apgar_5min','resuscitated','outcome','note','enc_dried','enc_breathing','enc_eye_ointment','enc_cord_care','recorded_by',
              // MoH Delivery register, newborn level (v12): 31,35,52-64
              'mrn','vacc_bcg','vacc_opv0','vacc_hbv','prob_prematurity','prob_sepsis_vsd','prob_resp_distress','prob_lbw','prob_congenital','prob_other','prob_other_text','breastfeed_initiated','resuscitated_survived','death_age_days','death_age_hours','death_cause','birth_notification',
              // v15 — HIV exposure pathway (exposed -> ARV -> DBS -> ART clinic), Vit K timing,
              // conditional care pathways (KMC, phototherapy, NICU, antibiotics, oxygen), free-text "other"
              'hiv_exposed','arv_prophylaxis','dbs_sample','dbs_date','dbs_result','art_linked','art_linked_date',
-             'vitamin_k_time','cord_care_other','apgar_flag','kmc','phototherapy','nicu','nicu_facility','antibiotics','oxygen']],
+             'vitamin_k_time','cord_care_other','apgar_flag','kmc','phototherapy','nicu','nicu_facility','antibiotics','oxygen',
+             'prob_jaundice']],   // v16 — the Jaundice tick had no column and was silently discarded
            'maternal_vitals'=>['maternal_vitals',['episode_id','obs_datetime','bp_systolic','bp_diastolic','pulse','temperature','resp_rate','spo2','note','recorded_by']],
            'bemonc'=>['bemonc_care',['episode_id','item_code','response','note','recorded_by']],
            'messages'=>['messages',['episode_id','from_user_id','to_user_id','body']]];
@@ -267,7 +277,7 @@ try {
     $since = $days>0 ? " AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : "";
     $one=function($sql) use($fid){ $st=db()->prepare($sql); $st->execute([$fid]); $r=$st->fetch(); return (int)($r['c']??0); };
     $grp=function($sql) use($fid){ $st=db()->prepare($sql); $st->execute([$fid]); $o=[]; foreach($st->fetchAll() as $x){ $o[(string)$x['k']]=(int)$x['c']; } return $o; };
-    $hrx="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+    $hrx="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1 OR EXISTS(SELECT 1 FROM anc_visits av WHERE av.episode_id=e.id AND (av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1)) OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
     out([
      'days'=>$days,
      'caseload'=>[

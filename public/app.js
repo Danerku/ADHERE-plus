@@ -33,7 +33,10 @@ function motherFeats(W){ W=W||{};
 // Any single parameter scoring 3 = red trigger; total>=5 = red; total 3-4 = amber (increase monitoring).
 function meowsScore(v){ const parts=[]; let total=0;
   const add=(pts,label)=>{ if(pts>0){ total+=pts; parts.push({pts,label}); } };
-  const s=+v.sbp; if(!isNaN(s)){ add(s<=90?3:s>=160?3:(s>=150||s<=100)?2:s>=140?1:0, 'systolic '+s); }
+  // NB the `&& s` guard: an empty box gives +'' === 0, and isNaN(0) is false, so a MISSING
+  // systolic BP used to score 0<=90 -> 3 points -> a spurious RED MEOWS. Every other
+  // parameter already guarded this way.
+  const s=+v.sbp; if(!isNaN(s)&&s){ add(s<=90?3:s>=160?3:(s>=150||s<=100)?2:s>=140?1:0, 'systolic '+s); }
   const d=+v.dbp; if(!isNaN(d)&&d){ add(d>=110?3:d>=100?2:d>=91?1:0, 'diastolic '+d); }
   const p=+v.pulse; if(!isNaN(p)&&p){ add(p>=120?3:(p>=110||p<=50)?2:(p>=100||p<=59)?1:0, 'pulse '+p); }
   const r=+v.rr; if(!isNaN(r)&&r){ add((r>=25||r<8)?3:(r>=21||r<=11)?2:0, 'resp '+r); }
@@ -277,9 +280,12 @@ function modal(title,body,kind){ const old=document.getElementById('mdl'); if(ol
     <p style="margin:0 0 14px;font-size:14px;line-height:1.5;color:#334155">${esc(body)}</p>
     <button class="act" id="mdlok" style="width:100%">Understood</button></div>`;
   document.body.appendChild(d);
-  const close=()=>{ d.remove(); document.removeEventListener('keydown',esc); };
-  const esc=(e)=>{ if(e.key==='Escape') close(); };
-  document.addEventListener('keydown',esc);
+  // NB: do NOT name this handler `esc` — that shadows the global HTML escaper for the
+  // whole function scope, and esc(title) above then hits the temporal dead zone, so the
+  // modal throws ReferenceError and every safety dialog in the app silently dies.
+  const onKey=(e)=>{ if(e.key==='Escape') close(); };
+  const close=()=>{ d.remove(); document.removeEventListener('keydown',onKey); };
+  document.addEventListener('keydown',onKey);
   d.querySelector('#mdlok').onclick=close;
   d.onclick=(e)=>{ if(e.target===d) close(); };
   d.querySelector('#mdlok').focus();
@@ -293,6 +299,7 @@ async function register(){
     <label>First name<input id="fn"></label>
     <label>Father name<input id="fa"></label><label>Grandfather<input id="gf"></label>
     <label>Age<input id="age" type="number" min="10" max="60"></label>
+    <label>Height (cm) <span class="muted" style="font-weight:400">— for BMI</span><input id="ht" type="number" min="120" max="200"></label>
     <label>Marital status<select id="ms"><option value="married">Married</option><option value="single">Single</option><option value="divorced">Divorced</option><option value="widowed">Widowed</option></select></label>
     <label>Phone<input id="ph" placeholder="09..."></label><label>Kebele<input id="kb"></label>
     <label>Next of kin / husband<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
@@ -362,6 +369,7 @@ async function register(){
         abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
         pregnancy_planned:(pp.value===''?null:+pp.value),
         blood_group:(bg.value||null),rh_factor:(rh.value||null),residence:(res.value||null),occupation:(occ.value||null),
+        height_cm:(+ht.value||null),   // without this, BMI (a Table 4 risk factor) can never be computed
         ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null)});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
       await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
@@ -474,6 +482,7 @@ async function partograph(id){
      <label>Descent — fifths palpable<input id="dsc" type="number" min="0" max="5" placeholder="5→0 (optional)"></label>
      <label>Amniotic fluid<select id="amn"><option value="">Not assessed</option><option value="I">Intact</option><option value="C">Clear</option><option value="M">Meconium</option><option value="B">Blood</option><option value="A">Absent</option></select></label>
      <label>Systolic BP<input id="sbp" type="number" value="118"></label>
+     <label>Diastolic BP<input id="dbp" type="number" value="75"></label>
      <label>Temp °C<input id="tmp" type="number" step="0.1" value="37"></label>
      <label>Urine protein<select id="uprot"><option value="">Not done</option><option value="neg">Neg</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
      <label>Urine acetone<select id="uacet"><option value="">Not done</option><option value="neg">Neg</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
@@ -499,13 +508,16 @@ async function partograph(id){
     if(locked) return;
     const btn=$('#rec'); btn.disabled=true;                         // guard against double-submit
     try{
-    const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,tmp:+tmp.value,dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null)};
+    const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,dbp:(+dbp.value||null),tmp:+tmp.value,dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null)};
     const mld3=Math.max(0,Math.min(3,Math.round(o.mld)||0));
     // Save the observation FIRST — a failed save must never show a misleading chart/score.
-    const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
+    const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,bp_diastolic:o.dbp,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
     OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id); obs.push({obs_datetime:new Date().toISOString().slice(0,19).replace('T',' ')}); renderMonSched(id,obs);
     const mecon=(o.amn==='M')?1:0;
-    const feat=Object.assign({},FEAT_DEFAULTS,MF,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:Math.round(o.sbp*0.65),temp:o.tmp});
+    // dbp used to be FABRICATED as sbp*0.65 because the partograph had no diastolic field.
+    // That silently disabled the DBP>=110 severe-hypertension red flag in clinicalFlags():
+    // a woman at 150/115 was graded amber, not red. Now it is measured and used.
+    const feat=Object.assign({},FEAT_DEFAULTS,MF,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:(o.dbp||Math.round(o.sbp*0.65)),temp:o.tmp});
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
     const cf=clinicalFlags(o); const finalBand=escalate(r.band,cf.band);   // safety guardrail
     $('#ai').style.display='block'; $('#prob').textContent=Math.round(r.probability*100)+'%'; $('#prob').className=finalBand;
@@ -825,19 +837,27 @@ async function delivery(id){
   const obs=await api('GET','observations?episode='+id).catch(()=>[]);
   const pUsed=(obs||[]).some(o=>o.fetal_heart_rate) && (obs||[]).some(o=>o.cervix_cm!=null) &&
               (obs||[]).some(o=>o.bp_systolic||o.pulse||o.temperature) ? 'Y' : 'N';
-  const eps0=await api('GET','episodes').catch(()=>[]);
+  const [eps0,already,prevDel]=await Promise.all([
+    api('GET','episodes').catch(()=>[]),
+    api('GET','babies?episode='+id).catch(()=>[]),
+    api('GET','delivery?episode='+id).catch(()=>[])]);
   const W=(eps0||[]).find(x=>x.id==id)||{};
   const rhNegD=String(W.rh_factor||'').toLowerCase()==='neg';
+  // Guard against saving the delivery twice — it double-counts deliveries, AMTSL and the
+  // partograph rate, and duplicates every newborn row in the MoH register.
+  if(prevDel&&prevDel.length){
+    app().innerHTML=nav()+`<div class="card"><h3>Delivery already recorded — episode ${esc(id)}</h3>
+      <p class="muted">A delivery has already been saved for this episode (${esc((prevDel[0].delivery_datetime||'').slice(0,16))}, mode ${esc(prevDel[0].mode||'?')}). Saving it again would double-count it.</p>
+      <a class="nav" href="#baby/${id}">Record / view the newborn</a> &middot;
+      <a class="nav" href="#pncvisit/${id}">PNC follow-up</a> &middot;
+      <a class="nav" href="#report/${id}">Care summary</a></div>`;
+    return;
+  }
   app().innerHTML=nav()+`<div class="card"><h3>Delivery summary — episode ${esc(id)}</h3>
    ${carryForward(W,rhNegD)}
    <div class="grid">
    <label>Mode<select id="md"><option value="svd">SVD — spontaneous vaginal</option><option value="assisted">Forceps / vacuum assisted</option><option value="caesarean">Caesarean section</option><option value="other">Other</option></select></label>
    <label>If other, specify<input id="mot" placeholder="assisted breech, destructive…"></label>
-   <label>Baby weight g<input id="bw" type="number" value="3000"></label>
-   <label>Newborn MRN<input id="nbmrn" placeholder="infant's MRN"></label>
-   <label>Sex<select id="sx"><option value="female">Female</option><option value="male">Male</option></select></label>
-   <label>APGAR 1<input id="a1" type="number" value="8"></label><label>APGAR 5<input id="a5" type="number" value="9"></label>
-   <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Died after birth in facility</option></select></label>
    <label>Mother's status<select id="mo"><option value="well">Stable</option><option value="near_miss">Survived a near-miss</option><option value="referred">Unstable / deteriorated — referred</option><option value="death">Died</option></select></label>
    <label id="mdcw" style="display:none">Cause of maternal death<select id="mdc">${selOpts([['1','1. Haemorrhage'],['2','2. Pre-eclampsia / eclampsia'],['3','3. Obstructed labour'],['4','4. Sepsis'],['5','5. Anaemia'],['6','6. Other']])}</select></label>
    <label>Uterotonic within 1 min<select id="ut1"><option value="">-</option><option value="done">Done</option><option value="delayed">Delayed</option><option value="not">Not done</option></select></label>
@@ -869,23 +889,32 @@ async function delivery(id){
 
    <label>Remark<input id="drmk"></label>
    <div class="muted" style="font-size:12px;margin-top:8px">Partograph used (MoH item 7): <b>${pUsed==='Y'?'Yes':'No'}</b> &mdash; derived from the partograph record (maternal + fetal + progress all monitored).</div>
-   <button class="act" id="s" style="margin-top:10px">Save &amp; send to PNC</button><span class="muted" id="m"></span></div>`;
+   <div style="background:#eef6f5;border:1px solid #dbe7e4;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px">
+     This screen records the <b>mother</b>. The <b>newborn</b> is recorded on the next screen &mdash; one row per baby, so twins are handled properly and every newborn gets the full assessment (APGAR checks, Vitamin K timing, HIV exposure, KMC, phototherapy, NICU).
+     ${already.length?`<div style="margin-top:4px;color:#0f766e"><b>${already.length} newborn record(s) already exist</b> for this delivery.</div>`:''}
+   </div>
+   <button class="act" id="s" style="margin-top:10px">Save &amp; record the newborn</button><span class="muted" id="m"></span></div>`;
   const syncDeath=()=>{ $('#mdcw').style.display=(mo.value==='death')?'':'none'; };
   mo.addEventListener('change',syncDeath); syncDeath();
   const MOH_STATUS={well:'stable',near_miss:'stable',referred:'unstable_referred',death:'died'};
   $('#s').onclick=async()=>{ const btn=$('#s'); btn.disabled=true;
     try{
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,baby_weight_g:+bw.value,baby_sex:sx.value,apgar_1min:+a1.value,apgar_5min:+a5.value,outcome:oc.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null),
+      // Newborn data goes ONLY to the babies table (created just below) — it is the single
+      // source of truth and the only one that supports twins. delivery_summary no longer
+      // carries a shadow copy of weight/sex/APGAR/outcome.
+      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null),
         partograph_used:pUsed,episiotomy:tk('epis'),mode_other_text:(md.value==='other'?mot.value:null),
         maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
         comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
         hiv_test_accepted:tk('dhta'),hiv_retest_accepted:tk('dhrt'),hiv_test_result:(dhtr.value||null),cnsl_feeding_options:tk('dcfo'),
         ippfp_acceptor:(dacc.value||null),ippfp_method:(dmth.value||null),ippfp_timing:(dtim.value||null),remark:drmk.value});
-      // Newborn record is the source of truth for outcomes/analytics — create baby #1 here if none recorded yet.
-      const existing=await api('GET','babies?episode='+id).catch(()=>[]);
-      if(!(existing&&existing.length)) await api('POST','babies',{episode_id:+id,birth_order:1,sex:sx.value,weight_g:+bw.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,outcome:oc.value,resuscitated:0,mrn:(nbmrn.value||null),prob_lbw:((+bw.value||0)>0&&(+bw.value)<2500)?1:0});
       await api('PATCH','episodes/'+id,{status:'delivered'});
-      $('#m').textContent=' saved → PNC'; toast('Delivery recorded','ok'); setTimeout(()=>location.hash='#pnc',700);
+      // The newborn is NOT created here. Previously this screen half-created baby #1 with only
+      // weight/sex/APGAR — fields it could never complete (there is no babies PATCH), and if the
+      // provider then used the Newborn screen it created a PHANTOM TWIN that inflated birth counts
+      // and the MoH register. One place records a newborn: the Newborn screen, fully validated.
+      $('#m').textContent=' saved'; toast('Delivery recorded — now record the newborn','ok');
+      setTimeout(()=>location.hash='#baby/'+id,700);
     }catch(e){ toast('Could not save delivery — '+(e.message||'error')+'. Not saved.'); }
     finally{ $('#s').disabled=false; } };
   const note=document.createElement('p'); note.className='muted'; note.style.cssText='font-size:12px;margin-top:6px'; note.textContent='For twins/multiples, save this (baby 1), then add the others on the Newborn screen.'; $('#app').querySelector('.card').appendChild(note);
@@ -1242,7 +1271,7 @@ async function pncVisits(id){
   app().innerHTML=nav()+`<div class="card"><h3>PNC follow-up visit — episode ${esc(id)}</h3>
    ${carryForward(WP,String(WP.rh_factor||'').toLowerCase()==='neg')}
    <div style="background:#e9f8f4;border-radius:10px;padding:8px 12px;margin-bottom:10px">
-     <b>Delivery report</b> ${dv?('&middot; '+esc(dv.delivery_datetime||'')+' &middot; mode '+esc(dv.mode||'?')+' &middot; outcome '+esc(dv.outcome||'?')+' &middot; mother '+esc(dv.maternal_outcome||'?')):'<span class="muted">no delivery recorded yet</span>'}
+     <b>Delivery report</b> ${dv?('&middot; '+esc(dv.delivery_datetime||'')+' &middot; mode '+esc(dv.mode||'?')+' &middot; outcome '+esc(((bbs||[]).map(b=>b.outcome).filter(Boolean).join(', '))||'—')+' &middot; mother '+esc(dv.maternal_status||dv.maternal_outcome||'?')):'<span class="muted">no delivery recorded yet</span>'}
      <div style="margin-top:4px"><b>Newborn record(s)</b> ${(bbs&&bbs.length)?bbs.map(b=>('#'+esc(b.birth_order||'?')+' '+esc(b.sex||'')+' '+esc(b.weight_g||'?')+'g Apgar '+esc(b.apgar_1min||'?')+'/'+esc(b.apgar_5min||'?')+' '+esc(b.outcome||''))).join(' &middot; '):'<span class="muted">no newborn record yet</span>'}</div>
    </div>
    <h4>Mother</h4><div class="grid">
@@ -1316,7 +1345,7 @@ async function pncVisits(id){
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.visit_period||p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(({'1':'Normal','2':'Complicated, managed','3':'Complicated, referred','4':'Died'})[String(p.maternal_condition||'')]||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
    </table></div>`;
   const csv=(pre,codes)=>codes.filter(c=>tk(pre+c)).join(',')||null;   // MoH multi-code fields are comma-separated
-  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),pnc_day:null,m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
+  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
     baby_id:(+pbaby.value||null),
     visit_period:(vp.value||null),maternal_condition:(+mc.value||null),pph:tk('ppph'),other_obs_complication:(ooc.value||null),
     hiv_test_accepted:tk('phta'),hiv_retest_accepted:tk('phrt'),hiv_test_result:(phtr.value||null),
@@ -1447,7 +1476,7 @@ async function babiesScreen(id){
     kmc:(kmc.value||null),phototherapy:(pht.value||null),antibiotics:(abx.value||null),oxygen:(oxy.value||null),
     nicu:(nicu.value||null),nicu_facility:((nicu.value==='admitted'||nicu.value==='referred_out')?(nicuf.value||null):null),
     vacc_bcg:tk('vbcg'),vacc_opv0:tk('vopv'),vacc_hbv:tk('vhbv'),
-    prob_prematurity:tk('bpre'),prob_sepsis_vsd:tk('bsep'),prob_resp_distress:tk('brds'),prob_congenital:tk('bcon'),prob_other:tk('both'),prob_other_text:(bpot.value||null),
+    prob_prematurity:tk('bpre'),prob_sepsis_vsd:tk('bsep'),prob_resp_distress:tk('brds'),prob_jaundice:tk('bjau'),prob_congenital:tk('bcon'),prob_other:tk('both'),prob_other_text:(bpot.value||null),
     prob_lbw:((+wg.value||0)>0&&(+wg.value)<2500)?1:0,   // MoH item 55 — derived, never asked
     resuscitated_survived:tk('brsv'),birth_notification:tk('bnot'),
     death_age_days:(+bdd.value||null),death_age_hours:(+bdh.value||null),death_cause:(+bdc.value||null)});
@@ -1703,7 +1732,7 @@ async function reportScreen(id){
    <h4>Partograph</h4><p class="muted">${obs.length} observation(s). Last: cervix ${esc(last.cervix_cm||'—')} cm, FHR ${esc(last.fetal_heart_rate||'—')}, hrs ${esc(last.hours_since_active||'—')}.</p>
    <h4>ANC screening</h4><p class="muted">${anc.length?(ancYes?(ancYes+' risk factor(s) → specialised care'):'no risk factors → basic ANC'):'not screened'}</p>
    <h4>Safe-birth checklist</h4><p class="muted">${chk.length} item(s) recorded.</p>
-   <h4>Delivery</h4><p class="muted">${d.delivery_datetime?('Mode '+esc(d.mode||'')+', outcome '+esc(d.outcome||'')+', mother '+esc(d.maternal_outcome||'')):'not delivered'}</p>
+   <h4>Delivery</h4><p class="muted">${d.delivery_datetime?('Mode '+esc(d.mode||'')+', partograph '+esc(d.partograph_used||'?')+', mother '+esc(d.maternal_status||d.maternal_outcome||'')):'not delivered'}</p>
    <h4>Newborn(s)</h4><p class="muted">${babies.length?babies.map(b=>'#'+esc(b.birth_order)+' '+esc(b.sex||'')+' '+esc(b.weight_g||'?')+'g APGAR '+esc(b.apgar_1min||'?')+'/'+esc(b.apgar_5min||'?')+' '+esc(b.outcome||'')).join('; '):'none recorded'}</p>
    <h4>PNC follow-up</h4><p class="muted">${pnc.length} visit(s).</p>
    <h4>Referral</h4><p class="muted">${refs.length?refs.map(r=>'to '+esc(r.referred_to||'')+' ('+esc(r.urgency||'')+') — '+esc(r.reason||'')).join('; '):'none'}</p>
