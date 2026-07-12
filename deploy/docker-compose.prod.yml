@@ -24,6 +24,11 @@ services:
       DB_USER: ${DB_USER:-adhere}
       DB_PASS: ${DB_PASS:?set in .env}
       SITE_DOMAIN: ${SITE_DOMAIN}
+      # Clinic-local time. PHP pins itself to this (config.php) and pins the MySQL session to
+      # the matching offset (db.php), so date(), NOW() and CURDATE() all resolve on the clock
+      # the provider is looking at. Override per country if ADHERE+ is deployed elsewhere.
+      APP_TZ: ${APP_TZ:-Africa/Addis_Ababa}
+      TZ: ${APP_TZ:-Africa/Addis_Ababa}
     depends_on:
       db: { condition: service_healthy }
     volumes:
