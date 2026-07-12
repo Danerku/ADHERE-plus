@@ -91,8 +91,175 @@ function queue(item){
   return {queued:true};
 }
 
+// ============================================================================================
+// WORKING FULLY OFFLINE
+//
+// Queueing the WRITES was never enough. Offline, every GET failed too — so the worklists came up
+// empty and there was nothing to attach a record to. A provider with no signal could see nobody and
+// register nobody. In facilities that are offline most of the day, that is the whole tool.
+//
+// Three pieces:
+//   1. READS  — every successful GET is cached. When the network is gone, reads are served from
+//               that cache, so yesterday's patients are still there today.
+//   2. WRITES — a record created offline is given a LOCAL id and stored on the device. It appears
+//               in the worklists immediately, and her chart opens and works like any other.
+//   3. SYNC   — when the queued POST finally lands, the server returns the real id. Every other
+//               queued item that referred to the local id is rewritten before it is sent. The server
+//               never sees a local id, so none of this needs a backend change.
+//
+// WHY LOCAL IDS ARE NEGATIVE INTEGERS, not strings like "tmp-abc".
+// This codebase does `+id`, `Number(id)` and `x.id==id` in dozens of places. A string id becomes
+// NaN the first time it is coerced, and NaN would be written as the episode_id of every child row —
+// silently detaching a woman's partograph from her chart. A negative integer survives every
+// coercion the app performs, and `id < 0` is an unambiguous "not yet synced".
+// ============================================================================================
+const OC='oc', OL='ol', OM='om';                    // read cache | local records | id map
+
+function lsGet(k,d){ try{ const v=JSON.parse(localStorage.getItem(k)); return (v==null)?d:v; }catch(e){ return d; } }
+function lsSet(k,v){
+  try{ localStorage.setItem(k,JSON.stringify(v)); return true; }
+  catch(e){
+    // Out of space. Evict READ CACHE only — never the queue, never a local record, never the id map.
+    // Those are the only copy of a patient's data; the cache can always be refetched.
+    ocEvict();
+    try{ localStorage.setItem(k,JSON.stringify(v)); return true; }
+    catch(e2){ toast('The device is out of storage. Free some space — new records cannot be saved.'); return false; }
+  }
+}
+function ocAll(){ return lsGet(OC,{}); }
+function ocPut(path,data){ const c=ocAll(); c[path]={at:Date.now(),data}; lsSet(OC,c); }
+function ocGet(path){ const c=ocAll(); return c[path]?c[path].data:null; }
+function ocClear(){ try{ localStorage.removeItem(OC); }catch(e){} }      // after a sync: refetch the truth
+function ocEvict(){
+  const c=ocAll(); const keys=Object.keys(c).sort((a,b)=>(c[a].at||0)-(c[b].at||0));
+  keys.slice(0, Math.ceil(keys.length/2)).forEach(k=>delete c[k]);       // drop the oldest half
+  try{ localStorage.setItem(OC,JSON.stringify(c)); }catch(e){ try{ localStorage.removeItem(OC); }catch(e2){} }
+}
+function locAll(){ const a=lsGet(OL,[]); return Array.isArray(a)?a:[]; }
+function locAdd(r){ const a=locAll(); a.push(r); lsSet(OL,a); }
+function locUpdate(id,patch){ const a=locAll(); const i=a.findIndex(x=>String(x.id)===String(id)); if(i>=0){ Object.assign(a[i],patch); lsSet(OL,a); } }
+function locDrop(id){ lsSet(OL, locAll().filter(x=>String(x.id)!==String(id))); }
+
+let _lseq=0;
+function newLocalId(){ _lseq=(_lseq+1)%1000; return -(Date.now()*1000 + _lseq); }   // NEGATIVE integer
+const isLocalId=v=>{ const n=(typeof v==='number')?v:parseInt(v,10); return !isNaN(n) && n<0; };
+
+function idmap(){ return lsGet(OM,{}); }
+function idmapPut(tmp,real){ const m=idmap(); m[String(tmp)]=real; lsSet(OM,m); }
+
+// Which POST paths CREATE something the app later reads back by id, and under what collection the
+// GET returns it. Anything not listed is queued as before (it is a child row that needs no local id).
+const CREATES={ women:'women', episodes:'episodes', pregnancy_tests:'pregnancy_tests',
+  fp_clients:'fp_clients', imm_clients:'imm_clients', pmtct:'pmtct', babies:'babies',
+  observations:'observations', anc_visits:'anc_visits', pnc_visits:'pnc_visits',
+  danger_signs:'danger_signs', maternal_vitals:'maternal_vitals', delivery:'delivery',
+  anc_screening:'anc_screening', referrals:'referrals', checklist:'checklist' };
+
+// Serve a GET from the device. The query shapes the app actually uses are bounded (episode=, ep=,
+// woman=, category=, flag=, client=, mother=, id=, programme=, q=), so the matcher is exact rather
+// than a guess.
+function localRows(path){
+  const [base,qs]=String(path).split('?');
+  const rows=locAll().filter(r=>r._coll===base);
+  if(!qs) return rows;
+  const p=new URLSearchParams(qs);
+  return rows.filter(r=>{
+    for(const [k,v] of p.entries()){
+      if(v==='' || v==null) continue;
+      if(k==='flag'){ if(v==='highrisk' && String(r.high_risk)!=='1') return false; continue; }
+      if(k==='q'){
+        const hay=((r.mrn||'')+' '+(r.first_name||'')+' '+(r.father_name||'')+' '+(r.name||'')).toLowerCase();
+        if(hay.indexOf(String(v).toLowerCase())<0) return false; continue;
+      }
+      let f=null;
+      if(k==='episode') f='episode_id';
+      else if(k==='ep'||k==='id') f='id';
+      else if(k==='woman') f='woman_id';
+      else if(k==='mother') f='mother_id';
+      else if(k==='category') f='service_category';
+      else if(k==='programme') f='programme';
+      else if(k==='client') f=(base==='fp_visits')?'fp_client_id':'client_id';
+      else continue;                                    // a filter we do not model: do not exclude
+      if(String(r[f]) !== String(v)) return false;
+    }
+    return true;
+  });
+}
+// Unsynced records show up alongside the server's, online or off — otherwise a woman registered
+// offline would vanish from the worklist the moment the signal came back but before the flush ran.
+function mergeLocal(path,data){
+  if(!Array.isArray(data)) return data;
+  const loc=localRows(path);
+  if(!loc.length) return data;
+  const have=new Set(data.map(x=>String(x.id)));
+  return data.concat(loc.filter(x=>!have.has(String(x.id))));
+}
+
+// A locally-created episode has no server JOIN behind it, so the chart would render with no name and
+// no MRN. Carry her details across from the woman's record on the device.
+function localWoman(wid){
+  const l=locAll().find(x=>x._coll==='women' && String(x.id)===String(wid));
+  if(l) return l;
+  const c=ocAll();
+  for(const k of Object.keys(c)){
+    const d=c[k].data;
+    if(!Array.isArray(d)) continue;
+    const f=d.find(x=>x && String(x.id)===String(wid) && (x.mrn!==undefined||x.first_name!==undefined));
+    if(f) return f;
+  }
+  return null;
+}
+function decorateLocal(rec, base){
+  if(base!=='episodes') return;
+  const w=localWoman(rec.woman_id); if(!w) return;
+  ['first_name','father_name','mrn','gravida','para','age','height_cm','lnmp','edd','blood_group','rh_factor',
+   'hiv_known_positive','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed',
+   'chronic_htn','diabetes','cardiac_renal','pregnancy_planned','ga_first_contact','late_anc_initiation']
+   .forEach(k=>{ if(w[k]!==undefined) rec[k]=w[k]; });
+}
+
+// Queue a write, and — if it CREATES something — give it a local id and store it so the app can
+// carry on using it immediately.
+function queueWrite(method,path,bodyObj,cid){
+  const base=String(path).split('?')[0];
+  const seg=base.split('/');
+  if(method==='POST' && CREATES[seg[0]]){
+    const tid=newLocalId();
+    const rec=Object.assign({}, bodyObj||{}, {id:tid, _coll:CREATES[seg[0]], _local:1, _at:localDateTime()});
+    decorateLocal(rec, seg[0]);
+    locAdd(rec);
+    queue({method,path,bodyObj,cid,tmp:tid});
+    // Shaped like the server's replies so no caller has to know it happened offline.
+    return {id:tid, ids:[tid], local:true, queued:true};
+  }
+  if(method==='PATCH' && isLocalId(seg[1])) locUpdate(seg[1], bodyObj||{});   // correct a record that has not synced yet
+  return queue({method,path,bodyObj,cid});
+}
+
+// Rewrite local ids to the real ones the server has since given us.
+function subIds(v,m){
+  if(Array.isArray(v)) return v.map(x=>subIds(x,m));
+  if(v && typeof v==='object'){ const o={}; for(const k in v) o[k]=subIds(v[k],m); return o; }
+  const key=String(v);
+  if(/^-\d+$/.test(key) && m[key]!==undefined) return m[key];
+  return v;
+}
+function anyLocalLeft(v,m){
+  if(Array.isArray(v)) return v.some(x=>anyLocalLeft(x,m));
+  if(v && typeof v==='object'){ for(const k in v){ if(anyLocalLeft(v[k],m)) return true; } return false; }
+  const key=String(v);
+  return /^-\d+$/.test(key) && m[key]===undefined;
+}
+
 async function api(method, path, bodyObj){
   const write=method!=='GET'; const cid=write?newCid():null;   // stable key: a replay cannot double-commit
+
+  // A record that has not synced yet lives only on this device. Never ask the server about it — it
+  // has never heard of it, and the 404 would blank her chart.
+  const seg0=String(path).split('?')[0].split('/');
+  if(!write && isLocalId(seg0[1])) return localRows(seg0[0]+'?id='+seg0[1])[0] || null;
+  if(!write && /[?&](ep|episode|woman|mother|client|id)=-\d+/.test(path)) return localRows(path);
+
   let res=null;
   try{
     const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
@@ -101,30 +268,43 @@ async function api(method, path, bodyObj){
   }catch(e){
     // No HTTP response at all: airplane mode, DNS failure, connection refused, mobile data with
     // no route. Nothing reached the server, so the entry is safe to queue and replay.
-    if(write) return queue({method,path,bodyObj,cid});
+    if(write) return queueWrite(method,path,bodyObj,cid);
+    // AND THE READ IS SERVED FROM THE DEVICE. This is what makes the tool usable in a facility with
+    // no signal: the worklists, and every chart she has opened before, are still there.
+    const cached=ocGet(path);
+    if(cached!==null && cached!==undefined) return mergeLocal(path,cached);
+    const loc=localRows(path);
+    if(loc.length) return loc;
     throw e;
   }
   // A RESPONSE IS NOT A SAVE. The old code set reached=true the moment fetch() resolved and only
   // queued when it had NOT resolved — so a 502, a captive portal and an expired session each threw
   // the observation away while telling the provider her entries were "still queued". They were not.
   if(res.status===401){
-    if(write){ queue({method,path,bodyObj,cid}); sessionLost(); return {queued:true}; }
+    if(write){ const r=queueWrite(method,path,bodyObj,cid); sessionLost(); return r; }
     sessionLost(); throw new Error('Your session has expired — please sign in again.');
   }
   if(res.status>=500){                       // 500/502/503/504 — the server is unwell, not the data
-    if(write) return queue({method,path,bodyObj,cid});
+    if(write) return queueWrite(method,path,bodyObj,cid);
+    const c1=ocGet(path); if(c1!==null&&c1!==undefined) return mergeLocal(path,c1);
     throw new Error('The server is not responding (HTTP '+res.status+'). Please try again.');
   }
   let data=null;
   try{ data=await res.json(); }
   catch(e){
     // A 200 that is not JSON is a wifi sign-in page, not a save.
-    if(write) return queue({method,path,bodyObj,cid});
+    if(write) return queueWrite(method,path,bodyObj,cid);
+    const c2=ocGet(path); if(c2!==null&&c2!==undefined) return mergeLocal(path,c2);
     throw new Error('No usable response from the server — you may be behind a wifi sign-in page.');
   }
   // 403 (forbidden / password change required / cross-origin) and 4xx (validation, duplicate MRN)
   // are faults in the REQUEST. Replaying them can never succeed, so they are surfaced, not queued.
   if(!res.ok) throw new Error((data&&data.error)||('HTTP '+res.status));
+
+  // The read succeeded: keep it, so she can still see it when the signal goes. Merge in anything
+  // created on this device that has not synced yet, or a woman registered offline would disappear
+  // from the worklist the moment the network came back but before the queue drained.
+  if(!write){ ocPut(path,data); return mergeLocal(path,data); }
   return data;
 }
 
@@ -154,14 +334,37 @@ async function flush(){
       const it=qRead().find(x=>!tried.has(x.cid) && !(x.by && x.by!==cur));
       if(!it) break;
       tried.add(it.cid);
+
+      // ---- RECONCILE THE LOCAL IDS ----------------------------------------------------------
+      // A woman registered offline was given a local id, and her episode, her partograph and her
+      // babies all point at it. Her POST goes first (the queue is FIFO), the server hands back her
+      // real id, and every later item is rewritten to it here. The SERVER NEVER SEES A LOCAL ID.
+      const m=idmap();
+      const path=String(it.path).replace(/^([^?]*\/)(-\d+)/, (s,pre,id)=> (m[id]!==undefined ? pre+m[id] : s));
+      const body=subIds(it.bodyObj, m);
+      if(anyLocalLeft(body,m) || /\/-\d+/.test(path)){
+        // Her parent record has not synced yet. Do NOT send a row that points at an id the server
+        // cannot resolve — that is how a partograph ends up attached to nothing. FIFO means the
+        // parent is earlier in the queue; stop here and come back on the next flush.
+        break;
+      }
+
       let res=null;
       try{
         const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid;
-        res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:hd,
-          credentials:'include',body:JSON.stringify(it.bodyObj)});
+        res=await fetch(API_BASE+'api/'+path,{method:it.method,headers:hd,
+          credentials:'include',body:JSON.stringify(body)});
       }catch(e){ break; }                     // network dropped again — stop. Everything stays queued.
 
-      if(res.ok){ qDrop(it.cid); continue; }  // sent. Remove THIS item, by cid.
+      if(res.ok){
+        // If this item CREATED something, learn its real id and retire the local copy.
+        if(it.tmp){
+          const d=await res.json().catch(()=>({}));
+          const real=(d && (d.id || (Array.isArray(d.ids)&&d.ids[0]))) || null;
+          if(real){ idmapPut(it.tmp, real); locDrop(it.tmp); ocClear(); }   // refetch the truth next read
+        }
+        qDrop(it.cid); continue;              // sent. Remove THIS item, by cid.
+      }
 
       if(res.status===401){ sessionLost(); break; }   // keep the lot; they replay after sign-in
       if(res.status===403){
@@ -175,9 +378,15 @@ async function flush(){
         if(t>=8){ dlqAdd(it,res.status,'the server kept failing'); qDrop(it.cid); }
         break;                                // server unwell: back off rather than hammer it
       }
-      // 4xx — the server rejected the CONTENT (duplicate MRN, validation). Retrying cannot help.
-      // It goes to the failed list, which is now VISIBLE and recoverable (see failedScreen).
-      dlqAdd(it,res.status,(await res.json().catch(()=>({}))).error||('rejected (HTTP '+res.status+')'));
+      // 4xx — the server rejected the CONTENT. Retrying cannot help. It goes to the failed list,
+      // which is VISIBLE and recoverable (see failedScreen).
+      const why=(await res.json().catch(()=>({}))).error||('rejected (HTTP '+res.status+')');
+      dlqAdd(it,res.status,why);
+      // If this was a record CREATED on this device, the local copy is the only copy — keep it, but
+      // mark it so she is not left thinking it synced. The classic case: two tablets both registered
+      // the same woman offline and the second one collides on her MRN. That is a decision for a
+      // human, not something to silently drop or silently duplicate.
+      if(it.tmp) locUpdate(it.tmp,{_failed:1,_why:(res.status===409?'This MRN already exists — she may already be registered':why)});
       qDrop(it.cid);
     }
   } finally { _flushing=false; paintNet(); }
@@ -198,7 +407,26 @@ function paintNet(){
   n.onclick=(dl||theirs)?(()=>{ location.hash='#failed'; }):null;
   n.title=(dl?'Tap to see the entries that could not be saved.':(theirs?'Entries queued by another user on this device. They will send when that user signs in.':''));
 }
-window.addEventListener('online',()=>{paintNet();flush();}); window.addEventListener('offline',paintNet);
+window.addEventListener('online',()=>{paintNet();flush().then(warmCache);}); window.addEventListener('offline',paintNet);
+
+// FILL THE CACHE WHILE THERE IS SIGNAL, so there is something to work from when there is not.
+// Without this, a provider whose device has never loaded a worklist opens the app in a facility with
+// no signal and sees nothing at all. This runs quietly in the background whenever she is online.
+// A record created on this device and not yet sent. She must be able to SEE that — otherwise she has
+// no way to know that the tablet in her hand holds the only copy of this woman's chart.
+function syncPill(r){
+  if(!r || !isLocalId(r.id)) return '';
+  const l=locAll().find(x=>String(x.id)===String(r.id));
+  if(l && l._failed) return '<span class="pill red" title="'+esc(l._why||'')+'">not sent &mdash; needs attention</span>';
+  return '<span class="pill amber" title="Recorded on this device. It will be sent when you are back online.">on this device &mdash; not sent yet</span>';
+}
+
+async function warmCache(){
+  if(!online() || !ME || ME._offline) return;
+  const paths=['episodes','episodes?category=anc','episodes?category=labour','episodes?category=pnc',
+               'episodes?flag=highrisk','providers','pregnancy_tests','fp_clients','imm_clients','pmtct','women?q='];
+  for(const p of paths){ try{ await api('GET',p); }catch(e){ break; } }   // one failure = signal gone; stop
+}
 
 // The failed queue used to be WRITE-ONLY: a rejected entry was pushed into localStorage.dlq and
 // nothing ever read it back. The provider saw "· 1 failed" and had no way to find out what failed,
@@ -273,8 +501,8 @@ async function boot(){
   // FLUSH AT START-UP. The queue was only ever flushed on the browser's `online` event, which
   // does not fire on page load — so a device that recorded data offline, was closed, and was
   // reopened on a working connection showed "sync N pending" for ever and never sent it.
-  if(ME && !ME._offline) flush();
-  setInterval(()=>{ if(ME && online()) flush(); }, 60000);
+  if(ME && !ME._offline) flush().then(warmCache);
+  setInterval(()=>{ if(ME && online()) flush().then(warmCache); }, 60000);
 }
 $('#logout').onclick=async()=>{
   // Do not let her walk away from unsent records. They are keyed to HER user id, so once she signs
@@ -810,7 +1038,12 @@ async function register(){
         target_pop_code:(tp.value||null),   // required column on all three MoH registers
         height_cm:(+ht.value||null),   // without this, BMI (a Table 4 risk factor) can never be computed
         ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null)});
-      const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
+      // A woman registered offline now gets a LOCAL id and carries straight on into her episode —
+      // this used to stop dead here with "saved (offline queued)", so in a facility with no signal
+      // she could be registered and then nothing further could be recorded for her at all.
+      const wid=w.id;
+      if(!wid){ $('#m').textContent=' could not save'; return; }
+      if(w.local) toast('Registered on this device — she will be sent when you are back online','ok');
 
       await routeNewClient(cat.value, wid, {name:(fn.value+' '+fa.value).trim(), mrn:mrn.value.trim(), age:(+age.value||null),
         result:ptr.value, note:(ptn.value||null), fp:tk('ptfp')});
@@ -1029,7 +1262,7 @@ function wireAssign(){ document.querySelectorAll('select.asgn').forEach(s=>{ s.o
 async function labour(){
   const [rows,provs]=await Promise.all([api('GET','episodes?category=labour').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   app().innerHTML=nav()+`<div class="card"><h3>Labour ward</h3><table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${riskPill(r)}</td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${riskPill(r)}${syncPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No women in labour. Register one.</td></tr>'}
    </table></div>`;
@@ -1676,7 +1909,7 @@ async function pnc(){
    <p class="muted">Women after delivery — whether they delivered here, at another facility, or at home. WHO postnatal contacts: within 24 hours, day 3, day 7, and week 6. Open <b>PNC follow-up</b> to record the mother-and-newborn check.</p>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th></th><th>Provider</th><th>Actions</th></tr>
    ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td>
-    <td>${where(r)}${riskPill(r)}</td>
+    <td>${where(r)}${riskPill(r)}${syncPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#pncvisit/${r.id}">PNC follow-up</a> &middot; <a class="nav" href="#baby/${r.id}">Newborn</a> &middot; <a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No postnatal women yet.</td></tr>'}
    </table></div>`;
@@ -1777,7 +2010,7 @@ async function ancList(){
   const [rows,provs]=await Promise.all([api('GET','episodes?category=anc').catch(()=>[]),api('GET','providers').catch(()=>[])]);
   app().innerHTML=nav()+`<div class="card"><h3>Antenatal care</h3>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${riskPill(r)}</td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${riskPill(r)}${syncPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#patient/${r.id}">Open</a> <button class="sec" data-w="${r.woman_id}" data-to="labour">&rarr; Labour</button></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No antenatal women yet. Register one with service = ANC.</td></tr>'}
    </table><p class="muted">"&rarr; Labour" admits the woman into the labour ward. Higher-risk women are flagged automatically from their ANC screening and gathered under the High risk tab.</p></div>`;
@@ -1790,7 +2023,7 @@ async function highriskList(){
   app().innerHTML=nav()+`<div class="card"><h3>High-risk worklist</h3>
    <p class="muted">Women in antenatal care or labour who carry a risk factor &mdash; flagged automatically from their ANC risk screening. A live worklist to help prioritise who to see first; risk is a status, not a separate ward.</p>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Pathway</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
-   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.service_category||'')}</td><td>${esc(r.status)}${riskPill(r)}</td>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.service_category||'')}</td><td>${esc(r.status)}${riskPill(r)}${syncPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
     <td><a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=7 class=muted>No higher-risk women right now. Women are flagged here automatically from their ANC risk screening.</td></tr>'}
    </table></div>`;
@@ -3698,7 +3931,9 @@ async function patientHub(id){
   const _book=e.ga_first_contact?('booked '+e.ga_first_contact+'w'+(e.late_anc_initiation==1?' (late)':'')):'';
   window.CTX={id:+id, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,_book,e.status].filter(Boolean).join(' · ')};
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
-    <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''}</p>
+    <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''} ${syncPill(e)}</p>
+    ${isLocalId(e.id)?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">
+       This chart exists only on <b>this device</b> so far. Everything you record on it is safe and will be sent to the server automatically when there is a connection. Do not wipe or hand over the tablet before the sync pill reads <b>online</b>.</p>`:''}
     ${e.late_anc_initiation==1?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">Late ANC initiation &mdash; first contact at ${esc(e.ga_first_contact)} weeks.</p>`:''}
     ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select>
       <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
