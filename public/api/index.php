@@ -199,8 +199,13 @@ try {
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
+      // Age was validated on CREATE and not on UPDATE. Age <19 or >35 is a high-risk trigger, so
+      // a typo here silently corrupted the flag — and a blank cleared it.
+      if(array_key_exists('age',$b) && $b['age']!==null && $b['age']!==''){
+        $ag=(int)$b['age']; if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
       $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
-        'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation'],MOH_PERSON_FIELDS)));
+        'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation',
+        'prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal'],MOH_PERSON_FIELDS)));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
   }
 
@@ -271,10 +276,14 @@ try {
               $rc AS risk_codes, $sc AS screen_codes, $an AS anaemia, $mf AS muac_low
             FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
-      // Filter to ONE woman server-side. Without this, callers had to pull the LIMIT-200 list
-      // and filter in the browser — so once a facility passed 200 episodes her own record fell
-      // off the end and the PMTCT delivery-room link silently stopped finding her newborn.
+      // Filter to ONE woman, or ONE episode, server-side. Without this, callers had to pull the
+      // LIMIT-200 list and pick their record out of it in the browser — so once a facility passed
+      // 200 episodes, an older woman resolved to an empty object and the failure was SILENT and
+      // CLINICAL: her Rh-negative / Anti-D banner vanished, a woman on ART was offered an HIV
+      // test, and her delivered partograph reopened for editing.
       if($wom){ $sql.=" AND e.woman_id=?"; $args[]=$wom; }
+      $epOne=(int)($_GET['ep']??0);
+      if($epOne){ $sql.=" AND e.id=?"; $args[]=$epOne; }
       // A high-risk woman who has DELIVERED is still high risk — postpartum haemorrhage and
       // eclampsia both happen after the birth. Excluding 'delivered' dropped exactly the women
       // the postnatal period is dangerous for.
@@ -507,6 +516,7 @@ try {
         $cols="*, (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id) AS infant_count,
                   (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result IS NOT NULL) AS pcr_done,
                   (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result='P') AS pcr_pos,
+                  (SELECT MIN(i.infant_dob) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id) AS first_infant_dob,
                   (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
                   (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_status,
                   (SELECT MAX(f.visit_date) FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother') AS last_seen";
@@ -564,6 +574,14 @@ try {
     if($m==='PATCH' && $id){ $u=require_role($writeRoles); $b=body();
       if($hasFac){ $c=db()->prepare("SELECT id FROM `$tbl` WHERE id=? AND facility_id=?"); $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
       if($pmtctChild){ $c=db()->prepare("SELECT p.id FROM `$tbl` x JOIN pmtct_mothers p ON p.id=x.mother_id WHERE x.id=? AND p.facility_id=?");
+        $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
+      // fp_visits and immunization_doses carry no facility_id of their own, and neither of the
+      // checks above covered them — so ANY authenticated user at ANY facility could overwrite
+      // another facility's FP visit or immunization dose by guessing an integer id, corrupting
+      // their MoH register export. Check ownership through the parent.
+      if($tbl==='fp_visits'){ $c=db()->prepare("SELECT v.id FROM fp_visits v JOIN fp_clients c ON c.id=v.fp_client_id WHERE v.id=? AND c.facility_id=?");
+        $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
+      if($tbl==='immunization_doses'){ $c=db()->prepare("SELECT d.id FROM immunization_doses d JOIN immunization_clients c ON c.id=d.client_id WHERE d.id=? AND c.facility_id=?");
         $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
       $f=array_intersect_key($b,array_flip($allow));
       // A row's OWNER is never patchable. The ownership check above proves the row is yours

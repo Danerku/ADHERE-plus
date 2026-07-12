@@ -62,21 +62,48 @@ function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.n
 
 async function api(method, path, bodyObj){
   const write=method!=='GET'; const cid=write?newCid():null;   // stable key for idempotent (offline-safe) writes
+  let reached=false;                       // did we get an HTTP response at all?
   try{
     const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
     const res=await fetch(API_BASE+'api/'+path,{method,headers,
       credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined});
-    if(!res.ok) throw new Error((await res.json()).error||res.status);
+    reached=true;                          // the server answered — whatever it said, it is not a network failure
+    // The session died under us. Do NOT pretend to be logged in: that is how a provider ends up
+    // filling in a partograph against an empty database and losing the lot.
+    if(res.status===401){ sessionLost(); throw new Error('Your session has expired — please sign in again.'); }
+    if(!res.ok) throw new Error((await res.json().catch(()=>({}))).error||res.status);
     return await res.json();
   }catch(e){
-    if(write && !online()){ queue({method,path,bodyObj,cid}); return {queued:true}; }
+    // QUEUE ON ANY NETWORK FAILURE, not only when the browser admits to being offline.
+    // navigator.onLine is true on a captive portal, a dead upstream, a 502, a DNS failure and
+    // mobile data with no route — every one of which used to throw the observation away.
+    if(write && !reached){ queue({method,path,bodyObj,cid}); paintNet(); return {queued:true}; }
     throw e;
   }
+}
+// An expired session is NOT offline. Tear down the fake logged-in state and make her sign in.
+function sessionLost(){
+  if(!ME) return;
+  ME=null; localStorage.removeItem('me');
+  try{ route(); }catch(e){}
+  toast('Your session has expired. Please sign in again — recent unsaved entries are still queued.');
 }
 function queue(item){ const q=JSON.parse(localStorage.qq||'[]'); item.by=(ME&&ME.id)||null; if(!item.cid) item.cid=newCid(); q.push(item); localStorage.qq=JSON.stringify(q); paintNet(); }
 async function flush(){ let q=JSON.parse(localStorage.qq||'[]'); if(!q.length)return; const cur=(ME&&ME.id)||null; const keep=[];
   for(const it of q){ if(it.by && cur && it.by!==cur){ keep.push(it); continue; }   // shared tablet: never replay another user's queued writes under this session
-    try{ const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid; const res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:hd,credentials:'include',body:JSON.stringify(it.bodyObj)}); if(!res.ok){ if(res.status>=500) keep.push(it); else { const dl=JSON.parse(localStorage.dlq||'[]'); dl.push(Object.assign({status:res.status,at:Date.now()},it)); localStorage.dlq=JSON.stringify(dl); } } }catch(e){ keep.push(it);} }
+    try{ const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid;
+      const res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:hd,credentials:'include',body:JSON.stringify(it.bodyObj)});
+      if(!res.ok){
+        // 401/403 is an AUTH problem, not a data problem. Discarding the entry here threw away
+        // real clinical observations simply because the session had lapsed. Keep them and stop:
+        // they will replay once she signs in again.
+        if(res.status===401||res.status===403){ keep.push(it); sessionLost(); break; }
+        // A repeated 5xx used to be retried for ever, so a poison entry (e.g. a duplicate
+        // delivery hitting a unique key) pinned "sync N pending" on screen permanently.
+        if(res.status>=500){ it.tries=(it.tries||0)+1; if(it.tries<5){ keep.push(it); continue; } }
+        const dl=JSON.parse(localStorage.dlq||'[]'); dl.push(Object.assign({status:res.status,at:Date.now()},it)); localStorage.dlq=JSON.stringify(dl);
+      }
+    }catch(e){ keep.push(it);} }
   localStorage.qq=JSON.stringify(keep); paintNet(); }
 function paintNet(){ const q=JSON.parse(localStorage.qq||'[]'); const n=$('#net');
   const dl=(JSON.parse(localStorage.dlq||'[]')).length; n.textContent=(online()?(q.length?('sync '+q.length+' pending'):'online'):'offline')+(dl?(' · '+dl+' failed'):'');
@@ -90,9 +117,30 @@ async function boot(){
   try{ MODEL=await (await fetch('model/risk_model.json')).json(); RM=new RiskModel(MODEL); }catch(e){}
   try{ NBMODEL=await (await fetch('model/newborn_model.json')).json(); NRM=new RiskModel(NBMODEL); }catch(e){}
   try{ RULES=await (await fetch('model/mch_rules.json')).json(); RE=new RulesEngine(RULES); }catch(e){}
-  try{ const r=await api('GET','me'); ME=r.user; if(ME) localStorage.me=JSON.stringify(ME); }catch(e){}
-  if(!ME && localStorage.me){ ME=JSON.parse(localStorage.me); ME._offline=true; }
+  // Distinguish THREE states that used to be conflated into one:
+  //   (a) the server answered and we have a session  -> log in
+  //   (b) the server answered and said "no user"      -> the session is GONE. Show the login
+  //       screen. Do NOT resurrect the cached user: doing that rendered a full working admin
+  //       UI over an empty database, every write 401'd, and the provider never knew.
+  //   (c) the server could not be reached             -> we are genuinely offline. The cached
+  //       user is legitimate here, because writes will queue and replay.
+  let reachedServer=false;
+  try{
+    const res=await fetch(API_BASE+'api/me',{credentials:'include'});
+    reachedServer=true;
+    const r=await res.json();
+    ME=r.user||null;
+    if(ME) localStorage.me=JSON.stringify(ME);
+    else localStorage.removeItem('me');          // (b) the cached identity is stale — bin it
+  }catch(e){ /* (c) network failure */ }
+  if(!ME && !reachedServer && localStorage.me){ ME=JSON.parse(localStorage.me); ME._offline=true; }
+
   paintNet(); route();
+  // FLUSH AT START-UP. The queue was only ever flushed on the browser's `online` event, which
+  // does not fire on page load — so a device that recorded data offline, was closed, and was
+  // reopened on a working connection showed "sync N pending" for ever and never sent it.
+  if(ME && !ME._offline) flush();
+  setInterval(()=>{ if(ME && online()) flush(); }, 60000);
 }
 $('#logout').onclick=async()=>{ try{ await api('GET','logout'); }catch(e){} ME=null; localStorage.removeItem('me'); location.hash=''; route(); };
 window.addEventListener('hashchange', route);
@@ -628,17 +676,17 @@ async function partograph(id){
   if(!BTS[id]) BTS[id]=new BayesTracker(0.15);
   app().innerHTML=nav()+`<div class="card"><h3>Partograph — episode ${esc(id)} <span id="band" class="pill"></span></h3>${locked?'<div class="pill amber" style="display:inline-block;margin:0 0 8px">Delivered - partograph is read-only</div>':''}
     <div class="grid">
-     <label>Hours active<input id="hrs" type="number" step="0.5" value="1"></label>
-     <label>Cervix cm<input id="cvx" type="number" step="0.5" value="5"></label>
-     <label>Fetal HR<input id="fhr" type="number" value="140"></label>
-     <label>Contractions/10<input id="ctx" type="number" value="3"></label>
+     <label>Hours active<input id="hrs" type="number" step="0.5" placeholder="hours"></label>
+     <label>Cervix cm<input id="cvx" type="number" step="0.5" placeholder="0–10"></label>
+     <label>Fetal HR<input id="fhr" type="number" placeholder="bpm"></label>
+     <label>Contractions/10<input id="ctx" type="number" placeholder="per 10 min"></label>
      <label>Moulding (0–3)<select id="mld"><option value="0">0</option><option value="1">+1</option><option value="2">+2</option><option value="3">+3</option></select></label>
      <label>Caput<select id="cap"><option value="">Not assessed</option><option value="0">0</option><option value="1">+1</option><option value="2">+2</option><option value="3">+3</option></select></label>
      <label>Descent — fifths palpable<input id="dsc" type="number" min="0" max="5" placeholder="5→0 (optional)"></label>
      <label>Amniotic fluid<select id="amn"><option value="">Not assessed</option><option value="I">Intact</option><option value="C">Clear</option><option value="M">Meconium</option><option value="B">Blood</option><option value="A">Absent</option></select></label>
-     <label>Systolic BP<input id="sbp" type="number" value="118"></label>
-     <label>Diastolic BP<input id="dbp" type="number" value="75"></label>
-     <label>Temp °C<input id="tmp" type="number" step="0.1" value="37"></label>
+     <label>Systolic BP<input id="sbp" type="number" placeholder="mmHg"></label>
+     <label>Diastolic BP<input id="dbp" type="number" placeholder="mmHg"></label>
+     <label>Temp °C<input id="tmp" type="number" step="0.1" placeholder="°C"></label>
      <label>Urine protein<select id="uprot"><option value="">Not done</option><option value="neg">Neg</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
      <label>Urine acetone<select id="uacet"><option value="">Not done</option><option value="neg">Neg</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
     </div><button class="act" id="rec" style="margin-top:10px">Record &amp; score</button>
@@ -661,18 +709,49 @@ async function partograph(id){
   if(locked){ ['hrs','cvx','fhr','ctx','mld','dsc','amn','cap','sbp','tmp','uprot','uacet','rec'].forEach(k=>{const el=$('#'+k); if(el)el.disabled=true;}); const rb=$('#rec'); if(rb){ rb.textContent='Delivered - partograph closed'; rb.className='sec'; } }
   $('#rec').onclick=async()=>{
     if(locked) return;
+    // NOTHING IS INVENTED. These fields used to be pre-filled with normal values (FHR 140,
+    // BP 118/75, temp 37), so a provider who measured only the cervix and pressed save recorded
+    // a fabricated fetal heart rate — which was then plotted on the cervicograph, fed to the AI
+    // model, and stored as an observation indistinguishable from a measured one.
+    const miss=[];
+    if(hrs.value==='') miss.push('hours in active labour');
+    if(cvx.value==='') miss.push('cervical dilatation');
+    if(fhr.value==='') miss.push('fetal heart rate');
+    if(miss.length){ $('#rec').disabled=false;
+      modal('Not recorded yet','These have not been measured: <b>'+miss.map(esc).join(', ')+'</b>.<br><br>ADHERE+ will not fill them in for you. The fetal heart rate in particular drives both the cervicograph and the AI score — a value nobody measured is worse than no value at all.');
+      return; }
     const btn=$('#rec'); btn.disabled=true;                         // guard against double-submit
     try{
-    const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:+ctx.value,mld:+mld.value,sbp:+sbp.value,dbp:(+dbp.value||null),tmp:+tmp.value,dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null)};
+    const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:(ctx.value===''?null:+ctx.value),mld:+mld.value,
+             sbp:(sbp.value===''?null:+sbp.value),dbp:(dbp.value===''?null:+dbp.value),tmp:(tmp.value===''?null:+tmp.value),
+             dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null),uprot:(uprot.value||null)};
     const mld3=Math.max(0,Math.min(3,Math.round(o.mld)||0));
     // Save the observation FIRST — a failed save must never show a misleading chart/score.
     const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,bp_diastolic:o.dbp,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
     OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id); obs.push({obs_datetime:new Date().toISOString().slice(0,19).replace('T',' ')}); renderMonSched(id,obs);
     const mecon=(o.amn==='M')?1:0;
-    // dbp used to be FABRICATED as sbp*0.65 because the partograph had no diastolic field.
-    // That silently disabled the DBP>=110 severe-hypertension red flag in clinicalFlags():
-    // a woman at 150/115 was graded amber, not red. Now it is measured and used.
-    const feat=Object.assign({},FEAT_DEFAULTS,MF,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:(o.dbp||Math.round(o.sbp*0.65)),temp:o.tmp});
+    // THE PRE-ECLAMPSIA CLUSTER NOW REACHES THE MODEL. The danger-signs screen has always
+    // collected headache, blurred vision, epigastric pain, clonus and bleeding — and none of
+    // them were ever passed to the scorer, which kept them at their zero defaults. A woman with
+    // the full imminent-eclampsia picture was scored as symptom-free. Same for urine protein.
+    const DS=await api('GET','danger_signs?episode='+id).catch(()=>[]);
+    const ds=(DS||[]).slice(-1)[0]||{};
+    const up=o.uprot;
+    const sym={
+      headache:   (ds.headache==='yes'||ds.headache==1)?1:0,
+      blurred:    (ds.blurred_vision==='yes'||ds.blurred_vision==1)?1:0,
+      epigastric: (ds.epigastric_pain==='yes'||ds.epigastric_pain==1)?1:0,
+      clonus:     (String(ds.dtr_grade||'').match(/3|4|clonus/i))?1:0,
+      bleeding:   (ds.vaginal_bleeding==='yes'||ds.vaginal_bleeding==1)?1:0,
+      urine_prot: (up==='+'?1:(up==='++'?2:(up==='+++'?3:0)))
+    };
+    // dbp is MEASURED, never fabricated. It used to be invented as sbp*0.65, which silently
+    // disabled the DBP>=110 severe-hypertension red flag: a woman at 150/115 was graded amber.
+    // Anything genuinely NOT MEASURED is left out entirely, so the model falls back to its own
+    // trained defaults rather than being handed a number nobody took.
+    const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,
+      ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:o.dbp,temp:o.tmp});
+    Object.keys(feat).forEach(k=>{ if(feat[k]==null||Number.isNaN(feat[k])) delete feat[k]; });
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
     const cf=clinicalFlags(o); const finalBand=escalate(r.band,cf.band);   // safety guardrail
     $('#ai').style.display='block'; $('#prob').textContent=Math.round(r.probability*100)+'%'; $('#prob').className=finalBand;
@@ -680,7 +759,9 @@ async function partograph(id){
     $('#drv').textContent=(cf.reasons.length?('red-flags: '+cf.reasons.join(', ')):'AI band '+r.band);
     const drv=riskDrivers(o,feat); $('#why').innerHTML=drv.length?('<b>Contributing findings:</b> '+drv.map(esc).join(' &middot; ')):'No abnormal intrapartum findings detected.';
     // Newborn — readiness for resuscitation, from the intrapartum picture
-    if(NRM){ const nb=NRM.predict({ga:feat.ga,meconium:mecon,fhr:o.fhr,mld:mld3,cvx:o.cvx,hrs:o.hrs,ctx:o.ctx,sbp:o.sbp,temp:o.tmp,prior_cs:feat.prior_cs,age:feat.age,parity:feat.parity,rom_hours:feat.rom_hours});
+    if(NRM){ const nbf={ga:feat.ga,meconium:mecon,fhr:o.fhr,mld:mld3,cvx:o.cvx,hrs:o.hrs,ctx:o.ctx,sbp:o.sbp,temp:o.tmp,prior_cs:feat.prior_cs,age:feat.age,parity:feat.parity,rom_hours:feat.rom_hours};
+      Object.keys(nbf).forEach(k=>{ if(nbf[k]==null||Number.isNaN(nbf[k])) delete nbf[k]; });   // never hand the model a value nobody measured
+      const nb=NRM.predict(nbf);
       const nel=$('#nbrisk'); nel.style.display='block';
       const nmsg=nb.band==='green'?'low — routine newborn care':(nb.band==='amber'?'elevated — have bag-mask ready, call for help':'high — prepare resuscitation now (bag-mask, skilled attendant)');
       nel.innerHTML='<b>Newborn readiness</b> <span class="pill '+nb.band+'">'+Math.round(nb.probability*100)+'%</span> '+esc(nmsg); }
@@ -1042,17 +1123,46 @@ async function checklist(id){
 }
 
 async function danger(id){
-  app().innerHTML=nav()+`<div class="card"><h3>Warning-sign sheet — episode ${esc(id)}</h3><div class="grid">
+  app().innerHTML=nav()+`<div class="card"><h3>Warning-sign sheet — episode ${esc(id)}</h3>
+   <p class="muted">Headache, visual disturbance, epigastric pain and brisk reflexes together are the warning that eclampsia is imminent. They are recorded here <b>and</b> passed to the intrapartum risk score.</p>
+   <div class="grid">
    <label>Headache<select id="ha"><option value="0">No</option><option value="1">Yes</option></select></label>
    <label>Blurred vision<select id="bv"><option value="0">No</option><option value="1">Yes</option></select></label>
    <label>Epigastric pain<select id="ep"><option value="0">No</option><option value="1">Yes</option></select></label>
    <label>DTR/clonus<select id="dtr"><option>+2</option><option>0</option><option>+1</option><option>+3</option><option>+4</option></select></label>
    <label>Vaginal bleeding<select id="vb"><option value="0">No</option><option value="1">Yes</option></select></label>
    <label>Remark<input id="rk"></label></div>
+   <div id="dgalert"></div>
    <button class="act" id="s" style="margin-top:10px">Save</button><span class="muted" id="m"></span></div>`;
-  $('#s').onclick=async()=>{ const b=$('#s'); if(b.disabled) return; b.disabled=true;
-    try{ await api('POST','danger_signs',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),headache:+ha.value,blurred_vision:+bv.value,epigastric_pain:+ep.value,dtr_grade:dtr.value,vaginal_bleeding:+vb.value,remark:rk.value}); $('#m').textContent=' saved';
-    } finally{ b.disabled=false; } };
+
+  // This sheet used to collect the entire imminent-eclampsia cluster and then simply save it:
+  // no score, no warning, nothing. Now it says what it means.
+  const dgAlerts=()=>{
+    const A=[]; const n=[];
+    if(ha.value==='1') n.push('headache');
+    if(bv.value==='1') n.push('blurred vision');
+    if(ep.value==='1') n.push('epigastric pain');
+    const brisk=(dtr.value==='+3'||dtr.value==='+4');
+    if(brisk) n.push('brisk reflexes / clonus ('+dtr.value+')');
+    if(vb.value==='1') A.push(['red','Vaginal bleeding','Assess the amount and the source. Antepartum haemorrhage is an emergency — get help, secure IV access, and prepare to refer.']);
+    if(n.length>=2 || brisk) A.push(['red','IMMINENT ECLAMPSIA','She has: <b>'+n.map(esc).join(', ')+'</b>.<br>These are the premonitory signs of an eclamptic fit. Check her blood pressure and urine protein <b>now</b>. If pre-eclampsia is confirmed, give magnesium sulphate and an antihypertensive and refer urgently.']);
+    else if(n.length===1) A.push(['amber','Warning sign present','<b>'+esc(n[0])+'</b>. Check her blood pressure and urine protein, and look for the others. Do not leave her unobserved.']);
+    return A;
+  };
+  const paint=()=>{ $('#dgalert').innerHTML=dgAlerts().map(a=>alertBox(a[0],a[1],a[2])).join(''); };
+  ['ha','bv','ep','dtr','vb'].forEach(k=>{const el=$('#'+k); if(el) el.addEventListener('change',paint);});
+  paint();
+
+  $('#s').onclick=async()=>{ const b=$('#s'); if(b.disabled) return;
+    const reds=dgAlerts().filter(a=>a[0]==='red');
+    if(reds.length && !window._dgAck){ window._dgAck=true;
+      modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this.</i>','risk');
+      return; }
+    window._dgAck=false; b.disabled=true;
+    try{ const r=await api('POST','danger_signs',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),headache:+ha.value,blurred_vision:+bv.value,epigastric_pain:+ep.value,dtr_grade:dtr.value,vaginal_bleeding:+vb.value,remark:rk.value});
+      $('#m').textContent=(r&&(r.ids||r.queued))?' saved — these findings will now be included in the next intrapartum risk score':' saved';
+      if(!(r&&r.queued)) b.disabled=false;
+    } catch(e){ b.disabled=false; toast(e.message||'error'); } };
 }
 
 async function delivery(id){
@@ -1145,14 +1255,28 @@ async function delivery(id){
 }
 
 async function pnc(){
-  const [rows,provs]=await Promise.all([api('GET','episodes?category=labour').catch(()=>[]),api('GET','providers').catch(()=>[])]);
-  const del=rows.filter(r=>r.status==='delivered');
+  // THE POSTNATAL LIST MUST INCLUDE WOMEN WHO DID NOT DELIVER HERE. It used to query ONLY
+  // labour episodes with status 'delivered' — so a woman who delivered at home or at another
+  // facility and came in for postnatal care was registered as a PNC episode, redirected to this
+  // screen, and told "No postnatal women yet." She was in no worklist at all, while the Home
+  // tile cheerfully counted her. Home-delivered mothers are the highest-mortality postnatal
+  // group; they were exactly the ones this dropped.
+  const [lab,pncEps,provs]=await Promise.all([
+    api('GET','episodes?category=labour').catch(()=>[]),
+    api('GET','episodes?category=pnc').catch(()=>[]),
+    api('GET','providers').catch(()=>[])]);
+  const del=(lab||[]).filter(r=>r.status==='delivered');
+  const rows=del.concat(pncEps||[]);
+  const where=r=>r.service_category==='pnc'
+    ? '<span class="pill amber">delivered elsewhere</span>'
+    : (r.referred==1?'<span class="pill amber">referred</span>':'');
   app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3>
-   <p class="muted">Women after delivery. WHO postnatal contacts: within 24 hours, day 3, day 7, and week 6. Open <b>PNC follow-up</b> to record the mother-and-newborn check.</p>
-   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Provider</th><th>Actions</th></tr>
-   ${del.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td>
+   <p class="muted">Women after delivery — whether they delivered here, at another facility, or at home. WHO postnatal contacts: within 24 hours, day 3, day 7, and week 6. Open <b>PNC follow-up</b> to record the mother-and-newborn check.</p>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th></th><th>Provider</th><th>Actions</th></tr>
+   ${rows.map(r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td>
+    <td>${where(r)}${riskPill(r)}</td>
     <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
-    <td><a class="nav" href="#pncvisit/${r.id}">PNC follow-up</a> &middot; <a class="nav" href="#baby/${r.id}">Newborn</a> &middot; <a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=5 class=muted>No postnatal women yet.</td></tr>'}
+    <td><a class="nav" href="#pncvisit/${r.id}">PNC follow-up</a> &middot; <a class="nav" href="#baby/${r.id}">Newborn</a> &middot; <a class="nav" href="#patient/${r.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=6 class=muted>No postnatal women yet.</td></tr>'}
    </table></div>`;
   wireAssign(); wireRisk(rows);   // the "Higher risk" pill explains itself on click
 }
@@ -1343,7 +1467,7 @@ async function ancVisits(id){
     <label>Fetal HR<input id="fhr" type="number"></label>
     <label>Presentation<input id="pres" placeholder="cephalic / breech / transverse"></label>
     <label>Pallor (palm &amp; conjunctiva)<select id="pal"><option value="">-</option><option value="pink">Pink</option><option value="pale">Pale</option></select></label>
-    <label>Urine protein<input id="up" placeholder="nil / + / ++"></label>
+    <label>Urine protein<select id="up"><option value="">Not done</option><option value="nil">Nil</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
     <label>Hgb (g/dl)<input id="hb" type="number" step="0.1"></label>
     <label>Fetal movement<select id="fm"><option value="">Not assessed</option><option value="normal">Normal</option><option value="reduced">Reduced</option><option value="absent">Absent</option></select></label>
     <label>Malaria assessed<select id="mal"><option value="">Not assessed</option><option value="no">No symptoms/risk</option><option value="yes">Symptoms/risk - test</option></select></label>
@@ -1430,10 +1554,35 @@ async function ancVisits(id){
     if(muacFlag(mu)) out+=`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">MUAC ${mu} cm — ACUTE MALNUTRITION (&lt;23 cm). Treat per the national protocol and counsel on nutrition.</div>`;
     if(bmi){ const f=bmiFlag(bmi);
       out+=`<div style="background:${f==='normal'?'#e1f5ee':'#faeeda'};border:1px solid ${f==='normal'?'#5dcaa5':'#ef9f27'};color:${f==='normal'?'#04342c':'#633806'};border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">BMI ${bmi} — ${f}${f!=='normal'?' (a high-risk condition, Guideline Table 4)':''}.</div>`; }
+    // ---- THE ALERTS THIS SCREEN NEVER HAD ----
+    // Until now the ANC contact screen warned about anaemia, MUAC and BMI and NOTHING ELSE.
+    // A blood pressure of 170/115 with ++ proteinuria was written to the database in silence:
+    // no warning here, and no entry on the high-risk worklist either.
+    ancAlerts().forEach(a=>{ out+=alertBox(a[0],a[1],a[2]); });
     $('#ancderived').innerHTML=out;
   };
-  const hb_=$('#hb');
-  ['hb','muac','wt'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('input',showDerived);}});
+  // Returns [tone,title,text] for everything dangerous on this form.
+  const ancAlerts=()=>{
+    const A=[];
+    const s=+bps.value||null, d=+bpd.value||null, up=(upEl?upEl.value:'')||'';
+    const proteinuria = /\+\+/.test(up);                      // ++ or +++
+    const sev = (s&&s>=160) || (d&&d>=110);
+    const raised = (s&&s>=140) || (d&&d>=90);
+    if(sev && proteinuria) A.push(['red','SEVERE PRE-ECLAMPSIA','BP '+(s||'?')+'/'+(d||'?')+' with '+esc(up)+' proteinuria. This is an obstetric emergency. Give magnesium sulphate and an antihypertensive per protocol, and refer to a facility that can deliver her — <b>today</b>.']);
+    else if(sev) A.push(['red','SEVERE HYPERTENSION','BP '+(s||'?')+'/'+(d||'?')+' — at or above 160/110. Treat and refer urgently. Check for proteinuria and for symptoms of imminent eclampsia (headache, visual disturbance, epigastric pain).']);
+    else if(raised && proteinuria) A.push(['red','PRE-ECLAMPSIA','BP '+(s||'?')+'/'+(d||'?')+' with '+esc(up)+' proteinuria. Refer for assessment and plan delivery. Monitor closely.']);
+    else if(raised) A.push(['amber','Raised blood pressure','BP '+(s||'?')+'/'+(d||'?')+'. Repeat after rest, check urine protein, and review at every contact. Calcium supplementation is indicated.']);
+    else if(proteinuria) A.push(['amber','Proteinuria','Urine protein '+esc(up)+' with a normal BP. Recheck the BP, exclude urinary infection, and review at the next contact.']);
+    const f=+fhr.value||null;
+    if(f && (f<110||f>160)) A.push([(f<100||f>180)?'red':'amber','Abnormal fetal heart rate',f+' bpm (normal 110–160). '+((f<100||f>180)?'This is severely abnormal — reassess immediately and refer.':'Reassess after rest and repeat. If it persists, refer.')]);
+    const fmv=(fmEl?fmEl.value:'');
+    if(fmv==='absent') A.push(['red','No fetal movement','She reports NO fetal movements. Confirm the fetal heart immediately. If absent, refer urgently.']);
+    else if(fmv==='reduced') A.push(['amber','Reduced fetal movement','Reduced fetal movement — check the fetal heart rate and arrange further assessment. Do not send her home without a plan.']);
+    return A;
+  };
+  const hb_=$('#hb'), upEl=$('#up'), fmEl=$('#fm');
+  ['hb','muac','wt','bps','bpd','fhr'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('input',showDerived);}});
+  ['up','fm'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('change',showDerived); el.addEventListener('input',showDerived);}});
 
   // ---- what this contact requires (Guideline Table 5) ----
   const showDue=()=>{ const n=+cno.value; const box=$('#ancdue');
@@ -1465,6 +1614,15 @@ async function ancVisits(id){
       modal('Contact incomplete','These required fields are missing: '+miss.map(m=>m[1]).join(', ')+'.\n\nThe National ANC Guideline requires blood pressure, weight and MUAC to be measured at every contact.','risk');
       return; }
     $('#ancreqbox').style.display='none';
+    // A RED FLAG MUST BE SEEN. This contact used to save silently, whatever the numbers were.
+    // The record still saves — refusing to save clinical data would be worse — but the provider
+    // cannot get past it without reading it.
+    const reds=ancAlerts().filter(a=>a[0]==='red');
+    if(reds.length && !window._ancAck){
+      window._ancAck=true;
+      modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this contact.</i>','risk');
+      return; }
+    window._ancAck=false;
     const b=$('#asave'); b.disabled=true;
     try{
       const su=['none','alcohol','tobacco','khat','caffeine','other'].filter(s=>tk('su_'+s)).join(',')||null;
@@ -1541,6 +1699,7 @@ async function pncVisits(id){
     <label>EID (HIV-exposed)<select id="neid"><option value="">N/A</option><option value="taken">Sample taken</option><option value="not">Not taken</option></select></label>
     <label>Newborn weight (g)<input id="nwt" type="number" placeholder="grams"></label>
    </div><label>Danger signs / note<input id="dn"></label>
+   <div id="pncalerts"></div>
 
    <details class="moh" open><summary>Newborn assessment <span class="muted">&mdash; MoH PNC register</span></summary>
     <div class="muted" style="font-size:12px;margin-bottom:6px">Problem identified &mdash; tick all that apply.</div>
@@ -1577,6 +1736,45 @@ async function pncVisits(id){
    <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Period</th><th>M temp</th><th>M BP</th><th>Condition</th><th>NB feeding</th></tr>
     ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.visit_period||p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(({'1':'Normal','2':'Complicated, managed','3':'Complicated, referred','4':'Died'})[String(p.maternal_condition||'')]||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
    </table></div>`;
+  // ---- THE ALERTS THIS SCREEN NEVER HAD ----
+  // PNC used to collect newborn convulsions, fast breathing, chest indrawing, lethargy and
+  // jaundice, plus the mother's BP, temperature, pulse and lochia — and fire NOTHING. A newborn
+  // with a possible serious bacterial infection was written to the database in silence, on the
+  // very screen where sick babies actually present.
+  const pncAlerts=()=>{
+    const A=[]; const V=id=>{const el=$('#'+id); return el?el.value:'';};
+    // --- newborn: WHO / IMNCI danger signs ---
+    const nb=[];
+    if(V('ncv')==='yes') nb.push('convulsions');
+    if(V('nfb')==='yes') nb.push('fast breathing');
+    if(V('nci')==='yes') nb.push('chest indrawing');
+    if(V('nlt')==='yes') nb.push('lethargy / not moving');
+    if(V('nf')==='none') nb.push('not feeding');
+    const ntv=+V('nt')||null;
+    if(ntv && (ntv>=37.5||ntv<35.5)) nb.push(ntv>=37.5?('fever '+ntv+'°C'):('hypothermia '+ntv+'°C'));
+    if(nb.length) A.push(['red','Newborn danger signs — POSSIBLE SERIOUS BACTERIAL INFECTION',
+      'This baby has: <b>'+nb.map(esc).join(', ')+'</b>.<br>Any one of these is a WHO danger sign. Give the first dose of antibiotic and <b>refer urgently</b> — do not send this baby home.']);
+    if(V('njd')==='yes') A.push(['red','Severe jaundice','Severe jaundice in a newborn can cause permanent brain injury. Start phototherapy if available and refer urgently for bilirubin assessment.']);
+    if(V('cd')==='infected') A.push(['amber','Infected cord','Red or discharging cord — a source of neonatal sepsis. Treat per protocol and reassess for danger signs.']);
+    else if(V('cd')==='bleeding') A.push(['red','Cord bleeding','Control the bleeding, check the tie, and refer if it does not stop.']);
+    // --- mother ---
+    const ms=meowsScore({sbp:+V('bps')||null,dbp:+V('bpd')||null,pulse:+V('pl')||null,temp:+V('mt')||null});
+    if(ms.band==='red') A.push(['red','MEOWS RED — she is deteriorating','Score '+ms.total+' ('+ms.parts.map(p=>esc(p.label)).join(', ')+'). Call for senior help now and start emergency management.']);
+    else if(ms.band==='amber') A.push(['amber','MEOWS amber','Score '+ms.total+' ('+ms.parts.map(p=>esc(p.label)).join(', ')+'). Increase the frequency of observation and review her.']);
+    const s=+V('bps')||null, d=+V('bpd')||null;
+    if((s&&s>=160)||(d&&d>=110)) A.push(['red','Severe postpartum hypertension','BP '+(s||'?')+'/'+(d||'?')+'. Eclampsia can occur AFTER delivery. Treat and refer.']);
+    if(V('bl')==='heavy') A.push(['red','Heavy lochia — possible secondary PPH','Assess the uterine tone, rub up a contraction, give a uterotonic and refer if bleeding continues.']);
+    else if(V('bl')==='offensive') A.push(['amber','Offensive lochia — possible puerperal sepsis','Check her temperature, examine for tenderness, and treat or refer per protocol.']);
+    if(V('ut')==='atonic') A.push(['red','Atonic uterus','A soft uterus after delivery is the commonest cause of postpartum haemorrhage. Rub up a contraction and give a uterotonic now.']);
+    if(V('pw')==='infected') A.push(['amber','Infected perineum / wound','Treat per protocol and review. Watch for sepsis.']);
+    if(V('mc')==='4') A.push(['red','Maternal death recorded','Ensure this is reported and reviewed through the maternal death surveillance and response process.']);
+    return A;
+  };
+  const paintPnc=()=>{ $('#pncalerts').innerHTML=pncAlerts().map(a=>alertBox(a[0],a[1],a[2])).join(''); };
+  ['ncv','nfb','nci','nlt','njd','nf','cd','bl','br','ut','pw','mc'].forEach(k=>{const el=$('#'+k); if(el) el.addEventListener('change',paintPnc);});
+  ['nt','bps','bpd','pl','mt'].forEach(k=>{const el=$('#'+k); if(el) el.addEventListener('input',paintPnc);});
+  paintPnc();
+
   const csv=(pre,codes)=>codes.filter(c=>tk(pre+c)).join(',')||null;   // MoH multi-code fields are comma-separated
   // MoH PNC items 6 & 7 live on the episode, not the visit. Derive them from the delivery
   // record when she delivered here; otherwise take what the provider entered. Without this
@@ -1586,7 +1784,15 @@ async function pncVisits(id){
     const dob=ecGet('idob') || (dv&&dv.delivery_datetime ? String(dv.delivery_datetime).slice(0,10) : null);
     if(pod||dob) await api('PATCH','episodes/'+id,{place_of_delivery:pod,infant_dob:dob}).catch(()=>{});
   };
-  $('#psave').onclick=async()=>{ const b=$('#psave'); b.disabled=true; try{ await savePncId(); const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
+  $('#psave').onclick=async()=>{
+    // A RED FLAG MUST BE SEEN. The visit still saves — refusing to store clinical data would be
+    // worse — but the provider cannot walk past a newborn danger sign without reading it.
+    const reds=pncAlerts().filter(a=>a[0]==='red');
+    if(reds.length && !window._pncAck){ window._pncAck=true;
+      modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this visit.</i>','risk');
+      return; }
+    window._pncAck=false;
+    const b=$('#psave'); b.disabled=true; try{ await savePncId(); const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
     baby_id:(+pbaby.value||null),
     visit_period:(vp.value||null),maternal_condition:(+mc.value||null),pph:tk('ppph'),other_obs_complication:(ooc.value||null),
     hiv_test_accepted:tk('phta'),hiv_retest_accepted:tk('phrt'),hiv_test_result:(phtr.value||null),
@@ -1605,9 +1811,9 @@ async function babiesScreen(id){
    <div class="grid">
     <label>Birth order<input id="bo" type="number" value="${nextOrder}"></label>
     <label>Sex<select id="sx"><option value="female">Female</option><option value="male">Male</option><option value="ambiguous">Ambiguous</option></select></label>
-    <label>Weight (g)<input id="wg" type="number" value="3000"></label>
-    <label>APGAR 1<input id="a1" type="number" value="8"></label>
-    <label>APGAR 5<input id="a5" type="number" value="9"></label>
+    <label>Weight (g)<input id="wg" type="number" placeholder="grams"></label>
+    <label>APGAR 1<input id="a1" type="number" min="0" max="10" placeholder="0–10"></label>
+    <label>APGAR 5<input id="a5" type="number" min="0" max="10" placeholder="0–10"></label>
     <label>Resuscitated<select id="rs"><option value="0">No</option><option value="1">Yes</option></select></label>
     <label>Outcome<select id="oc"><option value="live_birth">Live birth</option><option value="fresh_stillbirth">Fresh stillbirth</option><option value="macerated_stillbirth">Macerated stillbirth</option><option value="neonatal_death">Neonatal death</option></select></label>
     <label>Dried &amp; stimulated<select id="dr"><option value="">-</option><option value="done">Done</option><option value="not">Not done</option></select></label>
@@ -1729,13 +1935,15 @@ async function vitalsScreen(id){
   const hist=past.map(p=>{ const ms=meowsScore({sbp:p.bp_systolic,dbp:p.bp_diastolic,pulse:p.pulse,temp:p.temperature,rr:p.resp_rate,spo2:p.spo2}); return `<tr><td>${esc((p.obs_datetime||p.recorded_at||'').slice(0,16))}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.pulse||'')}</td><td>${esc(p.temperature||'')}</td><td>${esc(p.resp_rate||'')}</td><td>${esc(p.spo2||'')}</td><td><span class="pill ${ms.band}">${ms.total}</span></td></tr>`; }).join('')||'<tr><td colspan=7 class=muted>No vitals yet.</td></tr>';
   app().innerHTML=nav()+`<div class="card"><h3>Maternal vital signs — episode ${esc(id)}</h3>
    <div class="grid">
-    <label>BP systolic<input id="bps" type="number" value="120"></label>
-    <label>BP diastolic<input id="bpd" type="number" value="80"></label>
-    <label>Pulse<input id="pl" type="number" value="80"></label>
-    <label>Temp °C<input id="tp" type="number" step="0.1" value="37"></label>
-    <label>Resp rate<input id="rr" type="number" value="18"></label>
-    <label>SpO2 %<input id="sp" type="number" value="98"></label>
-   </div><label>Note<input id="ntt"></label>
+    <label>BP systolic<input id="bps" type="number" placeholder="mmHg"></label>
+    <label>BP diastolic<input id="bpd" type="number" placeholder="mmHg"></label>
+    <label>Pulse<input id="pl" type="number" placeholder="bpm"></label>
+    <label>Temp °C<input id="tp" type="number" step="0.1" placeholder="°C"></label>
+    <label>Resp rate<input id="rr" type="number" placeholder="per min"></label>
+    <label>SpO2 %<input id="sp" type="number" placeholder="%"></label>
+   </div>
+   <p class="muted" style="font-size:12px;margin:-4px 0 6px">Leave blank anything you have not measured. A normal value that nobody took would score green on MEOWS &mdash; which is worse than an empty box.</p>
+   <label>Note<input id="ntt"></label>
    <div id="meows" style="margin-top:10px"></div>
    <button class="act" id="vsave" style="margin-top:10px">Record vitals</button> <span class="muted" id="vm"></span></div>
    <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th><th>MEOWS</th></tr>
@@ -1791,7 +1999,7 @@ async function editWoman(wid){
     <label>GTD<input id="gtd" type="number" min="0" value="${esc(w.gtd??'')}"></label>
     <label>Residence<select id="res">${selOpts([['urban','Urban'],['rural','Rural']],w.residence)}</select></label>
     <label>Occupation<input id="occ" value="${esc(w.occupation||'')}"></label>
-    ${ecPicker('lnmp','Last menstrual period')}
+    ${ecPicker('lnmp','Last menstrual period',false,w.lnmp)}
    </div>
    ${String(w.rh_factor||'')==='neg'?`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>Rh NEGATIVE</b> &mdash; Anti-D prophylaxis is indicated (if indirect Coombs negative).</div>`:''}
    ${w.ga_first_contact?`<div style="background:${lateAnc(w.ga_first_contact)?'#faeeda':'#e1f5ee'};border:1px solid ${lateAnc(w.ga_first_contact)?'#ef9f27':'#5dcaa5'};color:${lateAnc(w.ga_first_contact)?'#633806':'#04342c'};border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
@@ -1820,7 +2028,16 @@ async function editWoman(wid){
     </div></details>
 
    <button class="act" id="wsave" style="margin-top:10px">Save changes</button> <span class="muted" id="wm"></span></div>`;
-  $('#wsave').onclick=async()=>{ const _ln=ecGet('lnmp'); const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:(_ln||null),edd:(_ln?addDays(_ln,280):null),
+  $('#wsave').onclick=async()=>{
+    // Age drives the high-risk flag (<19 or >35). It was validated at registration and NOT here,
+    // so a typo on this screen silently corrupted the flag — or cleared it altogether.
+    const ea=ageError(age.value); if(age.value && ea){ modal('Check the age',ea); return; }
+    // LNMP: this screen is the ONLY writer of LNMP and EDD in the whole application, and it used
+    // to write NULL over them on every save — even a phone-number correction destroyed her dates.
+    // The picker is now pre-filled (above); belt and braces, never send an empty one over a
+    // stored value.
+    const _ln=ecGet('lnmp')||w.lnmp||null;
+    const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:_ln,edd:(_ln?addDays(_ln,280):null),
     woreda:(wo.value||null),ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null),
     blood_group:(bg.value||null),rh_factor:(rh.value||null),pregnancy_planned:(pp.value===''?null:+pp.value),
     abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
@@ -2264,7 +2481,10 @@ function pmtctNeedsAction(m){
   if(m.feeding_option==='MF') return true;
   if(!m.last_vl && monthsSince(artRef(m))>=3) return true;   // viral load never done, and it is due
   if(m.delivery_date && m.delivery_outcome==='LB' && !(+m.infant_count)) return true;
-  const ageW=wksSince(m.delivery_date);
+  // Anchor on the INFANT's own date of birth when we have it. Anchoring only on the mother's
+  // delivery date meant an exposed infant of a home or other-facility birth — the register's
+  // own codes 2 and 3 — was never once surfaced as due for her DNA/PCR.
+  const ageW=wksSince(m.first_infant_dob||m.delivery_date);
   if((+m.infant_count) > (+m.pcr_done) && ageW!=null && ageW>=6) return true;   // EID due or overdue
   return false;
 }
@@ -2909,17 +3129,37 @@ async function facilityEdit(id){
 }
 
 async function patientHub(id){
-  const eps=await api('GET','episodes').catch(()=>[]);
-  const e=(eps||[]).find(x=>x.id==id)||{}; const cat=e.service_category;
+  // Fetch HER episode by id. Reading it out of the LIMIT-200 list meant that past 200 episodes
+  // she resolved to {} — and the failure was silent and clinical: the Rh-negative banner
+  // vanished, a woman on ART was offered an HIV test, and the hub rendered labour tiles for an
+  // ANC patient.
+  let e=null;
+  try{ const one=await api('GET','episodes?ep='+id); e=(Array.isArray(one)?one[0]:one)||null; }catch(err){ e=null; }
+  if(!e){
+    app().innerHTML=nav()+`<div class="card"><h3>Record could not be loaded</h3>
+      <p class="muted">This episode could not be found &mdash; it may belong to another facility, or the connection failed. <b>Nothing has been changed.</b> Do not enter data against a record you cannot see.</p>
+      <a class="nav" href="#home">&lsaquo; Home</a></div>`;
+    return;
+  }
+  const cat=e.service_category;
   const delivered=(String(e.status||'')==='delivered'); const isLab=(cat==='labour'||cat==='highrisk'); const postnatal=(cat==='pnc'||(isLab&&delivered));
   const tile=(href,txt)=>`<a class="hubx" href="${href}">${txt}</a>`;
+  // Is she in the PMTCT cohort? Her PMTCT chart used to be invisible from her maternity chart.
+  let pmRec=null;
+  if(e.woman_id){ try{ const pms=await api('GET','pmtct'); pmRec=(pms||[]).find(p=>p.woman_id==e.woman_id)||null; }catch(err){} }
+  const pmTile = pmRec ? tile('#pmtctclient/'+pmRec.id,'PMTCT &amp; exposed infant') : '';
+  // RISK SCREENING BELONGS ON EVERY EPISODE. It used to appear only for ANC — so a woman
+  // admitted straight into labour, unbooked (high risk by definition), had no way anywhere in
+  // the application to record a previous caesarean. The model then scored her prior_cs = 0.
+  const scrTile = tile('#anc/'+id,'Risk screening');
   let tiles, fold='';
   if(ME.role==='observer') tiles=[tile('#report/'+id,'Care summary')];   // read-only role: view the summary, no data-entry screens
-  else if(cat==='anc') tiles=[tile('#anc/'+id,'ANC screening'),tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
-  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
+  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
     if(isLab&&delivered){ const lab=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
       fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  tiles=tiles.filter(Boolean);
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
   let _ga=''; if(e.edd){ const _d=(new Date(e.edd+'T00:00:00')-new Date())/86400000; const _w=Math.round((280-_d)/7); if(_w>0&&_w<=45) _ga=_w+' wga'; }
