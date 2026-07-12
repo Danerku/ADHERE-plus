@@ -421,6 +421,16 @@ window.addEventListener('online',()=>{paintNet();flush().then(warmCache);}); win
 // FILL THE CACHE WHILE THERE IS SIGNAL, so there is something to work from when there is not.
 // Without this, a provider whose device has never loaded a worklist opens the app in a facility with
 // no signal and sees nothing at all. This runs quietly in the background whenever she is online.
+// THE REFERRAL LOOP HAD NO END. `referred` was set and nothing ever wrote `returned_at` — the column
+// existed, the API accepted it, and no screen sent it. So a woman referred out carried the amber
+// "referred" pill for the rest of her care, and a provider looking at the postnatal list could not
+// tell who was still away and who had come back and was sitting in front of her.
+function referPill(r){
+  if(!r || r.referred!=1) return '';
+  if(r.returned_at) return '<span class="pill green" title="Returned '+esc(String(r.returned_at).slice(0,16))+'">referred &middot; came back</span>';
+  return '<span class="pill amber">referred &mdash; away</span>';
+}
+
 // A record created on this device and not yet sent. She must be able to SEE that — otherwise she has
 // no way to know that the tablet in her hand holds the only copy of this woman's chart.
 function syncPill(r){
@@ -749,22 +759,49 @@ function carryForward(w,rhNeg){
 function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date(localDate()+'T12:00:00')):{year:2018,month:1,day:1}); }
 // `def` = default to today. `iso` = pre-select an already-recorded Gregorian date, so that
 // re-saving a form that shows an existing date does not silently blank it.
+// PAGUME HAS 5 DAYS (6 in a leap year) — NOT 30. The picker offered 1..30 for every month, so a
+// provider could pick "Pagume 20", which does not exist. It was accepted silently and resolved about
+// three weeks into the NEXT Ethiopian year (Pagume 20, 2018 -> 25 Sep 2026, which is really
+// Meskerem 15, 2019). A fortnight's error in an LNMP, an EDD or a delivery date, with no warning.
+// The day list is now rebuilt from the month and year actually chosen.
+function ecDayCount(ey,em){
+  if(window.Ethiopian && Ethiopian.daysInMonth) return Ethiopian.daysInMonth(ey,em)||30;
+  return (+em===13) ? ((+ey%4===3)?6:5) : 30;
+}
+// Called whenever the month or the year changes. Rebuilds the day options, keeping the chosen day
+// if it still exists — and dropping it, visibly, if it does not.
+function ecDays(id){
+  const D=document.getElementById(id+'_d'), M=document.getElementById(id+'_m'), Y=document.getElementById(id+'_y');
+  if(!D||!M||!Y) return;
+  const em=+M.value, ey=+Y.value;
+  if(!em||!ey) return;
+  const n=ecDayCount(ey,em);
+  const want=+D.value;
+  D.innerHTML='<option value="">Day</option>'+Array.from({length:n},(_,i)=>i+1)
+    .map(d=>`<option${d===want?' selected':''}>${d}</option>`).join('');
+  if(want>n){ D.value=''; if(typeof toast==='function') toast((Ethiopian?Ethiopian.months[em-1]:'This month')+' has only '+n+' days — choose the day again.'); }
+}
 function ecPicker(id,label,def,iso){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
   let s=null;
   if(iso && window.Ethiopian){ const dt=new Date(iso+'T00:00:00'); if(!isNaN(dt)) s=Ethiopian.toEth(dt); }
   const sel = s || (def ? t : null);                    // an existing date wins over "today"
-  const days=Array.from({length:30},(_,i)=>i+1);
   let years=Array.from({length:7},(_,i)=>t.year-4+i);
   if(sel && years.indexOf(sel.year)<0) years=years.concat([sel.year]).sort((a,b)=>a-b);  // don't lose an out-of-range year
+  const dayN=ecDayCount(sel?sel.year:t.year, sel?sel.month:t.month);
+  const days=Array.from({length:dayN},(_,i)=>i+1);
   return `<label>${label} <span class="muted" style="font-weight:400">(Ethiopian calendar)</span>
    <span style="display:flex;gap:6px;flex-wrap:wrap">
     <select id="${id}_d" style="min-width:80px"><option value="">Day</option>${days.map(d=>`<option${sel&&d===sel.day?' selected':''}>${d}</option>`).join('')}</select>
-    <select id="${id}_m" style="min-width:135px"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${sel&&(i+1)===sel.month?' selected':''}>${m}</option>`).join('')}</select>
-    <select id="${id}_y" style="min-width:90px"><option value="">Year</option>${years.map(y=>`<option${y===(sel?sel.year:t.year)?' selected':''}>${y}</option>`).join('')}</select>
+    <select id="${id}_m" style="min-width:135px" onchange="ecDays('${id}')"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${sel&&(i+1)===sel.month?' selected':''}>${m}</option>`).join('')}</select>
+    <select id="${id}_y" style="min-width:90px" onchange="ecDays('${id}')"><option value="">Year</option>${years.map(y=>`<option${y===(sel?sel.year:t.year)?' selected':''}>${y}</option>`).join('')}</select>
    </span>
    <span class="muted" style="font-weight:400;font-size:11px">format: Day &middot; Month &middot; Year</span></label>`; }
 function ecGet(id){ const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).value, y=($('#'+id+'_y')||{}).value;
-  return (d&&m&&y&&window.Ethiopian)?Ethiopian.toGreg(+y,+m,+d):null; }
+  if(!(d&&m&&y&&window.Ethiopian)) return null;
+  // toGreg now returns null for a date that does not exist, rather than quietly rolling it forward.
+  const g=Ethiopian.toGreg(+y,+m,+d);
+  if(!g && typeof toast==='function') toast('That date does not exist in the Ethiopian calendar — please check it.');
+  return g; }
 // Set an already-rendered EC picker from a Gregorian date (or clear it with null).
 function ecSet(id,iso){ const D=$('#'+id+'_d'), M=$('#'+id+'_m'), Y=$('#'+id+'_y'); if(!D||!M||!Y) return;
   if(!iso||!window.Ethiopian){ D.value=''; M.value=''; return; }
@@ -1113,7 +1150,7 @@ async function findWoman(arg){
       <h3>${esc(((w.first_name||'')+' '+(w.father_name||'')).trim())} <span class="muted" style="font-size:13px;font-weight:400">— MRN ${esc(w.mrn||'')} · ${esc(w.age||'?')} yrs</span></h3>
       <h4>Her episodes</h4>
       <table><tr><th>#</th><th>Service</th><th>Status</th><th></th></tr>
-      ${(eps||[]).map(e=>`<tr><td>${esc(e.id)}</td><td>${esc(e.service_category)}</td><td>${esc(e.status)}${e.referred==1?' <span class="pill amber">referred</span>':''}</td>
+      ${(eps||[]).map(e=>`<tr><td>${esc(e.id)}</td><td>${esc(e.service_category)}</td><td>${esc(e.status)} ${referPill(e)}</td>
         <td><a class="nav" href="#patient/${e.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=4 class=muted>No episodes yet.</td></tr>'}
       </table>
       <h4 style="margin-top:14px">Start a new episode</h4>
@@ -1912,7 +1949,7 @@ async function pnc(){
   };
   const where=r=>{
     const el=elsewhere(r);
-    return (el?`<span class="pill amber">${el}</span> `:'') + (r.referred==1?'<span class="pill amber">referred</span>':'');
+    return (el?`<span class="pill amber">${el}</span> `:'') + referPill(r);
   };
   app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3>
    <p class="muted">Women after delivery — whether they delivered here, at another facility, or at home. WHO postnatal contacts: within 24 hours, day 3, day 7, and week 6. Open <b>PNC follow-up</b> to record the mother-and-newborn check.</p>
@@ -3943,6 +3980,10 @@ async function patientHub(id){
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''} ${syncPill(e)}</p>
     ${isLocalId(e.id)?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">
        This chart exists only on <b>this device</b> so far. Everything you record on it is safe and will be sent to the server automatically when there is a connection. Do not wipe or hand over the tablet before the sync pill reads <b>online</b>.</p>`:''}
+    ${(e.referred==1 && !e.returned_at)?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">
+       <b>Referred out</b>${e.referred_at?(' on '+esc(String(e.referred_at).slice(0,16))):''} &mdash; she has not been recorded as back.
+       <button id="epreturn" class="sm" style="margin-left:6px">She has come back</button></p>`:''}
+    ${(e.referred==1 && e.returned_at)?`<p class="muted" style="font-size:12px;margin:4px 0">Referred out${e.referred_at?(' on '+esc(String(e.referred_at).slice(0,16))):''} &middot; came back on ${esc(String(e.returned_at).slice(0,16))}.</p>`:''}
     ${e.late_anc_initiation==1?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">Late ANC initiation &mdash; first contact at ${esc(e.ga_first_contact)} weeks.</p>`:''}
     ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select>
       <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
@@ -3965,6 +4006,14 @@ async function patientHub(id){
     const r=await api('PATCH','episodes/'+id,{status:'closed'});
     if(r&&(r.ok||r.closed)){ toast('Episode closed','ok'); patientHub(id); }
     else { cbtn.disabled=false; toast((r&&r.error)||'Could not close'); }
+  };
+  // CLOSING THE REFERRAL LOOP. She came back. Record it, so the worklist stops saying she is away.
+  const retb=$('#epreturn');
+  if(retb) retb.onclick=async()=>{
+    retb.disabled=true;
+    const r=await api('PATCH','episodes/'+id,{returned_at:localDateTime()});
+    if(r&&(r.ok||r.queued)){ toast('Recorded — she is back from referral','ok'); patientHub(id); }
+    else { retb.disabled=false; toast((r&&r.error)||'Could not record'); }
   };
   const rbtn=$('#epreopen');
   if(rbtn) rbtn.onclick=async()=>{

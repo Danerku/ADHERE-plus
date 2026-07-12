@@ -19,10 +19,30 @@
     var month=Math.floor(n/30)+1, day=(n%30)+1;
     return {year:year, month:month, day:day, monthName:MON[month-1], monthAmh:AMH[month-1]};
   }
-  function toGreg(ey,em,ed){ var gg=jdn2greg(e2jdn(+ey,+em,+ed));
+  // PAGUME IS NOT A 30-DAY MONTH. The Ethiopian year is twelve months of 30 days plus Pagume, the
+  // thirteenth, which has 5 days — 6 in a leap year (Ethiopian year mod 4 == 3). The date picker
+  // offered 30 days for every month, so "Pagume 20" was accepted and silently resolved about three
+  // weeks into the NEXT Ethiopian year: Pagume 20, 2018 became 25 Sep 2026, which is really
+  // Meskerem 15, 2019. A fortnight's error in an LNMP, an EDD, or a delivery date, with no warning.
+  function isLeap(ey){ return (+ey % 4) === 3; }
+  function daysInMonth(ey, em){
+    em = +em;
+    if(em < 1 || em > 13) return 0;
+    if(em <= 12) return 30;
+    return isLeap(ey) ? 6 : 5;                       // Pagume
+  }
+  function isValid(ey, em, ed){
+    ey=+ey; em=+em; ed=+ed;
+    if(!ey || !em || !ed) return false;
+    return ed >= 1 && ed <= daysInMonth(ey, em);
+  }
+  function toGreg(ey,em,ed){
+    if(!isValid(ey,em,ed)) return null;              // refuse a date that does not exist
+    var gg=jdn2greg(e2jdn(+ey,+em,+ed));
     return gg.y+'-'+('0'+gg.m).slice(-2)+'-'+('0'+gg.d).slice(-2); }  // returns 'YYYY-MM-DD'
   function fmt(dateOrY,m,d){ var e=toEth(dateOrY,m,d); return e.monthName+' '+e.day+', '+e.year+' E.C.'; }
   function fmtAmh(dateOrY,m,d){ var e=toEth(dateOrY,m,d); return e.monthAmh+' '+e.day+', '+e.year+' ዓ.ም'; }
-  g.Ethiopian={toEth:toEth, toGreg:toGreg, months:MON, monthsAmh:AMH, fmt:fmt, fmtAmh:fmtAmh};
+  g.Ethiopian={toEth:toEth, toGreg:toGreg, months:MON, monthsAmh:AMH, fmt:fmt, fmtAmh:fmtAmh,
+               daysInMonth:daysInMonth, isLeap:isLeap, isValid:isValid};
 })(typeof window!=='undefined'?window:global);
 if(typeof module!=='undefined') module.exports=(typeof window!=='undefined'?window:global).Ethiopian;
