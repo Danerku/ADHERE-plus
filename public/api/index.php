@@ -119,7 +119,7 @@ try {
 
   // ---- episodes ----
   if ($r==='episodes'){
-    if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $flag=$_GET['flag']??null;
+    if($m==='GET'){ $u=user(); $cat=$_GET['category']??null; $flag=$_GET['flag']??null; $wom=(int)($_GET['woman']??0);
       // Derived risk flag (no user input).
       // Age: National ANC Guideline 2022, Table 4 — high risk is age <19 OR >35.
       // (Not <18/>=35. The guideline is explicit; an 18-year-old and a 36-year-old both qualify.)
@@ -157,6 +157,10 @@ try {
               $rc AS risk_codes, $sc AS screen_codes, $an AS anaemia, $mf AS muac_low
             FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
+      // Filter to ONE woman server-side. Without this, callers had to pull the LIMIT-200 list
+      // and filter in the browser — so once a facility passed 200 episodes her own record fell
+      // off the end and the PMTCT delivery-room link silently stopped finding her newborn.
+      if($wom){ $sql.=" AND e.woman_id=?"; $args[]=$wom; }
       if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
@@ -287,7 +291,7 @@ try {
         'partner_accepted','partner_result','partner_target_pop','partner_linked_art',
         'tb_screening','inh_start_date','tb_rx_date','tb_unit_number','cd4_count','who_stage','cpt_started',
         'art_start_date','art_regimen','cnsl_ccd','cnsl_nutrition','remark','cohort_month0']],
-    'pmtct_infants'=>['pmtct_infants',['mother_id','baby_id','mrn','hei_enrol_date','arv_start_date','feeding_6m',
+    'pmtct_infants'=>['pmtct_infants',['mother_id','baby_id','mrn','infant_dob','hei_enrol_date','arv_start_date','feeding_6m',
         'cpt_age_weeks','pcr_age_weeks','pcr_result','rapid_ab_result','outcome']],
     'pmtct_fu'=>['pmtct_followup',['mother_id','subject','infant_id','month_no','visit_date','status','viral_load','vl_value','note']],
   ];
@@ -297,7 +301,26 @@ try {
     // PMTCT child rows hang off the mother, who is the one carrying facility_id
     $pmtctChild = in_array($tbl,['pmtct_infants','pmtct_followup']);
     $ownsMother = function($mid) use($u){ $c=db()->prepare("SELECT id FROM pmtct_mothers WHERE id=? AND facility_id=?"); $c->execute([(int)$mid,$u['facility_id']]); return (bool)$c->fetch(); };
+    // PMTCT records clinical results (ART regimen, CD4, viral load, infant DNA/PCR), so it is
+    // gated to clinicians like every other clinical table — not to data recorders.
+    $pmtctTbl = ($pmtctChild || $tbl==='pmtct_mothers');
+    $writeRoles = $pmtctTbl ? ['provider','admin'] : ['recorder','provider','admin'];
     if($m==='GET'){
+      // Single mother by id. Without this the client screen had to pick her out of the
+      // LIMIT-300 list — so past 300 mothers she resolved to an empty object, showed a
+      // false "not on ART" alert, and SAVING blanked nine columns of her real record.
+      if($tbl==='pmtct_mothers' && $id){
+        $st=db()->prepare("SELECT *,
+              (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id) AS infant_count,
+              (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result IS NOT NULL) AS pcr_done,
+              (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result='P') AS pcr_pos,
+              (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
+              (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_status
+            FROM pmtct_mothers WHERE id=? AND facility_id=?");
+        $st->execute([$id,$u['facility_id']]); $row=$st->fetch();
+        if(!$row) err('not found',404);
+        out($row);
+      }
       if($tbl==='fp_visits'){ $st=db()->prepare("SELECT v.* FROM fp_visits v JOIN fp_clients c ON c.id=v.fp_client_id WHERE c.facility_id=? AND v.fp_client_id=? ORDER BY v.visit_no, v.id");
         $st->execute([$u['facility_id'],(int)($_GET['client']??0)]); out($st->fetchAll()); }
       if($tbl==='immunization_doses'){ $st=db()->prepare("SELECT d.* FROM immunization_doses d JOIN immunization_clients c ON c.id=d.client_id WHERE c.facility_id=? AND d.client_id=? ORDER BY d.dose_no");
@@ -314,8 +337,12 @@ try {
         : "*";
       // the PMTCT list carries its infants and latest viral load, so the cohort can be read at a glance
       if($tbl==='pmtct_mothers'){
+        // pcr_pos is the one that matters: a POSITIVE infant PCR counts as "tested", so
+        // without a separate positive count the worklist cleared her flag and painted her
+        // green at the exact moment transmission was confirmed. Never again.
         $cols="*, (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id) AS infant_count,
                   (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result IS NOT NULL) AS pcr_done,
+                  (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result='P') AS pcr_pos,
                   (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
                   (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_status,
                   (SELECT MAX(f.visit_date) FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother') AS last_seen";
@@ -323,7 +350,7 @@ try {
       $st=db()->prepare("SELECT $cols FROM `$tbl` WHERE facility_id=?$extra AND (COALESCE(mrn,'') LIKE ? OR COALESCE(name,'') LIKE ?) ORDER BY id DESC LIMIT 300");
       $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll());
     }
-    if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
+    if($m==='POST'){ $u=require_role($writeRoles); $b=body();
       $row=array_intersect_key($b,array_flip($allow));
       if($hasFac){ $row['facility_id']=$u['facility_id']; }
       $row['recorded_by']=$u['id'];
@@ -332,8 +359,25 @@ try {
       if($tbl==='immunization_doses'){ $c=db()->prepare("SELECT id FROM immunization_clients WHERE id=? AND facility_id=?"); $c->execute([$row['client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('immunization client not in your facility',404);
         // one row per dose: re-recording a dose updates its date rather than duplicating it
         db()->prepare("DELETE FROM immunization_doses WHERE client_id=? AND dose_no=?")->execute([$row['client_id'],$row['dose_no']]); }
-      if($pmtctChild){ if(!$ownsMother($row['mother_id']??0)) err('PMTCT client not in your facility',404); }
+      if($pmtctChild){
+        if(!$ownsMother($row['mother_id']??0)) err('PMTCT client not in your facility',404);
+        // An infant_id must belong to THAT mother — otherwise a follow-up row could be
+        // hung off someone else's infant.
+        if(!empty($row['infant_id'])){
+          $c=db()->prepare("SELECT id FROM pmtct_infants WHERE id=? AND mother_id=?");
+          $c->execute([(int)$row['infant_id'],(int)$row['mother_id']]);
+          if(!$c->fetch()) err('that infant does not belong to this mother',400);
+        }
+      }
       if($tbl==='pmtct_mothers'){
+        if(trim((string)($row['name']??''))==='') err('name is required');
+        if(isset($row['age']) && $row['age']!==null && ((int)$row['age']<10 || (int)$row['age']>60)) err('age must be between 10 and 60');
+        // Enrolling the same woman twice splits her cohort in half. Refuse it.
+        if(!empty($row['art_number'])){
+          $c=db()->prepare("SELECT id FROM pmtct_mothers WHERE art_number=? AND facility_id=?");
+          $c->execute([$row['art_number'],$u['facility_id']]);
+          if($x=$c->fetch()) err('a mother with that ART number is already enrolled (record '.$x['id'].')',409);
+        }
         // Month 0 is the shared cohort event for BOTH the maternal and the HEI cohort.
         if(empty($row['cohort_month0'])) $row['cohort_month0']=substr(($row['booking_date']??date('Y-m-d')),0,7);
       }
@@ -343,11 +387,16 @@ try {
             ->execute([$row['mother_id'],$row['subject']??'mother',$row['month_no']??0,$row['infant_id']??null]);
       }
       $id2=insert($tbl,$row); audit('create',$tbl,$id2); out(['id'=>$id2],201); }
-    if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
+    if($m==='PATCH' && $id){ $u=require_role($writeRoles); $b=body();
       if($hasFac){ $c=db()->prepare("SELECT id FROM `$tbl` WHERE id=? AND facility_id=?"); $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
       if($pmtctChild){ $c=db()->prepare("SELECT p.id FROM `$tbl` x JOIN pmtct_mothers p ON p.id=x.mother_id WHERE x.id=? AND p.facility_id=?");
         $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
       $f=array_intersect_key($b,array_flip($allow));
+      // A row's OWNER is never patchable. The ownership check above proves the row is yours
+      // NOW; letting mother_id/infant_id/woman_id through would let you re-parent it into
+      // another facility's chart afterwards — injecting a fabricated PCR result into their
+      // worklist and their register. Strip them.
+      unset($f['mother_id'], $f['infant_id'], $f['woman_id'], $f['fp_client_id']);
       foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
       audit('update',$tbl,$id,array_keys($f)); out(['ok'=>true]); }
   }
@@ -426,10 +475,16 @@ try {
        'known_positive'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.known_positive IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'on_art'       =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (e.art_start_date IS NOT NULL OR e.known_positive=1)".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'art_in_labour'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.art_during_labour='Y'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       // These MUST read the LATEST value per mother, not "ever". Counting "ever" meant a woman
+       // who suppressed at month 3 and rebounded at month 9 was counted as suppressed AND
+       // detectable, and a woman traced back after being lost stayed "lost" forever —
+       // systematically overstating suppression, which is the headline PMTCT indicator.
        'vl_done'      =>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'vl_suppressed'=>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load='undetectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'vl_detectable'=>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load='detectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'ltf'          =>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.status='ltf'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_suppressed'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='undetectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_detectable'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='detectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'ltf'          =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='ltf'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       // Transmission that already happened — the number this module exists to drive to zero.
+       'infant_positive'=>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result='P'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'infants'      =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'infant_arv'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.arv_start_date IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'pcr_done'     =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
@@ -554,7 +609,7 @@ try {
       // One row per HIV-exposed infant, falling back to a mother-only row when she has not
       // yet delivered — the paper register works the same way: the mother's line is opened at
       // booking and the infant columns are filled in later.
-      $st=db()->prepare("SELECT p.*, i.id AS infant_row_id, i.mrn AS infant_mrn, i.hei_enrol_date, i.arv_start_date,
+      $st=db()->prepare("SELECT p.*, i.id AS infant_row_id, i.mrn AS infant_mrn, i.infant_dob, i.hei_enrol_date, i.arv_start_date,
              i.feeding_6m, i.cpt_age_weeks, i.pcr_age_weeks, i.pcr_result, i.rapid_ab_result, i.outcome AS infant_outcome,
              (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=p.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
              (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=p.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS mother_status
