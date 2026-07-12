@@ -60,55 +60,184 @@ function riskDrivers(o,feat){ const D=[];
 const online=()=>navigator.onLine;
 function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.now()+Math.random().toString(36).slice(2); } }
 
+// ============================================================================================
+// THE OFFLINE QUEUE — where a facility loses a real record
+//
+// localStorage is the only durable store on the device and it is NOT transactional. Every write
+// below therefore RE-READS, modifies, and writes back, and only ever removes an item by its cid.
+// The previous version snapshotted the queue at the top of flush() and wrote the survivors back
+// at the bottom; anything a provider saved DURING that flush was silently erased by the write-back,
+// and one auth failure erased the entire un-attempted tail of the queue.
+// ============================================================================================
+function qRead(){ try{ const a=JSON.parse(localStorage.qq||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function qWrite(a){ try{ localStorage.qq=JSON.stringify(a); }catch(e){ toast('The device is out of storage — a record could not be queued. Free space and try again.'); } }
+function qDrop(cid){ qWrite(qRead().filter(x=>x.cid!==cid)); }              // remove by identity, never by position
+function qBump(cid){ const q=qRead(); const i=q.findIndex(x=>x.cid===cid); if(i<0) return 0; q[i].tries=(q[i].tries||0)+1; qWrite(q); return q[i].tries; }
+function dlqRead(){ try{ const a=JSON.parse(localStorage.dlq||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function dlqWrite(a){ try{ localStorage.dlq=JSON.stringify(a); }catch(e){} }
+function dlqAdd(it,status,why){ const d=dlqRead(); d.push(Object.assign({},it,{status,why,failed_at:localDateTime()})); dlqWrite(d); }
+
+function queue(item){
+  item.by=(ME&&ME.id)||null;
+  item.by_name=(ME&&ME.full_name)||'';
+  item.queued_at=localDateTime();
+  if(!item.cid) item.cid=newCid();
+  const q=qRead(); q.push(item); qWrite(q); paintNet();
+  return {queued:true};
+}
+
 async function api(method, path, bodyObj){
-  const write=method!=='GET'; const cid=write?newCid():null;   // stable key for idempotent (offline-safe) writes
-  let reached=false;                       // did we get an HTTP response at all?
+  const write=method!=='GET'; const cid=write?newCid():null;   // stable key: a replay cannot double-commit
+  let res=null;
   try{
     const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
-    const res=await fetch(API_BASE+'api/'+path,{method,headers,
+    res=await fetch(API_BASE+'api/'+path,{method,headers,
       credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined});
-    reached=true;                          // the server answered — whatever it said, it is not a network failure
-    // The session died under us. Do NOT pretend to be logged in: that is how a provider ends up
-    // filling in a partograph against an empty database and losing the lot.
-    if(res.status===401){ sessionLost(); throw new Error('Your session has expired — please sign in again.'); }
-    if(!res.ok) throw new Error((await res.json().catch(()=>({}))).error||res.status);
-    return await res.json();
   }catch(e){
-    // QUEUE ON ANY NETWORK FAILURE, not only when the browser admits to being offline.
-    // navigator.onLine is true on a captive portal, a dead upstream, a 502, a DNS failure and
-    // mobile data with no route — every one of which used to throw the observation away.
-    if(write && !reached){ queue({method,path,bodyObj,cid}); paintNet(); return {queued:true}; }
+    // No HTTP response at all: airplane mode, DNS failure, connection refused, mobile data with
+    // no route. Nothing reached the server, so the entry is safe to queue and replay.
+    if(write) return queue({method,path,bodyObj,cid});
     throw e;
   }
+  // A RESPONSE IS NOT A SAVE. The old code set reached=true the moment fetch() resolved and only
+  // queued when it had NOT resolved — so a 502, a captive portal and an expired session each threw
+  // the observation away while telling the provider her entries were "still queued". They were not.
+  if(res.status===401){
+    if(write){ queue({method,path,bodyObj,cid}); sessionLost(); return {queued:true}; }
+    sessionLost(); throw new Error('Your session has expired — please sign in again.');
+  }
+  if(res.status>=500){                       // 500/502/503/504 — the server is unwell, not the data
+    if(write) return queue({method,path,bodyObj,cid});
+    throw new Error('The server is not responding (HTTP '+res.status+'). Please try again.');
+  }
+  let data=null;
+  try{ data=await res.json(); }
+  catch(e){
+    // A 200 that is not JSON is a wifi sign-in page, not a save.
+    if(write) return queue({method,path,bodyObj,cid});
+    throw new Error('No usable response from the server — you may be behind a wifi sign-in page.');
+  }
+  // 403 (forbidden / password change required / cross-origin) and 4xx (validation, duplicate MRN)
+  // are faults in the REQUEST. Replaying them can never succeed, so they are surfaced, not queued.
+  if(!res.ok) throw new Error((data&&data.error)||('HTTP '+res.status));
+  return data;
 }
+
 // An expired session is NOT offline. Tear down the fake logged-in state and make her sign in.
 function sessionLost(){
   if(!ME) return;
   ME=null; localStorage.removeItem('me');
   try{ route(); }catch(e){}
-  toast('Your session has expired. Please sign in again — recent unsaved entries are still queued.');
+  const n=qRead().length;
+  toast('Your session has expired. Please sign in again'+(n?(' — '+n+' unsent '+(n===1?'entry is':'entries are')+' safely queued and will be sent when you do.'):'.'));
 }
-function queue(item){ const q=JSON.parse(localStorage.qq||'[]'); item.by=(ME&&ME.id)||null; if(!item.cid) item.cid=newCid(); q.push(item); localStorage.qq=JSON.stringify(q); paintNet(); }
-async function flush(){ let q=JSON.parse(localStorage.qq||'[]'); if(!q.length)return; const cur=(ME&&ME.id)||null; const keep=[];
-  for(const it of q){ if(it.by && cur && it.by!==cur){ keep.push(it); continue; }   // shared tablet: never replay another user's queued writes under this session
-    try{ const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid;
-      const res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:hd,credentials:'include',body:JSON.stringify(it.bodyObj)});
-      if(!res.ok){
-        // 401/403 is an AUTH problem, not a data problem. Discarding the entry here threw away
-        // real clinical observations simply because the session had lapsed. Keep them and stop:
-        // they will replay once she signs in again.
-        if(res.status===401||res.status===403){ keep.push(it); sessionLost(); break; }
-        // A repeated 5xx used to be retried for ever, so a poison entry (e.g. a duplicate
-        // delivery hitting a unique key) pinned "sync N pending" on screen permanently.
-        if(res.status>=500){ it.tries=(it.tries||0)+1; if(it.tries<5){ keep.push(it); continue; } }
-        const dl=JSON.parse(localStorage.dlq||'[]'); dl.push(Object.assign({status:res.status,at:Date.now()},it)); localStorage.dlq=JSON.stringify(dl);
+
+let _flushing=false;
+async function flush(){
+  // RE-ENTRANCY GUARD. boot(), the 60-second timer and the browser's 'online' event can all fire
+  // at once. Two concurrent flushes replay the same items — and because the server claimed the
+  // idempotency key only AFTER committing, both passed the duplicate check and both inserted.
+  // That is a duplicate episode, a duplicate visit, a duplicate baby.
+  if(_flushing) return;
+  _flushing=true;
+  try{
+    const cur=(ME&&ME.id)||null;
+    if(!cur || !online()) return;
+    const tried=new Set();
+    for(;;){
+      // Re-read every iteration: anything the provider saves mid-flush must survive.
+      const it=qRead().find(x=>!tried.has(x.cid) && !(x.by && x.by!==cur));
+      if(!it) break;
+      tried.add(it.cid);
+      let res=null;
+      try{
+        const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid;
+        res=await fetch(API_BASE+'api/'+it.path,{method:it.method,headers:hd,
+          credentials:'include',body:JSON.stringify(it.bodyObj)});
+      }catch(e){ break; }                     // network dropped again — stop. Everything stays queued.
+
+      if(res.ok){ qDrop(it.cid); continue; }  // sent. Remove THIS item, by cid.
+
+      if(res.status===401){ sessionLost(); break; }   // keep the lot; they replay after sign-in
+      if(res.status===403){
+        // NOT a session problem. 403 is also returned for "password change required" and for the
+        // CSRF origin check. Signing her out here put the app in an endless logout loop that she
+        // could not escape and the queue never drained. Stop quietly and try again later.
+        break;
       }
-    }catch(e){ keep.push(it);} }
-  localStorage.qq=JSON.stringify(keep); paintNet(); }
-function paintNet(){ const q=JSON.parse(localStorage.qq||'[]'); const n=$('#net');
-  const dl=(JSON.parse(localStorage.dlq||'[]')).length; n.textContent=(online()?(q.length?('sync '+q.length+' pending'):'online'):'offline')+(dl?(' · '+dl+' failed'):'');
-  n.className='pill '+(online()?(q.length?'amber':'green'):'red'); }
+      if(res.status>=500){
+        const t=qBump(it.cid);
+        if(t>=8){ dlqAdd(it,res.status,'the server kept failing'); qDrop(it.cid); }
+        break;                                // server unwell: back off rather than hammer it
+      }
+      // 4xx — the server rejected the CONTENT (duplicate MRN, validation). Retrying cannot help.
+      // It goes to the failed list, which is now VISIBLE and recoverable (see failedScreen).
+      dlqAdd(it,res.status,(await res.json().catch(()=>({}))).error||('rejected (HTTP '+res.status+')'));
+      qDrop(it.cid);
+    }
+  } finally { _flushing=false; paintNet(); }
+}
+
+function paintNet(){
+  const n=$('#net'); if(!n) return;
+  const q=qRead(), cur=(ME&&ME.id)||null;
+  const mine=q.filter(x=>!x.by || x.by===cur).length;
+  const theirs=q.length-mine;                       // queued by someone else on this shared tablet
+  const dl=dlqRead().length;
+  let t = online() ? (mine?('sync '+mine+' pending'):'online') : 'offline';
+  if(theirs) t += ' · '+theirs+' for another user';
+  if(dl)     t += ' · '+dl+' failed';
+  n.textContent=t;
+  n.className='pill '+(!online()?'red':((mine||dl)?'amber':'green'));
+  n.style.cursor=(dl||theirs)?'pointer':'';
+  n.onclick=(dl||theirs)?(()=>{ location.hash='#failed'; }):null;
+  n.title=(dl?'Tap to see the entries that could not be saved.':(theirs?'Entries queued by another user on this device. They will send when that user signs in.':''));
+}
 window.addEventListener('online',()=>{paintNet();flush();}); window.addEventListener('offline',paintNet);
+
+// The failed queue used to be WRITE-ONLY: a rejected entry was pushed into localStorage.dlq and
+// nothing ever read it back. The provider saw "· 1 failed" and had no way to find out what failed,
+// for whom, or to do anything about it. Her record was unreachable JSON on a shared tablet.
+async function failedScreen(){
+  const dl=dlqRead(), cur=(ME&&ME.id)||null;
+  const theirs=qRead().filter(x=>x.by && x.by!==cur);
+  const fmt=o=>esc(JSON.stringify(o.bodyObj||{},null,1).slice(0,600));
+  app().innerHTML=nav()+`
+  <div class="card"><h3>Entries that could not be sent</h3>
+    ${dl.length?`<p class="muted">These were rejected by the server. Nothing here has been saved. Correct the record in the patient's chart, then discard the entry — or retry it if you think the problem is fixed.</p>
+     ${dl.map((d,i)=>`<div class="card" style="border-left:4px solid #a32d2d">
+        <b>${esc(d.method)} ${esc(d.path)}</b> <span class="muted">&middot; queued ${esc(d.queued_at||'')} by ${esc(d.by_name||'—')} &middot; failed ${esc(d.failed_at||'')}</span>
+        <div style="color:#a32d2d;margin:4px 0">${esc(d.why||('HTTP '+d.status))}</div>
+        <pre style="background:#f6f7f7;padding:8px;border-radius:6px;overflow:auto;font-size:11px;margin:6px 0">${fmt(d)}</pre>
+        <button class="sm" data-retry="${i}">Retry</button>
+        <button class="sm" data-drop="${i}" style="background:#a32d2d">Discard</button>
+       </div>`).join('')}
+     <button id="dlexp">Download all as a file</button>`
+    :'<p class="muted">Nothing has failed. Every entry has been sent.</p>'}
+  </div>
+  ${theirs.length?`<div class="card"><h3>Waiting for another user</h3>
+    <p class="muted">${theirs.length} ${theirs.length===1?'entry was':'entries were'} recorded on this device by
+    <b>${esc(theirs[0].by_name||'another user')}</b> and could not be sent before they signed out. They will send
+    automatically the next time that user signs in on this device. They are not lost.</p></div>`:''}`;
+
+  document.querySelectorAll('[data-retry]').forEach(b=>b.onclick=async()=>{
+    const i=+b.dataset.retry, d=dlqRead(); const it=d[i]; if(!it) return;
+    d.splice(i,1); dlqWrite(d);
+    delete it.status; delete it.why; delete it.failed_at; it.tries=0;
+    it.cid=newCid();                                    // a fresh key: the old one may be recorded server-side
+    const q=qRead(); q.push(it); qWrite(q);
+    toast('Queued again — trying now','ok'); await flush(); failedScreen();
+  });
+  document.querySelectorAll('[data-drop]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.drop;
+    if(!confirm('Discard this entry? It was never saved, and this cannot be undone.')) return;
+    const d=dlqRead(); d.splice(i,1); dlqWrite(d); paintNet(); failedScreen();
+  });
+  const ex=$('#dlexp');
+  if(ex) ex.onclick=()=>{ const bl=new Blob([JSON.stringify(dlqRead(),null,2)],{type:'application/json'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(bl);
+    a.download='adhere_failed_entries_'+localDate()+'.json'; a.click(); };
+}
 // Visible feedback so a save can never fail silently (api() throws on any non-OK response).
 function toast(msg,kind){ let t=document.getElementById('toast'); if(!t){ t=document.createElement('div'); t.id='toast'; t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);color:#fff;padding:10px 18px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);z-index:9999;max-width:92%;font-size:14px;transition:opacity .3s'; document.body.appendChild(t); } t.style.background=(kind==='ok')?'#0f6e56':'#a32d2d'; t.textContent=msg; t.style.opacity='1'; clearTimeout(t._h); t._h=setTimeout(()=>{ t.style.opacity='0'; },4500); }
 window.addEventListener('unhandledrejection',e=>{ const m=(e.reason&&e.reason.message)?e.reason.message:''; if(m&&m!=='undefined') toast('Could not save — '+m+'. Nothing was recorded; please try again.'); });
@@ -142,7 +271,19 @@ async function boot(){
   if(ME && !ME._offline) flush();
   setInterval(()=>{ if(ME && online()) flush(); }, 60000);
 }
-$('#logout').onclick=async()=>{ try{ await api('GET','logout'); }catch(e){} ME=null; localStorage.removeItem('me'); location.hash=''; route(); };
+$('#logout').onclick=async()=>{
+  // Do not let her walk away from unsent records. They are keyed to HER user id, so once she signs
+  // out they are skipped on every flush and sit on the tablet, invisible, until she signs in on
+  // this same device again. If the tablet is wiped or reassigned first, they are gone for good.
+  const mine=qRead().filter(x=>!x.by || x.by===((ME&&ME.id)||null));
+  if(mine.length){
+    if(online()){ toast('Sending '+mine.length+' unsent '+(mine.length===1?'entry':'entries')+' before signing out…'); await flush(); }
+    const left=qRead().filter(x=>!x.by || x.by===((ME&&ME.id)||null)).length;
+    if(left && !confirm(left+' '+(left===1?'entry has':'entries have')+' not been sent yet.\n\nThey stay on THIS device and will only send when you sign in here again. If you sign out now, nobody else can send them.\n\nSign out anyway?')) return;
+  }
+  try{ await api('GET','logout'); }catch(e){}
+  ME=null; localStorage.removeItem('me'); location.hash=''; route(); paintNet();
+};
 window.addEventListener('hashchange', route);
 
 function route(){
@@ -159,7 +300,7 @@ function route(){
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
-    find:findWoman,
+    find:findWoman,failed:failedScreen,
     account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
@@ -358,7 +499,9 @@ function carryForward(w,rhNeg){
 }
 
 // Ethiopian-calendar date entry: 3 selects (day/month/year E.C.) -> stores Gregorian YYYY-MM-DD
-function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
+// "Today" is the clinic's today, not the device's — otherwise a tablet in another zone offers the
+// wrong default date across the midnight boundary. Noon avoids any edge in the EC conversion.
+function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date(localDate()+'T12:00:00')):{year:2018,month:1,day:1}); }
 // `def` = default to today. `iso` = pre-select an already-recorded Gregorian date, so that
 // re-saving a form that shows an existing date does not silently blank it.
 function ecPicker(id,label,def,iso){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
@@ -384,25 +527,76 @@ function ecSet(id,iso){ const D=$('#'+id+'_d'), M=$('#'+id+'_m'), Y=$('#'+id+'_y
   const e=Ethiopian.toEth(dt);
   if(![...Y.options].some(o=>+o.value===e.year)) Y.add(new Option(e.year,e.year));
   D.value=String(e.day); M.value=String(e.month); Y.value=String(e.year); }
-// ---- LOCAL WALL-CLOCK TIME ---------------------------------------------------
-// Ethiopia is UTC+3 and observes no DST. toISOString() emits UTC, so every timestamp
-// the tool wrote was three hours behind the clock on the wall:
+// ---- CLINIC WALL-CLOCK TIME --------------------------------------------------
+// toISOString() emits UTC. Ethiopia is UTC+3, so every timestamp the tool wrote used to be
+// three hours behind the clock on the wall:
 //   - the monitoring schedule was permanently ~3h "overdue" the moment an observation saved;
 //   - a birth between 00:00 and 03:00 was filed on the previous day (and, on the 1st, in the
 //     previous month's MoH report);
 //   - EDD came out a day early, because addDays() round-tripped through UTC.
-// The Ethiopian-calendar picker has always produced LOCAL dates, so the record held UTC
-// timestamps and local dates side by side. Everything below writes local wall-clock, and the
-// server (PHP + MySQL) is pinned to the same zone so NOW()/CURDATE() agree with it.
+// The Ethiopian-calendar picker has always produced local dates, so the record held UTC
+// timestamps and local dates side by side.
+//
+// These write the CLINIC's clock (window.ADHERE_TZ), NOT the device's. Using the device's own
+// zone would look identical in a correctly-configured facility and be quietly wrong everywhere
+// else: a tablet set to the wrong country writes wrong clinical times, and since we store a
+// wall-clock value rather than an offset, nothing downstream could ever detect it. Pinning the
+// zone means the browser, PHP (APP_TZ) and the MySQL session agree no matter what the hardware
+// thinks the time is. Ethiopia observes no DST, but Intl handles DST correctly anyway, so this
+// stays right if ADHERE+ is deployed somewhere that does.
 const p2=n=>String(n).padStart(2,'0');
-function localDate(d){ d=d||new Date(); return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate()); }
-function localDateTime(d){ d=d||new Date(); return localDate(d)+' '+p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds()); }
-// Parse a stored 'YYYY-MM-DD HH:MM:SS' as LOCAL (no trailing Z) — the counterpart of localDateTime().
-function parseLocal(s){ if(!s) return null; const d=new Date(String(s).replace(' ','T')); return isNaN(d)?null:d; }
+const TZ=()=> (window.ADHERE_TZ || 'Africa/Addis_Ababa');
+// Break an instant into the clinic zone's calendar fields.
+function tzParts(d){
+  d=d||new Date();
+  try{
+    const f=new Intl.DateTimeFormat('en-CA',{timeZone:TZ(),hour12:false,
+      year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const o={}; for(const p of f.formatToParts(d)) if(p.type!=='literal') o[p.type]=p.value;
+    if(o.hour==='24') o.hour='00';                       // some engines render midnight as 24
+    return o;
+  }catch(e){                                             // no Intl/zone data: fall back to the device
+    return {year:d.getFullYear(),month:p2(d.getMonth()+1),day:p2(d.getDate()),
+            hour:p2(d.getHours()),minute:p2(d.getMinutes()),second:p2(d.getSeconds())};
+  }
+}
+function localDate(d){ const o=tzParts(d); return o.year+'-'+o.month+'-'+o.day; }
+function localDateTime(d){ const o=tzParts(d); return o.year+'-'+o.month+'-'+o.day+' '+o.hour+':'+o.minute+':'+o.second; }
+// The clinic zone's offset from UTC at a given instant, e.g. '+03:00'.
+function tzOffset(d){
+  d=d||new Date();
+  const o=tzParts(d);
+  const asUTC=Date.UTC(+o.year,+o.month-1,+o.day,+o.hour,+o.minute,+o.second);
+  const mins=Math.round((asUTC-Math.floor(d.getTime()/1000)*1000)/60000);
+  const s=mins<0?'-':'+', a=Math.abs(mins);
+  return s+p2(Math.floor(a/60))+':'+p2(a%60);
+}
+// Parse a stored 'YYYY-MM-DD HH:MM:SS' — the counterpart of localDateTime(). The stored value is
+// clinic wall-clock, so it must be read back against the CLINIC's offset, not the device's, or a
+// tablet in another zone would compute the wrong age for an observation.
+function parseLocal(s){
+  if(!s) return null;
+  const t=String(s).trim().replace(' ','T');
+  const d0=new Date(t);                                  // provisional, to get the offset in force
+  if(isNaN(d0)) return null;
+  const d=new Date(t+tzOffset(d0));
+  return isNaN(d)?d0:d;
+}
 // Hours since the membranes ruptured. Feeds the model's rom_hours feature.
 function romHrs(s){ const d=parseLocal(s); if(!d) return null;
   return Math.max(0, Math.round(((Date.now()-d.getTime())/36e5)*10)/10); }
-function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return localDate(dt); }
+// Pure calendar arithmetic on a Y-M-D string. Deliberately does NOT touch a time zone: an EDD is
+// "LNMP + 280 days" on the calendar, and routing it through any clock (device's or clinic's) is
+// what made it land a day early. Date.UTC has no DST and no local offset, so it cannot drift.
+function addDays(iso,n){
+  if(!iso) return null;
+  const m=String(iso).slice(0,10).split('-');
+  if(m.length!==3) return null;
+  const d=new Date(Date.UTC(+m[0], +m[1]-1, +m[2]));
+  if(isNaN(d)) return null;
+  d.setUTCDate(d.getUTCDate()+n);
+  return d.getUTCFullYear()+'-'+p2(d.getUTCMonth()+1)+'-'+p2(d.getUTCDate());
+}
 
 // ---- registration validation -------------------------------------------------
 // MRN length follows the facility's paper numbering: 5 digits at a health centre,
@@ -949,7 +1143,9 @@ async function partograph(id){
 }
 function renderMonSched(id,obs){ const el=$('#monsched'); if(!el) return;
   const last=(obs&&obs.length)?obs[obs.length-1]:null;
-  const lt=last?new Date(String(last.obs_datetime||last.recorded_at||'').replace(' ','T')):null;
+  // parseLocal, not new Date(): the stored value is CLINIC wall-clock. Parsing it against the
+  // device's zone is what made a just-saved observation read as hours old.
+  const lt=last?parseLocal(last.obs_datetime||last.recorded_at||''):null;
   if(!lt||isNaN(lt.getTime())){ el.innerHTML='<b class="muted">Monitoring schedule</b><div class="muted" style="font-size:12px">Record the first reading to start the schedule.</div>'; return; }
   const mins=Math.max(0,Math.round((Date.now()-lt.getTime())/60000));
   const sched=[['Fetal heart rate',30],['Contractions',30],['Pulse',30],['Temperature',120],['Blood pressure',240],['Cervix / descent',240]];
@@ -3384,7 +3580,10 @@ async function patientHub(id){
     if(sv) sv.onclick=async()=>{
       if(!rmt.value){ toast('Enter the time the membranes ruptured'); return; }
       const when=rmt.value.replace('T',' ')+':00';
-      if(Date.parse(rmt.value)>Date.now()){ toast('That is in the future'); return; }
+      // The provider types the CLINIC's clock, so validate it against the clinic's clock — on a
+      // device in another zone, Date.parse() would read it as the device's and reject a valid time.
+      const w=parseLocal(when);
+      if(w && w.getTime()>Date.now()+60000){ toast('That is in the future'); return; }
       sv.disabled=true;
       const r=await api('PATCH','episodes/'+id,{ruptured_membrane:1,ruptured_datetime:when});
       sv.disabled=false;

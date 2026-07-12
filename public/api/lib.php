@@ -25,8 +25,18 @@ session_start();
 header('Content-Type: application/json');
 function body(){ $b=json_decode(file_get_contents('php://input'), true); return is_array($b)?$b:[]; }
 function out($d, $code=200){
-  // Record the idempotency key ONLY after a successful (2xx) response, so a failed write can be safely retried.
-  if($code<300 && !empty($GLOBALS['__idem_key'])){ try{ db()->prepare("INSERT IGNORE INTO idem_keys(k) VALUES(?)")->execute([$GLOBALS['__idem_key']]); }catch(\PDOException $e){} $GLOBALS['__idem_key']=null; }
+  // Settle the idempotency claim taken by idem_guard().
+  //   success -> mark 'done' and STORE the response, so a client that lost the original reply and
+  //              retries gets the SAME answer back (including the new row's id) instead of a bare
+  //              {duplicate:true}, which it could not use to navigate to the record it just created.
+  //   failure -> RELEASE the claim, so a write that genuinely failed can be retried.
+  if(!empty($GLOBALS['__idem_key'])){
+    $k=$GLOBALS['__idem_key']; $GLOBALS['__idem_key']=null;
+    try{
+      if($code<300) db()->prepare("UPDATE idem_keys SET state='done', response=? WHERE k=?")->execute([json_encode($d),$k]);
+      else          db()->prepare("DELETE FROM idem_keys WHERE k=? AND state='pending'")->execute([$k]);
+    }catch(\PDOException $e){}
+  }
   http_response_code($code); echo json_encode($d); exit;
 }
 function err($m,$code=400){ out(['error'=>$m], $code); }
@@ -58,15 +68,45 @@ function scoped_facility_ids($u){
 }
 // Idempotency: if the client sends a stable X-Idempotency-Key (used for offline-queued writes),
 // record it once; a replay of the same key short-circuits so a lost-response write can't double-commit.
+// Idempotency. The client sends a stable X-Idempotency-Key with every write, so a queued entry that
+// is replayed — because the response was lost, or because two flushes raced — cannot double-commit.
+//
+// This USED TO BE check-then-act: SELECT the key, and if absent, write the clinical row and only
+// then record the key. Nothing sat between the check and the claim, so two concurrent replays of the
+// same key both passed the SELECT and both inserted. Duplicate episode. Duplicate visit. Phantom twin
+// in the delivery register. The guard did not guard.
+//
+// Now the key is CLAIMED FIRST, atomically, on idem_keys' primary key. Whoever wins the INSERT owns
+// the write; the loser returns the winner's answer without touching the clinical tables.
 function idem_guard(){
   $k=$_SERVER['HTTP_X_IDEMPOTENCY_KEY']??'';
   if($k==='' || strlen($k)>64) return;
   try{
-    $st=db()->prepare("SELECT 1 FROM idem_keys WHERE k=?"); $st->execute([$k]);
-    if($st->fetch()) out(['duplicate'=>true],200);                                  // this write already committed once
-    if(mt_rand(1,50)===1) db()->exec("DELETE FROM idem_keys WHERE at < (NOW() - INTERVAL 7 DAY)"); // opportunistic prune
-  }catch(\PDOException $e){ return; }                                               // table missing pre-migration -> ignore
-  $GLOBALS['__idem_key']=$k;                                                        // committed by out() only on success
+    // Reclaim any 'pending' claim whose request died mid-write (PHP fatal, container restart),
+    // otherwise that key would be poisoned for ever and the entry could never be sent.
+    db()->prepare("DELETE FROM idem_keys WHERE k=? AND state='pending' AND at < (NOW() - INTERVAL 2 MINUTE)")->execute([$k]);
+
+    $ins=db()->prepare("INSERT INTO idem_keys(k,at,state) VALUES(?,NOW(),'pending')");
+    try{
+      $ins->execute([$k]);                        // WON the race — we own this write
+      $GLOBALS['__idem_key']=$k;                  // settled by out(): 'done' on success, released on failure
+      if(mt_rand(1,50)===1) db()->exec("DELETE FROM idem_keys WHERE state='done' AND at < (NOW() - INTERVAL 30 DAY)");
+      return;
+    }catch(\PDOException $e){
+      if(($e->errorInfo[1]??0)!==1062) throw $e;   // 1062 = duplicate key = someone else got here first
+    }
+
+    // LOST the race, or this is a genuine replay of a write that already committed.
+    $st=db()->prepare("SELECT state,response FROM idem_keys WHERE k=?"); $st->execute([$k]);
+    $row=$st->fetch();
+    if($row && $row['state']==='done'){
+      $prev=$row['response']?json_decode($row['response'],true):null;
+      out(is_array($prev)?$prev:['duplicate'=>true], 200);   // hand back the ORIGINAL answer
+    }
+    // Still 'pending': an identical request is in flight right now. Do not write. Tell the client to
+    // come back — flush() treats 5xx as "retry later" and keeps the entry queued, so nothing is lost.
+    out(['error'=>'this entry is already being saved — retrying shortly'], 503);
+  }catch(\PDOException $e){ return; }              // table missing pre-migration -> behave as before
 }
 function insert($table,$data){
   $cols=array_keys($data); $ph=implode(',',array_fill(0,count($cols),'?'));

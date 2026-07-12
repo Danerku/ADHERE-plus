@@ -317,3 +317,6 @@ a.tile:active{transform:translateY(0)}
 @media (max-width:640px){
   a.tile{padding:12px 11px}
 }
+
+/* ---- Small inline buttons (rupture time, failed-queue retry/discard) ---- */
+button.sm{padding:5px 10px;font-size:12px;width:auto;margin:2px 4px 2px 0}
