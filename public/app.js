@@ -379,7 +379,10 @@ function tileHtml(href,icon,title,sub,tone,ro){
 //   fp        = family planning, LAFP removal, immunization
 function canDo(what){
   const r=ME.role;
-  if(r==='admin') return true;
+  // ADMIN() covers admin AND super_admin. Testing r==='admin' literally here made a super_admin
+  // fall through to the observer branch: every clinical tile came up VIEW ONLY for the one account
+  // that is supposed to be able to do everything.
+  if(ADMIN()) return true;
   if(r==='provider') return what!=='admin';
   if(r==='recorder') return (what==='intake'||what==='fp');
   return false;                                  // observer, supervisor: read-only
