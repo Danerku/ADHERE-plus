@@ -269,6 +269,51 @@ try {
     out(['months'=>$months,'indicators'=>$ind]);
   }
 
+  // ---- Family planning, LAFP removal, Immunization ---------------------------
+  // These modules serve clients who are NOT necessarily maternity patients: the FP
+  // register includes men, and the HPV register is for schoolgirls. So they carry their
+  // own client identity, with an optional woman_id linking back when she IS one of ours.
+  $mods=[
+    'fp_clients'=>['fp_clients',['woman_id','mrn','name','age','sex','reg_date','acceptor','hiv_offered','hiv_performed','hiv_result','hiv_counselled','hiv_linked_art','target_pop_code','td_checked','iud_contraindicated','iud_contra_detail','from_preg_test_id']],
+    'fp_visits'=>['fp_visits',['fp_client_id','visit_no','visit_date','method','appointment_date','remark']],
+    'lafp'=>['lafp_removals',['woman_id','fp_client_id','mrn','name','age','reg_date','insertion_date','lafp_type','place_code','removal_date','duration_months','removal_reason','hiv_offered','hiv_performed','hiv_result','hiv_counselled','hiv_linked_art','target_pop_code','post_removal_method','remark']],
+    'imm_clients'=>['immunization_clients',['woman_id','programme','mrn','name','age','dob','pregnant','in_school_grade','out_of_school','woreda','kebele','ketena','house_no','reg_date','remark']],
+    'imm_doses'=>['immunization_doses',['client_id','dose_no','dose_date']],
+  ];
+  if(isset($mods[$r])){
+    [$tbl,$allow]=$mods[$r]; $u=require_auth();
+    $hasFac=in_array($tbl,['fp_clients','lafp_removals','immunization_clients']);
+    if($m==='GET'){
+      if($tbl==='fp_visits'){ $st=db()->prepare("SELECT v.* FROM fp_visits v JOIN fp_clients c ON c.id=v.fp_client_id WHERE c.facility_id=? AND v.fp_client_id=? ORDER BY v.visit_no, v.id");
+        $st->execute([$u['facility_id'],(int)($_GET['client']??0)]); out($st->fetchAll()); }
+      if($tbl==='immunization_doses'){ $st=db()->prepare("SELECT d.* FROM immunization_doses d JOIN immunization_clients c ON c.id=d.client_id WHERE c.facility_id=? AND d.client_id=? ORDER BY d.dose_no");
+        $st->execute([$u['facility_id'],(int)($_GET['client']??0)]); out($st->fetchAll()); }
+      $q='%'.($_GET['q']??'').'%';
+      $extra = ($tbl==='immunization_clients' && !empty($_GET['programme'])) ? " AND programme=".db()->quote($_GET['programme']) : '';
+      // the immunization list needs the dose count to show completion at a glance
+      $cols = ($tbl==='immunization_clients')
+        ? "*, (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=`$tbl`.id) AS dose_count"
+        : "*";
+      $st=db()->prepare("SELECT $cols FROM `$tbl` WHERE facility_id=?$extra AND (COALESCE(mrn,'') LIKE ? OR COALESCE(name,'') LIKE ?) ORDER BY id DESC LIMIT 300");
+      $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll());
+    }
+    if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
+      $row=array_intersect_key($b,array_flip($allow));
+      if($hasFac){ $row['facility_id']=$u['facility_id']; }
+      $row['recorded_by']=$u['id'];
+      // child rows must belong to a client in THIS facility
+      if($tbl==='fp_visits'){ $c=db()->prepare("SELECT id FROM fp_clients WHERE id=? AND facility_id=?"); $c->execute([$row['fp_client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('FP client not in your facility',404); }
+      if($tbl==='immunization_doses'){ $c=db()->prepare("SELECT id FROM immunization_clients WHERE id=? AND facility_id=?"); $c->execute([$row['client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('immunization client not in your facility',404);
+        // one row per dose: re-recording a dose updates its date rather than duplicating it
+        db()->prepare("DELETE FROM immunization_doses WHERE client_id=? AND dose_no=?")->execute([$row['client_id'],$row['dose_no']]); }
+      $id2=insert($tbl,$row); audit('create',$tbl,$id2); out(['id'=>$id2],201); }
+    if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
+      if($hasFac){ $c=db()->prepare("SELECT id FROM `$tbl` WHERE id=? AND facility_id=?"); $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
+      $f=array_intersect_key($b,array_flip($allow));
+      foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      audit('update',$tbl,$id,array_keys($f)); out(['ok'=>true]); }
+  }
+
   // ---- Facility overview: themed counts for the dashboard --------------------
   // Grouped by theme so the dashboard can answer: how many were high risk, what
   // happened to them, how they delivered, and whether the process of care was followed.
@@ -306,6 +351,34 @@ try {
        'red_alerts'     =>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id=? AND s.band='red'$since"),
      ],
      'ippfp'=>$grp("SELECT d.ippfp_method k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.ippfp_method IS NOT NULL$since GROUP BY d.ippfp_method"),
+     // ---- Family planning ----
+     'fp'=>[
+       'clients'      =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'new_acceptor' =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=? AND e.acceptor='new'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'repeat_acceptor'=>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=? AND e.acceptor='repeat'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'lafp_removals'=>$one("SELECT COUNT(*) c FROM lafp_removals e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+     ],
+     'fp_methods'=>$grp("SELECT v.method k, COUNT(*) c FROM fp_visits v JOIN fp_clients e ON e.id=v.fp_client_id WHERE e.facility_id=? AND v.method IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY v.method"),
+     'lafp_reasons'=>$grp("SELECT e.removal_reason k, COUNT(*) c FROM lafp_removals e WHERE e.facility_id=? AND e.removal_reason IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.removal_reason"),
+
+     // ---- Immunization ----
+     'immunization'=>[
+       'td_clients' =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'td2_plus'   =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td' AND (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=e.id)>=2".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'td_pregnant'=>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td' AND e.pregnant=1".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'hpv_girls'  =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='HPV'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'hpv_complete'=>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='HPV' AND (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=e.id)>=2".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+     ],
+
+     // ---- Pregnancy test: the front door, and whether both exits are used ----
+     'pregnancy_test'=>[
+       'tested'   =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'positive' =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='positive'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'negative' =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'linked_anc'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.linked_episode_id IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'negative_to_fp'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative' AND e.linked_fp_client_id IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+     ],
+
      'newborn_care'=>[
        'lbw'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.prob_lbw=1$since"),
        'kmc'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.kmc='initiated'$since"),
@@ -335,15 +408,27 @@ try {
       $pid=insert('pregnancy_tests',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,
         'test_date'=>($b['test_date']??date('Y-m-d')),'result'=>($b['result']??null),
         'note'=>($b['note']??null),'recorded_by'=>$u['id']]);
-      $eid=null;
-      // A positive test with link_to_anc opens the ANC episode in one step.
+      $eid=null; $fpid=null;
+      // POSITIVE -> open the ANC episode in one step.
       if(($b['result']??'')==='positive' && !empty($b['link_to_anc'])){
         $eid=insert('episodes',['woman_id'=>$wid,'service_category'=>'anc','status'=>'active',
           'admitted_from'=>'new','admission_datetime'=>date('Y-m-d H:i:s'),
           'facility_id'=>$u['facility_id'],'created_by'=>$u['id']]);
         db()->prepare("UPDATE pregnancy_tests SET linked_episode_id=?, linked_at=NOW() WHERE id=?")->execute([$eid,$pid]);
       }
-      audit('create','pregnancy_tests',$pid); out(['id'=>$pid,'episode_id'=>$eid],201); }
+      // NEGATIVE -> open her as a family-planning client. A negative test is the highest-yield
+      // moment to offer contraception; until now it was a dead end and she simply left.
+      if(($b['result']??'')==='negative' && !empty($b['link_to_fp'])){
+        $w2=db()->prepare("SELECT mrn,first_name,father_name,age FROM women WHERE id=?"); $w2->execute([$wid]); $wr=$w2->fetch();
+        $fpid=insert('fp_clients',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,
+          'mrn'=>($wr['mrn']??null),'name'=>trim(($wr['first_name']??'').' '.($wr['father_name']??'')),
+          'age'=>($wr['age']??null),'sex'=>'F','reg_date'=>date('Y-m-d'),'acceptor'=>'new',
+          'from_preg_test_id'=>$pid,'recorded_by'=>$u['id']]);
+        db()->prepare("UPDATE pregnancy_tests SET fp_offered=1, linked_fp_client_id=?, linked_at=NOW() WHERE id=?")->execute([$fpid,$pid]);
+      } elseif(($b['result']??'')==='negative'){
+        db()->prepare("UPDATE pregnancy_tests SET fp_offered=? WHERE id=?")->execute([!empty($b['fp_offered'])?1:0,$pid]);
+      }
+      audit('create','pregnancy_tests',$pid); out(['id'=>$pid,'episode_id'=>$eid,'fp_client_id'=>$fpid],201); }
   }
 
   // ---- MoH paper-register export -------------------------------------------
@@ -381,6 +466,44 @@ try {
       $st=db()->prepare("SELECT p.*, e.place_of_delivery, e.infant_dob, $W FROM pnc_visits p
         JOIN episodes e ON e.id=p.episode_id JOIN women w ON w.id=e.woman_id
         WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY w.mrn, p.visit_date");
+    } elseif($type==='fp'){
+      // One row per FP visit (the paper register gives each client up to 5 visit rows).
+      $st=db()->prepare("SELECT v.*, c.mrn, c.name, c.age, c.sex, c.reg_date, c.acceptor,
+             c.hiv_offered, c.hiv_performed, c.hiv_result, c.hiv_counselled, c.hiv_linked_art,
+             c.target_pop_code, c.td_checked, c.iud_contraindicated
+        FROM fp_visits v JOIN fp_clients c ON c.id=v.fp_client_id
+       WHERE c.facility_id=? AND v.visit_date BETWEEN ? AND ? ORDER BY c.mrn, v.visit_no");
+    } elseif($type==='lafp'){
+      $st=db()->prepare("SELECT * FROM lafp_removals WHERE facility_id=? AND removal_date BETWEEN ? AND ? ORDER BY removal_date, mrn");
+    } elseif($type==='td' || $type==='hpv'){
+      $prog = ($type==='td') ? 'Td' : 'HPV';
+      $st=db()->prepare("SELECT c.*,
+             MAX(CASE WHEN d.dose_no=1 THEN d.dose_date END) AS dose1,
+             MAX(CASE WHEN d.dose_no=2 THEN d.dose_date END) AS dose2,
+             MAX(CASE WHEN d.dose_no=3 THEN d.dose_date END) AS dose3,
+             MAX(CASE WHEN d.dose_no=4 THEN d.dose_date END) AS dose4,
+             MAX(CASE WHEN d.dose_no=5 THEN d.dose_date END) AS dose5
+        FROM immunization_clients c LEFT JOIN immunization_doses d ON d.client_id=c.id
+       WHERE c.facility_id=? AND c.programme=".db()->quote($prog)."
+         AND (c.reg_date BETWEEN ? AND ? OR d.dose_date BETWEEN ".db()->quote($from)." AND ".db()->quote($to).")
+       GROUP BY c.id ORDER BY c.mrn");
+    } elseif($type==='pregtally'){
+      // The MoH pregnancy-test artifact is a TALLY SHEET, not a line register:
+      // women tested and HCG positive, by age band. Computed from the per-client records.
+      $st=db()->prepare("SELECT
+          CASE WHEN w.age BETWEEN 10 AND 14 THEN '10-14'
+               WHEN w.age BETWEEN 15 AND 19 THEN '15-19'
+               WHEN w.age >= 20            THEN '20+'
+               ELSE 'unknown' END AS band,
+          COUNT(*) AS tested,
+          SUM(p.result='positive') AS positive,
+          SUM(p.result='negative') AS negative,
+          SUM(p.result='negative' AND p.fp_offered=1) AS negative_offered_fp,
+          SUM(p.linked_episode_id IS NOT NULL) AS linked_to_anc,
+          SUM(p.linked_fp_client_id IS NOT NULL) AS linked_to_fp
+        FROM pregnancy_tests p JOIN women w ON w.id=p.woman_id
+       WHERE p.facility_id=? AND p.test_date BETWEEN ? AND ?
+       GROUP BY band ORDER BY band");
     } else err('unknown register type');
     $st->execute([$fac,$from,$to]); $rows=$st->fetchAll();
     out(['type'=>$type,'from'=>$from,'to'=>$to,'facility'=>$u['facility_name']??'','count'=>count($rows),'rows'=>$rows]);

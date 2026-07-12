@@ -109,7 +109,8 @@ function route(){
   document.getElementById('mdl')?.remove();
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
-    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
+    referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
+    fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
 function forcePw(){
@@ -149,32 +150,103 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   const _pid=(_p[0]==='patient'||_EP.indexOf(_p[0])>=0)?_p[1]:null; const C=window.CTX;
   const pbar=(_pid && C && String(C.id)===String(_pid))?`<div class="pbar"><div class="pav">${esc(C.ini)}</div><div class="pinfo"><div class="pnm">${esc(C.name)}</div><div class="pmeta">${esc(C.meta)}</div></div>${_p[0]!=='patient'?`<a class="pback" href="#patient/${_pid}">Hub</a>`:''}</div>`:'';
   if(ME.role==='supervisor') return pbar+`<nav class="navbar">${L('#supervisor','Supervisor')}${L('#reminders','Reminders')}</nav><nav class="botnav">${B('#supervisor','Board')}${B('#reminders','Alerts')}</nav>`;
+  // The top bar stays SHORT on purpose: only the screens used constantly. Everything
+  // else lives on Home, which is the launcher. Otherwise the tab strip grows with every
+  // new module until it is unusable.
   const top=`<nav class="navbar">${back}
-  ${(ME.role==='recorder'||ME.role==='provider'||ME.role==='admin')?L('#register','Register'):''}
+  ${L('#home','Home')}
   ${L('#antenatal','Antenatal')}
   ${L('#labour','Labour ward')}
-  ${L('#highrisk','High risk')}
   ${L('#pnc','Postnatal')}
-  ${L('#pregtest','Pregnancy test')}
-  ${L('#dashboard','Dashboard')}
-  ${L('#registers','Registers')}
-  ${ME.role==='admin'?L('#facilities','Facilities'):''}
-  ${ME.role==='admin'?L('#users','Users'):''}
-  ${ME.role==='admin'?L('#reminders','Reminders'):''}</nav>`;
+  ${L('#dashboard','Dashboard')}</nav>`;
   const bot=`<nav class="botnav">${B('#home','Home')}${B('#antenatal','ANC')}${B('#labour','Labour')}${B('#pnc','PNC')}${B('#dashboard','Dash')}</nav>`;
   return pbar+top+bot; }
 
-function home(){
+// ---- HOME = the launcher -----------------------------------------------------
+// Full-width tiles grouped by what the provider is DOING, not by which paper register
+// it maps to. Adding a module adds a tile, not a tab.
+function tileHtml(href,icon,title,sub,tone){
+  const c={teal:['#e1f5ee','#5dcaa5','#04342c','#0f6e56'],
+           red:['#fcebeb','#f09595','#791f1f','#a32d2d'],
+           soft:['#eef6f5','#dbe7e4','#0b3d3a','#5b6663'],
+           plain:['#f7f9f9','#e6eae8','#334155','#5b6663']}[tone||'soft'];
+  return `<a href="${href}" class="tile" style="display:block;text-decoration:none;background:${c[0]};border:1px solid ${c[1]};border-radius:12px;padding:14px 13px">
+    <div style="font-size:20px;line-height:1">${icon}</div>
+    <div style="font-size:14px;font-weight:600;color:${c[2]};margin-top:6px">${title}</div>
+    <div style="font-size:11px;color:${c[3]};margin-top:1px">${sub||''}</div></a>`;
+}
+function tileGrid(inner){ return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px">${inner}</div>`; }
+function sectionLabel(t){ return `<div style="font-size:11px;letter-spacing:.05em;color:#8a9490;margin:2px 0 6px">${t}</div>`; }
+
+async function home(){
   const ec=(window.Ethiopian?Ethiopian.fmt(new Date()):'');
-  app().innerHTML=nav()+`<div class="card"><h3>Welcome, ${esc(ME.full_name)}</h3>
-   <p class="muted">Role: ${ME.role}${ME.facility_name?' · '+esc(ME.facility_name):''}. ${ec?'Today: <b>'+ec+'</b> ('+new Date().toLocaleDateString()+').':''}</p>
-   <p class="muted">Care pathway: Antenatal → Labour ward → High risk → Postnatal. Recorders register women; providers run the partograph, checklist, danger-sign, delivery and PNC; observers can view.</p></div>
+  const isAdmin=(ME.role==='admin');
+  const canWrite=(ME.role==='recorder'||ME.role==='provider'||ME.role==='admin');
+  // live counts so the tiles mean something the moment you land
+  let hr=0,lab=0;
+  try{ const eps=await api('GET','episodes'); hr=(eps||[]).filter(e=>e.high_risk==1).length;
+       lab=(eps||[]).filter(e=>e.service_category==='labour'&&e.status==='laboring').length; }catch(e){}
+
+  app().innerHTML=nav()+`<div class="card">
+    <h3>Welcome, ${esc(ME.full_name)}</h3>
+    <p class="muted" style="margin-bottom:14px">${esc(ME.role)}${ME.facility_name?' · '+esc(ME.facility_name):''}${ec?' · '+ec:''}</p>
+
+    ${sectionLabel('CARE CONTINUUM')}
+    ${tileGrid(
+      (canWrite?tileHtml('#pregtest','&#129514;','Pregnancy test','The front door','teal'):'')+
+      (canWrite?tileHtml('#register','&#128100;','Register','New client','teal'):'')+
+      tileHtml('#antenatal','&#128197;','Antenatal','8 contacts','teal')+
+      tileHtml('#labour','&#128147;','Labour ward',(lab?lab+' in labour':'Partograph · AI'),'teal')+
+      tileHtml('#pnc','&#128118;','Postnatal','Mother + newborn','teal')+
+      tileHtml('#highrisk','&#9888;&#65039;','High risk',(hr?hr+' flagged':'None flagged'),'red')
+    )}
+
+    ${sectionLabel('FAMILY PLANNING &amp; PREVENTION')}
+    ${tileGrid(
+      tileHtml('#fp','&#128737;','Family planning','Methods · LAFP removal','soft')+
+      tileHtml('#imm','&#128137;','Immunization','Td · HPV','soft')
+    )}
+
+    ${sectionLabel('REPORTS')}
+    ${tileGrid(
+      tileHtml('#dashboard','&#128202;','Dashboard','Outcomes · quality','soft')+
+      tileHtml('#registers','&#128203;','MoH registers','Print · export','soft')
+    )}
+
+    ${sectionLabel('ADMIN')}
+    ${tileGrid(
+      (isAdmin?tileHtml('#facilities','&#127973;','Facilities','','plain'):'')+
+      (isAdmin?tileHtml('#users','&#128101;','Users','','plain'):'')+
+      (isAdmin?tileHtml('#reminders','&#128276;','Reminders','','plain'):'')+
+      tileHtml('#account','&#9881;&#65039;','My account','Profile · password','plain')
+    )}
+  </div>`;
+}
+
+// Password lives HERE, not on the landing page — a provider opening the app should see
+// their work, not a password form.
+function accountScreen(){
+  app().innerHTML=nav()+`<div class="card"><h3>My account</h3>
+   <div class="grid">
+    <label>Name<input value="${esc(ME.full_name||'')}" disabled></label>
+    <label>Username<input value="${esc(ME.username||'')}" disabled></label>
+    <label>Role<input value="${esc(ME.role||'')}" disabled></label>
+    <label>Facility<input value="${esc(ME.facility_name||'')}" disabled></label>
+    <label>Cadre<input value="${esc(ME.cadre||'')}" disabled></label>
+   </div>
+   <p class="muted" style="font-size:12px;margin-top:8px">To change your name, role or facility, ask an administrator.</p></div>
+
    <div class="card"><h3>Change my password</h3>
     <div class="grid">
-     <label>Current password<input id="cpw" type="password"></label>
-     <label>New password<input id="npw" type="password"></label>
-    </div><button class="act" id="chpw" style="margin-top:10px">Update password</button> <span class="muted" id="pwm"></span></div>`;
-  $('#chpw').onclick=async()=>{ const r=await api('POST','password',{current:cpw.value,new:npw.value}); if(r&&r.ok){ $('#pwm').textContent=' updated'; cpw.value='';npw.value=''; } else $('#pwm').textContent=' '+((r&&r.error)||'error'); };
+     <label>Current password<input id="cpw" type="password" autocomplete="current-password"></label>
+     <label>New password <span class="muted" style="font-weight:400">(at least 8 characters)</span><input id="npw" type="password" autocomplete="new-password"></label>
+    </div>
+    <button class="act" id="chpw" style="margin-top:10px">Update password</button> <span class="muted" id="pwm"></span></div>`;
+  $('#chpw').onclick=async()=>{ const b=$('#chpw'); if(b.disabled) return; b.disabled=true;
+    try{ const r=await api('POST','password',{current:cpw.value,new:npw.value});
+      if(r&&r.ok){ $('#pwm').textContent=' updated'; cpw.value=''; npw.value=''; toast('Password updated','ok'); }
+      else $('#pwm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
 }
 
 // ---- MoH register helpers ----------------------------------------------------
@@ -665,6 +737,7 @@ async function overviewSection(){
   let o; try{ o=await api('GET','overview'+(days?('?days='+days):'')); }catch(e){ return '<div class="card">Could not load overview: '+esc(e.message||'error')+'</div>'; }
   window._ov=o;
   const c=o.caseload||{}, pr=o.process||{}, nb=o.newborn_care||{}, cx=o.complications||{};
+  const fp=o.fp||{}, im=o.immunization||{}, pt=o.pregnancy_test||{};
   const pct=(a,b)=>b?Math.round(100*a/b)+'%':'—';
   const hrPct=c.total?Math.round(100*c.high_risk/c.total):0;
   return `<div class="card">
@@ -713,6 +786,37 @@ async function overviewSection(){
       ${ovStat(nb.low_apgar||0,'APGAR <7 at 5 min')}
       ${ovStat(pct(nb.dbs_sent||0,nb.hiv_exposed||0),'DBS sent',(nb.dbs_sent||0)+' of '+(nb.hiv_exposed||0)+' exposed')}
     </div>
+
+    <h4 style="margin-top:14px">Pregnancy test &mdash; the front door</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(pt.tested||0,'Women tested')}
+      ${ovStat(pct(pt.positive||0,pt.tested||0),'HCG positive',(pt.positive||0)+' of '+(pt.tested||0))}
+      ${ovStat(pct(pt.linked_anc||0,pt.positive||0),'Positive → ANC',(pt.linked_anc||0)+' of '+(pt.positive||0)+' positive')}
+      ${ovStat(pct(pt.negative_to_fp||0,pt.negative||0),'Negative → FP',(pt.negative_to_fp||0)+' of '+(pt.negative||0)+' negative')}
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:4px">A negative test is the highest-yield moment to offer contraception. <b>Negative → FP</b> is the share of those women who left with a family-planning record rather than nothing.</p>
+
+    <h4 style="margin-top:14px">Family planning</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(fp.clients||0,'FP clients')}
+      ${ovStat(fp.new_acceptor||0,'New acceptors')}
+      ${ovStat(fp.repeat_acceptor||0,'Repeat acceptors')}
+      ${ovStat(fp.lafp_removals||0,'LAFP removals')}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:10px">
+      <div><h4>Method mix</h4>${ovBar(o.fp_methods)}</div>
+      <div><h4>Reason for LAFP removal</h4>${ovBar(o.lafp_reasons)}</div>
+    </div>
+
+    <h4 style="margin-top:14px">Immunization</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(im.td_clients||0,'Td clients')}
+      ${ovStat(pct(im.td2_plus||0,im.td_clients||0),'Td2+ protected',(im.td2_plus||0)+' of '+(im.td_clients||0))}
+      ${ovStat(im.td_pregnant||0,'Td — pregnant')}
+      ${ovStat(im.hpv_girls||0,'HPV girls')}
+      ${ovStat(pct(im.hpv_complete||0,im.hpv_girls||0),'HPV complete',(im.hpv_complete||0)+' of '+(im.hpv_girls||0))}
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:4px">Td-2 is the minimum that protects a newborn against tetanus (80% protection; Td-3 gives 95%).</p>
   </div>`;
 }
 function wireOverview(){
@@ -1651,7 +1755,28 @@ const REG_COLS={
     ['C:Danger',tickCell('cnsl_danger_signs')],['C:BF',tickCell('cnsl_breastfeeding')],['C:NB care',tickCell('cnsl_newborn_care')],['C:FP',tickCell('cnsl_family_planning')],['C:EPI',tickCell('cnsl_epi')],['C:ECD',tickCell('cnsl_ecd')],
     ['NB weight','nb_weight_g'],['Problems','nb_problems'],['Treatment','nb_treatment'],['Outcome','nb_treatment_outcome'],
     ['Death age','nb_death_age_days'],['Death cause','nb_death_cause'],
-    ['IPPFP','ippfp_acceptor'],['Method','ippfp_method'],['Remark','remark']]
+    ['IPPFP','ippfp_acceptor'],['Method','ippfp_method'],['Remark','remark']],
+  fp:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name of client','name'],['Age','age'],['Sex','sex'],['Reg. date','reg_date'],
+    ['New',r=>r.acceptor==='new'?'✓':''],['Repeat',r=>r.acceptor==='repeat'?'✓':''],
+    ['HIV offered',tickCell('hiv_offered')],['HIV performed',tickCell('hiv_performed')],['HIV result','hiv_result'],
+    ['HIV contra. counselling',tickCell('hiv_counselled')],['Linked to ART',tickCell('hiv_linked_art')],
+    ['Target pop','target_pop_code'],['Td checked',tickCell('td_checked')],['IUCD contraindicated',tickCell('iud_contraindicated')],
+    ['Visit no','visit_no'],['Visit date','visit_date'],['Contraceptive','method'],['Appointment','appointment_date'],['Remark','remark']],
+  lafp:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name of client','name'],['Age','age'],['Reg. date','reg_date'],
+    ['Date of insertion','insertion_date'],['Type of LAFP','lafp_type'],['Place received','place_code'],
+    ['Date of removal','removal_date'],['Duration (months)','duration_months'],['Reason','removal_reason'],
+    ['HIV offered',tickCell('hiv_offered')],['HIV performed',tickCell('hiv_performed')],['HIV result','hiv_result'],
+    ['HIV counselling',tickCell('hiv_counselled')],['Linked to ART',tickCell('hiv_linked_art')],
+    ['Target pop','target_pop_code'],['Post-removal method','post_removal_method'],['Remark','remark']],
+  td:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name','name'],['Age','age'],['Woreda','woreda'],['Kebele','kebele'],['Ketena/Gott','ketena'],
+    ['Reg. date','reg_date'],['Pregnant',tickCell('pregnant')],
+    ['Td-1','dose1'],['Td-2','dose2'],['Td-3','dose3'],['Td-4','dose4'],['Td-5','dose5'],['Remark','remark']],
+  hpv:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Girl&rsquo;s name','name'],['Date of birth','dob'],['Age','age'],
+    ['Grade','in_school_grade'],['Out of school',tickCell('out_of_school')],
+    ['Woreda','woreda'],['Kebele','kebele'],['Ketena/Gott','ketena'],['House no.','house_no'],
+    ['Reg. date','reg_date'],['HPV-1','dose1'],['HPV-2','dose2'],['Remark','remark']],
+  pregtally:[['Age band','band'],['Women tested','tested'],['HCG positive','positive'],['Negative','negative'],
+    ['Negative — FP offered','negative_offered_fp'],['Linked to ANC','linked_to_anc'],['Linked to FP','linked_to_fp']]
 };
 function tickCell(k){ return r=>(r[k]==1?'✓':''); }   // renders a boolean as the paper's tick
 
@@ -1664,7 +1789,12 @@ async function registersScreen(){
    <h3>MoH register export</h3>
    <p class="muted">The official Ethiopian MoH register, generated from what has been recorded. Print it, or export to CSV. Person-level items (target population, HIV linkage, partner testing) are filled in automatically on every row.</p>
    <div class="grid">
-    <label>Register<select id="rt">${opt('anc','3. Antenatal care (ANC)')}${opt('delivery','4. Delivery')}${opt('pnc','5. Postnatal care (PNC)')}</select></label>
+    <label>Register<select id="rt">
+      ${opt('anc','3. Antenatal care (ANC)')}${opt('delivery','4. Delivery')}${opt('pnc','5. Postnatal care (PNC)')}
+      ${opt('fp','1. Family planning')}${opt('lafp','2. Long-acting FP removal')}
+      ${opt('td','10. Td immunization')}${opt('hpv','9. HPV immunization')}
+      ${opt('pregtally','Pregnancy test — tally sheet')}
+    </select></label>
     <label>From<input id="rf" type="date" value="${from}"></label>
     <label>To<input id="rto" type="date" value="${to}"></label>
    </div>
@@ -1683,7 +1813,10 @@ async function registersScreen(){
     window._regCsv=[cols.map(c=>c[0].replace(/&lt;/g,'<')).join(',')]
       .concat(rows.map((r,i)=>cols.map(c=>'"'+cell(r,c,i).replace(/"/g,'""')+'"').join(','))).join('\n');
     $('#rm').textContent=' '+d.count+' row(s)';
-    $('#regout').innerHTML=`<div class="card"><h3>${esc(({anc:'ANC register',delivery:'Delivery register',pnc:'PNC register'})[d.type])}</h3>
+    const RNAME={anc:'ANC register',delivery:'Delivery register',pnc:'PNC register',fp:'Family planning register',
+      lafp:'Long-acting FP removal register',td:'Td immunization register',hpv:'HPV immunization register',
+      pregtally:'Pregnancy test — tally sheet (aggregate, by age band)'};
+    $('#regout').innerHTML=`<div class="card"><h3>${esc(RNAME[d.type]||d.type)}</h3>
       <p class="muted">${esc(d.facility||'')} &middot; ${esc(d.from)} to ${esc(d.to)} &middot; ${d.count} row(s)</p>
       <div style="overflow-x:auto"><table style="font-size:11px;white-space:nowrap">
       <tr>${cols.map(c=>'<th>'+c[0]+'</th>').join('')}</tr>
@@ -1697,6 +1830,268 @@ async function registersScreen(){
     const bl=new Blob([window._regCsv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
     a.href=URL.createObjectURL(bl); a.download='moh_'+rt.value+'_register_'+rf.value+'_to_'+rto.value+'.csv'; a.click(); };
   load();
+}
+
+// ============================================================================
+// FAMILY PLANNING  (MoH register 1, 21 items)  +  LAFP REMOVAL (register 2, 19 items)
+// One module: same room, same provider, same client.
+// NB the FP register has a Sex column — FP clients include MEN (condoms, vasectomy),
+// so FP clients have their own identity and are not forced into the maternity record.
+// ============================================================================
+const FP_METHODS=[['MaC','Male condom'],['FeC','Female condom'],['OC','Oral contraceptive'],['Inj','Injectable'],
+ ['EC','Emergency contraception'],['Diaph','Diaphragm'],['IUCD','IUCD (intrauterine device)'],['Imp','Implant'],
+ ['TL','Tubal ligation (permanent)'],['V','Vasectomy (permanent)'],['Oth','Other']];
+const LAFP_TYPES=[['Implanon','Implanon implant'],['Sino-Implant','Sino-Implant'],['Jadelle','Jadelle implant'],['IUD','IUD'],['Other','Other']];
+const LAFP_PLACE=[['WI','Within this facility'],['1','Hospital'],['2','Health centre'],['3','Health post'],['4','Private clinic']];
+const LAFP_REASON=[['a','a. On recommended time'],['b','b. Side effect'],['c','c. Wants to get pregnant'],['d','d. Misconception'],['e','e. Other']];
+const IUD_CONTRA=['Client (or partner) has other sex partners','STI of the genital tract in the last 3 months, or chronic STI (HBV, HIV)',
+ 'Pelvic infection (PID) or ectopic pregnancy in the last 3 months','Heavy menstrual bleeding','Severe dysmenorrhoea needing analgesics or bed rest',
+ 'Bleeding or spotting between periods or after intercourse','Symptomatic valvular heart disease','Other'];
+
+async function fpScreen(){
+  const tab=window._fpTab||'fp';
+  const [clients,removals]=await Promise.all([api('GET','fp_clients').catch(()=>[]),api('GET','lafp').catch(()=>[])]);
+  const T=(k,t)=>`<a class="nav${tab===k?' on':''}" href="#fp" data-fptab="${k}">${t}</a>`;
+  app().innerHTML=nav()+`<div class="card"><h3>Family planning</h3>
+   <p class="muted">Contraceptive services and long-acting method removal. Clients here may be men or women, and need not be maternity patients.</p>
+   <nav class="navbar" style="margin:0 0 10px">${T('fp','Contraceptive services')}${T('lafp','LAFP removal')}</nav>
+
+   ${tab==='fp'?`
+   <button class="act" id="fpnew">New FP client</button>
+   <table style="margin-top:10px"><tr><th>MRN</th><th>Name</th><th>Age</th><th>Sex</th><th>Acceptor</th><th>Registered</th><th></th></tr>
+    ${(clients||[]).map(c=>`<tr><td>${esc(c.mrn||'')}</td><td>${esc(c.name||'')}</td><td>${esc(c.age||'')}</td><td>${esc(c.sex||'')}</td>
+      <td>${c.acceptor==='new'?'<span class="pill green">New</span>':(c.acceptor==='repeat'?'<span class="pill">Repeat</span>':'')}${c.from_preg_test_id?' <span class="pill amber">from neg. test</span>':''}</td>
+      <td>${esc(c.reg_date||'')}</td><td><a class="nav" href="#fpclient/${c.id}">Open</a></td></tr>`).join('')
+      ||'<tr><td colspan=7 class=muted>No family planning clients yet.</td></tr>'}
+   </table>`:`
+   <button class="act" id="lnew">Record a removal</button>
+   <table style="margin-top:10px"><tr><th>MRN</th><th>Name</th><th>Method</th><th>Inserted</th><th>Removed</th><th>Months</th><th>Reason</th><th>Post-removal</th></tr>
+    ${(removals||[]).map(r=>`<tr><td>${esc(r.mrn||'')}</td><td>${esc(r.name||'')}</td><td>${esc(r.lafp_type||'')}</td><td>${esc(r.insertion_date||'')}</td>
+      <td>${esc(r.removal_date||'')}</td><td>${esc(r.duration_months??'')}</td>
+      <td>${esc((LAFP_REASON.find(x=>x[0]===r.removal_reason)||[,''])[1])}</td><td>${esc(r.post_removal_method||'—')}</td></tr>`).join('')
+      ||'<tr><td colspan=8 class=muted>No removals recorded yet.</td></tr>'}
+   </table>`}
+   </div>
+   <div id="fpform"></div>`;
+  document.querySelectorAll('[data-fptab]').forEach(a=>a.onclick=(e)=>{ e.preventDefault(); window._fpTab=a.dataset.fptab; fpScreen(); });
+  if($('#fpnew')) $('#fpnew').onclick=()=>fpNewForm();
+  if($('#lnew'))  $('#lnew').onclick=()=>lafpForm();
+}
+
+function fpNewForm(){
+  $('#fpform').innerHTML=`<div class="card"><h3>New family planning client</h3>
+   <div class="grid">
+    <label>MRN<input id="fmrn"></label>
+    <label>Name of client<input id="fnm"></label>
+    <label>Age<input id="fage" type="number" min="10" max="70"></label>
+    <label>Sex<select id="fsex">${selOpts([['F','Female'],['M','Male']])}</select></label>
+    ${ecPicker('freg','Registration date',true)}
+    <label>Acceptor<select id="facc">${selOpts(ACCEPTOR)}</select></label>
+    ${tpSel('ftp','Targeted population category')}
+    <label>HIV test result<select id="fhr">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+   </div>
+   <div class="ticks">${tick('fho','HIV test offered')}${tick('fhp','HIV test performed')}${tick('fhc','HIV-specific contraceptive counselling offered')}${tick('fla','HIV positive — linked to ART')}${tick('ftd','Td status checked')}</div>
+
+   <details class="moh"><summary>Contraindications for IUCD</summary>
+    <div class="muted" style="font-size:12px;margin-bottom:6px">Tick any that apply. If any is present, IUCD is contraindicated.</div>
+    <div class="ticks">${IUD_CONTRA.map((t,i)=>tick('iud'+i,t)).join('')}</div></details>
+
+   <button class="act" id="fsave" style="margin-top:10px">Save client</button> <span class="muted" id="fm"></span></div>`;
+  $('#fsave').onclick=async()=>{
+    const b=$('#fsave'); if(b.disabled) return; b.disabled=true;
+    try{
+      if(!fnm.value.trim()){ modal('Name required','Enter the client&rsquo;s name.'); return; }
+      const contra=IUD_CONTRA.filter((t,i)=>tk('iud'+i));
+      const r=await api('POST','fp_clients',{mrn:(fmrn.value||null),name:fnm.value,age:(+fage.value||null),sex:fsex.value,
+        reg_date:ecGet('freg'),acceptor:(facc.value||null),target_pop_code:(ftp.value||null),
+        hiv_offered:tk('fho'),hiv_performed:tk('fhp'),hiv_result:(fhr.value||null),hiv_counselled:tk('fhc'),hiv_linked_art:tk('fla'),
+        td_checked:tk('ftd'),iud_contraindicated:(contra.length?1:0),iud_contra_detail:(contra.join('; ').slice(0,180)||null)});
+      if(r&&r.id){ toast('Client registered','ok'); location.hash='#fpclient/'+r.id; }
+      else $('#fm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+async function fpClient(id){
+  const [cs,visits]=await Promise.all([api('GET','fp_clients').catch(()=>[]),api('GET','fp_visits?client='+id).catch(()=>[])]);
+  const c=(cs||[]).find(x=>x.id==id)||{};
+  const nextNo=Math.min(5,(visits||[]).length+1);
+  app().innerHTML=nav()+`<div class="card"><h3>${esc(c.name||'FP client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(c.mrn||'')}</span></h3>
+   <p class="muted">${esc(c.age||'?')} yrs · ${c.sex==='M'?'Male':'Female'} · ${c.acceptor==='new'?'New acceptor':'Repeat acceptor'} · Target pop ${esc(c.target_pop_code||'—')}
+   ${c.iud_contraindicated==1?' · <span class="pill amber">IUCD contraindicated</span>':''}
+   ${c.from_preg_test_id?' · <span class="pill green">came from a negative pregnancy test</span>':''}</p>
+   ${c.iud_contraindicated==1?`<div style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>IUCD contraindicated</b> &mdash; ${esc(c.iud_contra_detail||'')}</div>`:''}
+   <a class="nav" href="#fp">&lsaquo; Back to family planning</a></div>
+
+   <div class="card"><h3>Record a visit <span class="muted" style="font-size:13px;font-weight:400">— visit ${nextNo} of 5 this year</span></h3>
+   <div class="grid">
+    <label>Visit number<select id="vno">${selOpts([1,2,3,4,5].map(i=>[i,'Visit '+i]),nextNo)}</select></label>
+    ${ecPicker('vdt','Visit date',true)}
+    <label>Contraceptive provided<select id="vmth">${selOpts(FP_METHODS)}</select></label>
+    ${ecPicker('vapp','Appointment date')}
+   </div>
+   <label>Remark<input id="vrmk"></label>
+   <div id="iudwarn"></div>
+   <button class="act" id="vsave" style="margin-top:10px">Save visit</button> <span class="muted" id="vm"></span></div>
+
+   <div class="card"><h3>Visits</h3><table><tr><th>#</th><th>Date</th><th>Method</th><th>Next appointment</th><th>Remark</th></tr>
+    ${(visits||[]).map(v=>`<tr><td>${esc(v.visit_no||'')}</td><td>${esc(v.visit_date||'')}</td>
+      <td>${esc((FP_METHODS.find(x=>x[0]===v.method)||[,v.method||''])[1])}</td><td>${esc(v.appointment_date||'')}</td><td>${esc(v.remark||'')}</td></tr>`).join('')
+      ||'<tr><td colspan=5 class=muted>No visits yet.</td></tr>'}
+   </table></div>`;
+  const chk=()=>{ $('#iudwarn').innerHTML=(vmth.value==='IUCD'&&c.iud_contraindicated==1)
+    ? `<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>IUCD is contraindicated for this client.</b> ${esc(c.iud_contra_detail||'')} — choose another method or document the clinical justification.</div>` : ''; };
+  vmth.addEventListener('change',chk); chk();
+  $('#vsave').onclick=async()=>{ const b=$('#vsave'); if(b.disabled) return; b.disabled=true;
+    try{ const r=await api('POST','fp_visits',{fp_client_id:+id,visit_no:(+vno.value||null),visit_date:ecGet('vdt'),
+        method:(vmth.value||null),appointment_date:ecGet('vapp'),remark:(vrmk.value||null)});
+      if(r&&(r.id||r.queued)){ toast('Visit recorded','ok'); setTimeout(()=>fpClient(id),500); }
+      else $('#vm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+function lafpForm(){
+  $('#fpform').innerHTML=`<div class="card"><h3>Long-acting FP removal</h3>
+   <div class="grid">
+    <label>MRN<input id="lmrn"></label>
+    <label>Name of client<input id="lnm"></label>
+    <label>Age<input id="lage" type="number" min="10" max="70"></label>
+    ${ecPicker('lreg','Registration date',true)}
+    ${ecPicker('lins','Date of insertion')}
+    <label>Type of LAFP used<select id="ltyp">${selOpts(LAFP_TYPES)}</select></label>
+    <label>Place LAFP was received<select id="lplc">${selOpts(LAFP_PLACE)}</select></label>
+    ${ecPicker('lrem','Date of removal',true)}
+    <label>Duration used (months)<input id="ldur" type="number" min="0"></label>
+    <label>Reason for removal<select id="lrsn">${selOpts(LAFP_REASON)}</select></label>
+    ${tpSel('ltp','Targeted population category')}
+    <label>HIV test result<select id="lhr">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+    <label>Post-removal contraceptive<select id="lpost">${selOpts(FP_METHODS.filter(m=>['MaC','FeC','OC','Inj','EC','Diaph','IUCD','Imp'].includes(m[0])))}</select></label>
+   </div>
+   <div class="ticks">${tick('lho','HIV test offered')}${tick('lhp','HIV test performed')}${tick('lhc','HIV-specific contraceptive counselling offered')}${tick('lla','HIV positive — linked to ART')}</div>
+   <div id="lpostwarn" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
+   <label>Remark<input id="lrmk"></label>
+   <button class="act" id="lsave" style="margin-top:10px">Save removal</button> <span class="muted" id="lm"></span></div>`;
+  // A removal for a reason OTHER than wanting to conceive, with no method to follow, is a
+  // woman leaving unprotected. Surface it rather than let it pass silently.
+  const warn=()=>{ const b=$('#lpostwarn');
+    if(lrsn.value && lrsn.value!=='c' && !lpost.value){ b.style.display='';
+      b.textContent='She is having a long-acting method removed but no follow-on method is recorded, and she is not removing it to get pregnant. She will leave unprotected — offer a method or document her choice.'; }
+    else b.style.display='none'; };
+  lrsn.addEventListener('change',warn); lpost.addEventListener('change',warn);
+  $('#lsave').onclick=async()=>{ const b=$('#lsave'); if(b.disabled) return; b.disabled=true;
+    try{
+      if(!lnm.value.trim()){ modal('Name required','Enter the client&rsquo;s name.'); return; }
+      const r=await api('POST','lafp',{mrn:(lmrn.value||null),name:lnm.value,age:(+lage.value||null),
+        reg_date:ecGet('lreg'),insertion_date:ecGet('lins'),lafp_type:(ltyp.value||null),place_code:(lplc.value||null),
+        removal_date:ecGet('lrem'),duration_months:(+ldur.value||null),removal_reason:(lrsn.value||null),
+        hiv_offered:tk('lho'),hiv_performed:tk('lhp'),hiv_result:(lhr.value||null),hiv_counselled:tk('lhc'),hiv_linked_art:tk('lla'),
+        target_pop_code:(ltp.value||null),post_removal_method:(lpost.value||null),remark:(lrmk.value||null)});
+      if(r&&(r.id||r.queued)){ toast('Removal recorded','ok'); window._fpTab='lafp'; fpScreen(); }
+      else $('#lm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+// ============================================================================
+// IMMUNIZATION  —  Td (MoH register 10)  +  HPV (MoH register 9)
+// Both registers have the same shape: a client, and a set of dated doses.
+// Td: 5 doses, with separate schedules for pregnant and non-pregnant women.
+// HPV: 2 doses, for schoolgirls — who are NOT maternity patients, hence their own identity.
+// ============================================================================
+const TD_SCHEDULE={1:'At the first ANC contact',2:'At least 4 weeks after Td-1',3:'At least 6 months after Td-2',
+ 4:'At least 1 year after Td-3',5:'At least 1 year after Td-4'};
+const TD_PROTECTION={1:'0%',2:'80% (1–3 years)',3:'95% (5 years)',4:'99% (10 years)',5:'99% (all childbearing years)'};
+
+async function immScreen(){
+  const prog=window._immProg||'Td';
+  const clients=await api('GET','imm_clients?programme='+prog).catch(()=>[]);
+  const T=(k,t)=>`<a class="nav${prog===k?' on':''}" href="#imm" data-prog="${k}">${t}</a>`;
+  app().innerHTML=nav()+`<div class="card"><h3>Immunization</h3>
+   <p class="muted">${prog==='Td'?'Tetanus–diphtheria for women. Td-1 and Td-2 are the minimum in pregnancy; Td-2 gives 80% protection, Td-3 gives 95%.':'HPV vaccination for girls — two doses. Girls here are not maternity patients, so they have their own record.'}</p>
+   <nav class="navbar" style="margin:0 0 10px">${T('Td','Td — tetanus/diphtheria')}${T('HPV','HPV — girls')}</nav>
+   <button class="act" id="inew">New ${prog} client</button>
+   <table style="margin-top:10px"><tr><th>MRN</th><th>Name</th><th>Age</th>${prog==='Td'?'<th>Pregnant</th>':'<th>School</th>'}<th>Doses</th><th>Status</th><th></th></tr>
+    ${(clients||[]).map(c=>{ const n=+c.dose_count||0;
+      const done=(prog==='Td')?(n>=2):(n>=2);
+      return `<tr><td>${esc(c.mrn||'')}</td><td>${esc(c.name||'')}</td><td>${esc(c.age||'')}</td>
+       <td>${prog==='Td'?(c.pregnant==1?'Yes':'No'):(c.out_of_school==1?'Out of school':('Grade '+esc(c.in_school_grade||'?')))}</td>
+       <td>${n}</td>
+       <td>${done?'<span class="pill green">'+(prog==='Td'?'Td2+ ✓':'Complete ✓')+'</span>':'<span class="pill amber">Incomplete</span>'}</td>
+       <td><a class="nav" href="#immclient/${c.id}">Open</a></td></tr>`;}).join('')
+      ||'<tr><td colspan=7 class=muted>No '+prog+' clients yet.</td></tr>'}
+   </table></div>
+   <div id="immform"></div>`;
+  document.querySelectorAll('[data-prog]').forEach(a=>a.onclick=(e)=>{ e.preventDefault(); window._immProg=a.dataset.prog; immScreen(); });
+  $('#inew').onclick=()=>immNewForm(prog);
+}
+
+function immNewForm(prog){
+  $('#immform').innerHTML=`<div class="card"><h3>New ${prog} client</h3>
+   <div class="grid">
+    <label>MRN<input id="imrn"></label>
+    <label>${prog==='HPV'?'Girl&rsquo;s name':'Name'}<input id="inm"></label>
+    <label>Age<input id="iage" type="number" min="${prog==='HPV'?8:10}" max="${prog==='HPV'?18:60}"></label>
+    ${prog==='HPV'?ecPicker('idob','Date of birth'):''}
+    ${prog==='Td'?`<label>Pregnant?<select id="ipreg">${selOpts([['1','Yes — pregnant'],['0','No — not pregnant']])}</select></label>`:''}
+    ${prog==='HPV'?`<label>In school (grade)<input id="igrd" placeholder="e.g. 5"></label>`:''}
+    <label>Woreda<input id="iwor"></label>
+    <label>Kebele<input id="ikeb"></label>
+    <label>Ketena / Gott<input id="iket"></label>
+    ${prog==='HPV'?`<label>House no.<input id="ihse"></label>`:''}
+    ${ecPicker('ireg','Registration date',true)}
+   </div>
+   ${prog==='HPV'?`<div class="ticks">${tick('ioos','Out of school')}</div>`:''}
+   <label>Remark<input id="irmk"></label>
+   <button class="act" id="isave" style="margin-top:10px">Save client</button> <span class="muted" id="im"></span></div>`;
+  $('#isave').onclick=async()=>{ const b=$('#isave'); if(b.disabled) return; b.disabled=true;
+    try{
+      if(!inm.value.trim()){ modal('Name required','Enter the client&rsquo;s name.'); return; }
+      const r=await api('POST','imm_clients',{programme:prog,mrn:(imrn.value||null),name:inm.value,age:(+iage.value||null),
+        dob:(prog==='HPV'?ecGet('idob'):null),
+        pregnant:(prog==='Td'?(($('#ipreg')||{}).value===''?null:+$('#ipreg').value):null),
+        in_school_grade:(prog==='HPV'?(($('#igrd')||{}).value||null):null),
+        out_of_school:(prog==='HPV'?tk('ioos'):null),
+        woreda:(iwor.value||null),kebele:(ikeb.value||null),ketena:(iket.value||null),
+        house_no:(prog==='HPV'?(($('#ihse')||{}).value||null):null),
+        reg_date:ecGet('ireg'),remark:(irmk.value||null)});
+      if(r&&r.id){ toast('Client registered','ok'); location.hash='#immclient/'+r.id; }
+      else $('#im').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+async function immClient(id){
+  const [cs,doses]=await Promise.all([api('GET','imm_clients').catch(()=>[]),api('GET','imm_doses?client='+id).catch(()=>[])]);
+  const c=(cs||[]).find(x=>x.id==id)||{};
+  const prog=c.programme||'Td';
+  const maxDose=(prog==='Td')?5:2;
+  const given={}; (doses||[]).forEach(d=>given[d.dose_no]=d.dose_date);
+  const n=Object.keys(given).length;
+  const nextDose=[...Array(maxDose)].map((_,i)=>i+1).find(i=>!given[i]);
+  app().innerHTML=nav()+`<div class="card"><h3>${esc(c.name||'Client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(prog)} · ${esc(c.mrn||'')}</span></h3>
+   <p class="muted">${esc(c.age||'?')} yrs${prog==='Td'?(c.pregnant==1?' · <b>pregnant</b>':' · not pregnant'):(c.out_of_school==1?' · out of school':' · grade '+esc(c.in_school_grade||'?'))} · ${esc([c.woreda,c.kebele,c.ketena].filter(Boolean).join(', ')||'—')}</p>
+   ${(prog==='Td'&&c.pregnant==1&&n<2)?`<div style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>Td-2 not yet given.</b> A pregnant woman needs at least Td-1 and Td-2 to protect her and the newborn against tetanus. Td-2 must be at least 4 weeks after Td-1, and at least 2 weeks before the due date.</div>`:''}
+   ${(prog==='HPV'&&n>=2)?`<div style="background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">HPV schedule complete — both doses given.</div>`:''}
+   <a class="nav" href="#imm">&lsaquo; Back to immunization</a></div>
+
+   <div class="card"><h3>Doses</h3>
+    <table><tr><th>Dose</th><th>Date given</th>${prog==='Td'?'<th>When it is due</th><th>Protection</th>':''}</tr>
+    ${[...Array(maxDose)].map((_,i)=>{const d=i+1; return `<tr>
+      <td><b>${prog}-${d}</b></td>
+      <td>${given[d]?esc(given[d]):'<span class="muted">not given</span>'}</td>
+      ${prog==='Td'?`<td class="muted" style="font-size:12px">${TD_SCHEDULE[d]}</td><td class="muted" style="font-size:12px">${TD_PROTECTION[d]}</td>`:''}
+    </tr>`;}).join('')}
+    </table>
+
+    ${nextDose?`<div class="grid" style="margin-top:12px">
+      <label>Record dose<select id="dno">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (re-record)':'')]),nextDose)}</select></label>
+      ${ecPicker('ddt','Date given',true)}
+     </div>
+     <button class="act" id="dsave" style="margin-top:10px">Save dose</button> <span class="muted" id="dm"></span>`
+     :`<p class="muted" style="margin-top:10px">All ${maxDose} doses recorded.</p>`}
+   </div>`;
+  if($('#dsave')) $('#dsave').onclick=async()=>{ const b=$('#dsave'); if(b.disabled) return; b.disabled=true;
+    try{ const r=await api('POST','imm_doses',{client_id:+id,dose_no:+dno.value,dose_date:ecGet('ddt')});
+      if(r&&(r.id||r.queued)){ toast(prog+'-'+dno.value+' recorded','ok'); setTimeout(()=>immClient(id),500); }
+      else $('#dm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
 }
 
 // ---- Pregnancy test (OPD) -> ANC room --------------------------------------
@@ -1717,6 +2112,10 @@ async function pregTest(){
      <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
      <div style="margin-top:4px">A positive test means she needs ANC. Ticking this registers her for antenatal care and she will appear on the ANC worklist immediately.</div>
    </div>
+   <div id="ptneg" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+     <div class="ticks">${tick('ptfp','Offer family planning now (open her as an FP client)')}</div>
+     <div style="margin-top:4px">She is not pregnant &mdash; and she is in the building, thinking about her fertility, with a provider in front of her. This is the highest-yield moment to offer contraception. Ticking this opens her family-planning record so she does not leave with nothing.</div>
+   </div>
    <label>Note<input id="ptn" placeholder="optional"></label>
    <button class="act" id="ptsave" style="margin-top:10px">Save test</button> <span class="muted" id="ptm"></span></div>
 
@@ -1731,16 +2130,24 @@ async function pregTest(){
   ptq.addEventListener('input',async()=>{ const q=ptq.value.trim(); if(q.length<2) return;
     found=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
     ptw.innerHTML='<option value="">— select the woman —</option>'+(found||[]).map(w=>`<option value="${w.id}">${esc(w.mrn)} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
-  ptr.addEventListener('change',()=>{ $('#ptpos').style.display=(ptr.value==='positive')?'':'none'; });
+  ptr.addEventListener('change',()=>{
+    $('#ptpos').style.display=(ptr.value==='positive')?'':'none';
+    $('#ptneg').style.display=(ptr.value==='negative')?'':'none';
+  });
 
   $('#ptsave').onclick=async()=>{
+    const b=$('#ptsave'); if(b.disabled) return;
     if(!ptw.value){ modal('Select the woman','Search for her by MRN or name and select her from the list. If she is not registered yet, register her first.'); return; }
     if(!ptr.value){ modal('Select the result','Record whether the pregnancy test was positive or negative.'); return; }
-    const b=$('#ptsave'); b.disabled=true;
+    b.disabled=true;
     try{
       const r=await api('POST','pregnancy_tests',{woman_id:+ptw.value,test_date:ecGet('ptd'),result:ptr.value,
-        note:(ptn.value||null),link_to_anc:(ptr.value==='positive'&&tk('ptlink'))?1:0});
+        note:(ptn.value||null),
+        link_to_anc:(ptr.value==='positive'&&tk('ptlink'))?1:0,
+        link_to_fp:(ptr.value==='negative'&&tk('ptfp'))?1:0,
+        fp_offered:(ptr.value==='negative'&&tk('ptfp'))?1:0});
       if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+r.episode_id,700); }
+      else if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); setTimeout(()=>location.hash='#fpclient/'+r.fp_client_id,700); }
       else if(r&&(r.id||r.queued)){ $('#ptm').textContent=' saved'; setTimeout(()=>pregTest(),600); }
       else $('#ptm').textContent=' '+((r&&r.error)||'error');
     } finally{ b.disabled=false; }

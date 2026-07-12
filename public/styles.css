@@ -309,3 +309,11 @@ label.tick{display:inline-flex;align-items:center;gap:6px;background:#eef6f5;bor
   padding:5px 12px;font-size:13px;font-weight:400;cursor:pointer;white-space:nowrap}
 label.tick:hover{background:#e2f1ee}
 label.tick input{margin:0;width:auto}
+
+/* ---- Home launcher tiles (v18) ---- */
+a.tile{transition:transform .08s ease, box-shadow .12s ease}
+a.tile:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(15,118,110,.10)}
+a.tile:active{transform:translateY(0)}
+@media (max-width:640px){
+  a.tile{padding:12px 11px}
+}
