@@ -36,6 +36,11 @@ services:
       SITE_DOMAIN: ${SITE_DOMAIN:?e.g. partograph.epichealthsystems.org}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Other projects on this droplet (e.g. hub.epichealthsystems.org) keep their Caddy
+      # config in their OWN files here, OUTSIDE the ADHERE+ repo. The Caddyfile imports
+      # them. This is what stops an ADHERE+ `git pull` from clobbering another project —
+      # and stops another project's config from blocking an ADHERE+ deploy.
+      - /srv/caddy-sites:/etc/caddy/conf.d:ro
       - caddydata:/data
     depends_on: [web]
 volumes: { dbdata: {}, caddydata: {}, sessions: {} }
