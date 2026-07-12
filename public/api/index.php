@@ -554,13 +554,34 @@ try {
     // insert a second row — a phantom twin, a duplicate delivery.
     if($m==='PATCH' && in_array($tbl,['babies','delivery_summary','pnc_visits','anc_visits']) && $id){
       $u=require_role(['provider','admin']); $b=body();
-      $q=db()->prepare("SELECT episode_id FROM `$tbl` WHERE id=?"); $q->execute([$id]); $row=$q->fetch();
+      // SELECT * (not just episode_id): the linkage below needs the row's own visit_date when the
+      // caller patches only the result and not the date.
+      $q=db()->prepare("SELECT * FROM `$tbl` WHERE id=?"); $q->execute([$id]); $row=$q->fetch();
       if(!$row) err('not found',404);
       require_ep($row['episode_id']);
       $f=array_intersect_key($b,array_flip($allow));
       unset($f['episode_id'],$f['recorded_by']);         // never re-parent a row, never forge authorship
       foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+
+      // A CORRECTION MUST TRIGGER THE SAME CONSEQUENCES AS THE ORIGINAL ENTRY.
+      // These linkage functions were wired to POST only. So an ANC visit saved with the HIV result
+      // still PENDING, then PATCHed to positive when the lab came back, NEVER set
+      // women.hiv_known_positive: she stayed off the high-risk worklist, was re-offered a test at her
+      // next contact, and no PMTCT prompt ever fired. The result reached the row and stopped there.
+      // A late result is the NORMAL case in a facility without a same-day lab — it is exactly the
+      // path that has to work.
+      //
+      // Note the guards. mark_hiv_positive() sets the flag unconditionally — it is the CALLER that
+      // must establish the result is 'P'. Calling it on any edit would mark every woman positive.
+      $eid=(int)$row['episode_id'];
       if($tbl==='babies') sync_hiv_from_baby((int)$id);
+      if(in_array($tbl,['anc_visits','pnc_visits'],true)){
+        if(($f['hiv_test_result']??'')==='P') mark_hiv_positive($eid);   // ONLY on an explicit positive
+      }
+      if($tbl==='anc_visits' && !empty($f['td_dose_no'])){
+        td_to_register($eid,(int)$f['td_dose_no'], ($f['visit_date'] ?? $row['visit_date'] ?? null), $u);
+      }
+
       audit('update',$tbl,$id,array_keys($f)); out(['ok'=>true]); }
 
     if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers','lab_orders','messages']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
