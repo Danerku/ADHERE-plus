@@ -375,8 +375,17 @@ async function flush(){
       }
       if(res.status>=500){
         const t=qBump(it.cid);
-        if(t>=8){ dlqAdd(it,res.status,'the server kept failing'); qDrop(it.cid); }
-        break;                                // server unwell: back off rather than hammer it
+        if(t>=8){ dlqAdd(it,res.status,'the server kept failing'); qDrop(it.cid); continue; }
+        // HEAD-OF-LINE BLOCKING. A 5xx used to stop the whole flush, on the reasonable theory that
+        // the server is unwell and hammering it will not help. But if the 5xx is caused by ONE
+        // entry the server will never accept, that entry sits at the head of the queue and blocks
+        // every valid record behind it — a whole offline shift stuck behind one bad row, while the
+        // provider is told only "sync N pending".
+        //   * first two failures  -> back off. The server probably IS unwell; give it a moment.
+        //   * after that          -> step OVER this entry and drain the rest. It stays queued and
+        //                            keeps retrying, and is surfaced on the failed screen at 8.
+        if(t<2) break;
+        continue;
       }
       // 4xx — the server rejected the CONTENT. Retrying cannot help. It goes to the failed list,
       // which is VISIBLE and recoverable (see failedScreen).

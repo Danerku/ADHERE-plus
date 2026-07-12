@@ -1088,4 +1088,32 @@ try {
   }
 
   err('not found: '.$r, 404);
-} catch (Throwable $ex) { error_log('ADHERE API: '.$ex->getMessage()); err('server error', 500); }
+} catch (Throwable $ex) {
+  error_log('ADHERE API: '.$ex->getMessage());
+
+  // A BAD VALUE IS NOT A SERVER FAILURE. Every database constraint violation used to come back as
+  // HTTP 500 — "server error" — and 500 means, to the offline queue, "the server is unwell, back off
+  // and try again later". So ONE entry the server would never accept (a duplicate delivery, a value
+  // outside an enum) sat at the head of the queue and BLOCKED EVERY VALID RECORD BEHIND IT, retrying
+  // for as long as the device stayed online. In a facility that has been offline all day, that is a
+  // whole shift's work stuck behind one bad row, with the provider told only "sync N pending".
+  //
+  // These are faults in the REQUEST. Say so, with the status that means it: the queue then surfaces
+  // the entry on the failed-entries screen — visible, with her record intact — and moves on.
+  $code = 0;
+  if ($ex instanceof \PDOException) { $code = (int)($ex->errorInfo[1] ?? 0); }
+  switch ($code) {
+    case 1062:  // duplicate entry on a unique key
+      err('This has already been recorded (duplicate entry).', 409);
+    case 1451:  // referenced row is still in use
+    case 1452:  // the row it points at does not exist
+      err('That record refers to something that does not exist here.', 409);
+    case 1264:  // out of range
+    case 1265:  // data truncated for column  (a value outside an ENUM lands here)
+    case 1292:  // incorrect date/datetime value
+    case 1366:  // incorrect value for column
+      err('One of the values is not valid for this field.', 400);
+    default:
+      err('server error', 500);
+  }
+}
