@@ -110,7 +110,8 @@ function route(){
   ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
-    fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
+    fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
+    account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
 function forcePw(){
@@ -183,9 +184,10 @@ async function home(){
   const isAdmin=(ME.role==='admin');
   const canWrite=(ME.role==='recorder'||ME.role==='provider'||ME.role==='admin');
   // live counts so the tiles mean something the moment you land
-  let hr=0,lab=0;
+  let hr=0,lab=0,pm=0;
   try{ const eps=await api('GET','episodes'); hr=(eps||[]).filter(e=>e.high_risk==1).length;
        lab=(eps||[]).filter(e=>e.service_category==='labour'&&e.status==='laboring').length; }catch(e){}
+  try{ const pms=await api('GET','pmtct'); pm=(pms||[]).filter(pmtctNeedsAction).length; }catch(e){}
 
   app().innerHTML=nav()+`<div class="card">
     <h3>Welcome, ${esc(ME.full_name)}</h3>
@@ -204,6 +206,7 @@ async function home(){
     ${sectionLabel('FAMILY PLANNING &amp; PREVENTION')}
     ${tileGrid(
       tileHtml('#fp','&#128737;','Family planning','Methods · LAFP removal','soft')+
+      tileHtml('#pmtct','&#129656;','PMTCT',(pm?pm+' need action':'Mother + exposed infant'),(pm?'red':'soft'))+
       tileHtml('#imm','&#128137;','Immunization','Td · HPV','soft')
     )}
 
@@ -285,17 +288,31 @@ function carryForward(w,rhNeg){
 
 // Ethiopian-calendar date entry: 3 selects (day/month/year E.C.) -> stores Gregorian YYYY-MM-DD
 function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
-function ecPicker(id,label,def){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
-  const days=Array.from({length:30},(_,i)=>i+1); const years=Array.from({length:7},(_,i)=>t.year-4+i);
+// `def` = default to today. `iso` = pre-select an already-recorded Gregorian date, so that
+// re-saving a form that shows an existing date does not silently blank it.
+function ecPicker(id,label,def,iso){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
+  let s=null;
+  if(iso && window.Ethiopian){ const dt=new Date(iso+'T00:00:00'); if(!isNaN(dt)) s=Ethiopian.toEth(dt); }
+  const sel = s || (def ? t : null);                    // an existing date wins over "today"
+  const days=Array.from({length:30},(_,i)=>i+1);
+  let years=Array.from({length:7},(_,i)=>t.year-4+i);
+  if(sel && years.indexOf(sel.year)<0) years=years.concat([sel.year]).sort((a,b)=>a-b);  // don't lose an out-of-range year
   return `<label>${label} <span class="muted" style="font-weight:400">(Ethiopian calendar)</span>
    <span style="display:flex;gap:6px;flex-wrap:wrap">
-    <select id="${id}_d" style="min-width:80px"><option value="">Day</option>${days.map(d=>`<option${def&&d===t.day?' selected':''}>${d}</option>`).join('')}</select>
-    <select id="${id}_m" style="min-width:135px"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${def&&(i+1)===t.month?' selected':''}>${m}</option>`).join('')}</select>
-    <select id="${id}_y" style="min-width:90px"><option value="">Year</option>${years.map(y=>`<option${y===t.year?' selected':''}>${y}</option>`).join('')}</select>
+    <select id="${id}_d" style="min-width:80px"><option value="">Day</option>${days.map(d=>`<option${sel&&d===sel.day?' selected':''}>${d}</option>`).join('')}</select>
+    <select id="${id}_m" style="min-width:135px"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${sel&&(i+1)===sel.month?' selected':''}>${m}</option>`).join('')}</select>
+    <select id="${id}_y" style="min-width:90px"><option value="">Year</option>${years.map(y=>`<option${y===(sel?sel.year:t.year)?' selected':''}>${y}</option>`).join('')}</select>
    </span>
    <span class="muted" style="font-weight:400;font-size:11px">format: Day &middot; Month &middot; Year</span></label>`; }
 function ecGet(id){ const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).value, y=($('#'+id+'_y')||{}).value;
   return (d&&m&&y&&window.Ethiopian)?Ethiopian.toGreg(+y,+m,+d):null; }
+// Set an already-rendered EC picker from a Gregorian date (or clear it with null).
+function ecSet(id,iso){ const D=$('#'+id+'_d'), M=$('#'+id+'_m'), Y=$('#'+id+'_y'); if(!D||!M||!Y) return;
+  if(!iso||!window.Ethiopian){ D.value=''; M.value=''; return; }
+  const dt=new Date(iso+'T00:00:00'); if(isNaN(dt)){ D.value=''; M.value=''; return; }
+  const e=Ethiopian.toEth(dt);
+  if(![...Y.options].some(o=>+o.value===e.year)) Y.add(new Option(e.year,e.year));
+  D.value=String(e.day); M.value=String(e.month); Y.value=String(e.year); }
 function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
 
 // ---- registration validation -------------------------------------------------
@@ -737,7 +754,7 @@ async function overviewSection(){
   let o; try{ o=await api('GET','overview'+(days?('?days='+days):'')); }catch(e){ return '<div class="card">Could not load overview: '+esc(e.message||'error')+'</div>'; }
   window._ov=o;
   const c=o.caseload||{}, pr=o.process||{}, nb=o.newborn_care||{}, cx=o.complications||{};
-  const fp=o.fp||{}, im=o.immunization||{}, pt=o.pregnancy_test||{};
+  const fp=o.fp||{}, im=o.immunization||{}, pt=o.pregnancy_test||{}, pm=o.pmtct||{};
   const pct=(a,b)=>b?Math.round(100*a/b)+'%':'—';
   const hrPct=c.total?Math.round(100*c.high_risk/c.total):0;
   return `<div class="card">
@@ -808,6 +825,30 @@ async function overviewSection(){
       <div><h4>Reason for LAFP removal</h4>${ovBar(o.lafp_reasons)}</div>
     </div>
 
+    <h4 style="margin-top:14px">PMTCT &mdash; the cascade</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(pm.mothers||0,'Mothers enrolled')}
+      ${ovStat(pct(pm.on_art||0,pm.mothers||0),'On ART',(pm.on_art||0)+' of '+(pm.mothers||0))}
+      ${ovStat(pct(pm.vl_done||0,pm.on_art||0),'Viral load done',(pm.vl_done||0)+' of '+(pm.on_art||0)+' on ART')}
+      ${ovStat(pct(pm.vl_suppressed||0,pm.vl_done||0),'Suppressed',(pm.vl_suppressed||0)+' of '+(pm.vl_done||0)+' tested')}
+      ${ovStat(pm.vl_detectable||0,'Detectable','needs action')}
+      ${ovStat(pm.ltf||0,'Lost to follow-up')}
+    </div>
+    <h4 style="margin-top:10px">PMTCT &mdash; the exposed infant</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(pm.infants||0,'Exposed infants')}
+      ${ovStat(pct(pm.infant_arv||0,pm.infants||0),'ARV prophylaxis',(pm.infant_arv||0)+' of '+(pm.infants||0))}
+      ${ovStat(pct(pm.pcr_done||0,pm.infants||0),'DNA/PCR done',(pm.pcr_done||0)+' of '+(pm.infants||0))}
+      ${ovStat(pct(pm.pcr_by_8wk||0,pm.pcr_done||0),'Tested by 8 weeks',(pm.pcr_by_8wk||0)+' of '+(pm.pcr_done||0)+' tested')}
+      ${ovStat(pct(pm.pcr_positive||0,pm.pcr_done||0),'PCR positive',(pm.pcr_positive||0)+' of '+(pm.pcr_done||0)+' tested')}
+      ${ovStat(pm.discharged_neg||0,'Discharged negative')}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:10px">
+      <div><h4>How she entered PMTCT</h4>${ovBar(o.pmtct_entry)}</div>
+      <div><h4>Infant feeding option</h4>${ovBar(o.pmtct_feeding,['EBF','ERF'])}</div>
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:4px"><b>Tested by 8 weeks</b> is the one that matters: the DNA/PCR is due at 6 weeks, and every week of delay is a week an infected infant spends untreated. <b>PCR positive</b> is transmission that already happened &mdash; it is the number this whole module exists to drive to zero.</p>
+
     <h4 style="margin-top:14px">Immunization</h4>
     <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
       ${ovStat(im.td_clients||0,'Td clients')}
@@ -828,6 +869,11 @@ function wireOverview(){
     push('Caseload',o.caseload); push('Mode of delivery',o.mode_of_delivery); push('Birth outcome',o.birth_outcome);
     push('Maternal outcome',o.maternal_outcome); push('Complications',o.complications); push('Process of care',o.process);
     push('IPPFP',o.ippfp); push('Newborn care',o.newborn_care);
+    // the whole MCH continuum, not just the maternity half
+    push('Pregnancy test',o.pregnancy_test); push('Family planning',o.fp); push('FP method mix',o.fp_methods);
+    push('LAFP removal reason',o.lafp_reasons);
+    push('PMTCT',o.pmtct); push('PMTCT entry point',o.pmtct_entry); push('PMTCT infant feeding',o.pmtct_feeding);
+    push('Immunization',o.immunization);
     const csv=lines.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\n');
     const bl=new Blob([csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
     a.href=URL.createObjectURL(bl); a.download='adhere_overview_'+(new Date().toISOString().slice(0,10))+'.csv'; a.click(); };
@@ -1775,6 +1821,23 @@ const REG_COLS={
     ['Grade','in_school_grade'],['Out of school',tickCell('out_of_school')],
     ['Woreda','woreda'],['Kebele','kebele'],['Ketena/Gott','ketena'],['House no.','house_no'],
     ['Reg. date','reg_date'],['HPV-1','dose1'],['HPV-2','dose2'],['Remark','remark']],
+  // MoH register 6 — Integrated MNCH/PMTCT. Items 1-47, then the cohort summary.
+  pmtct:[['S.N',(r,i)=>i+1],['Mother&rsquo;s name','name'],['MRN','mrn'],['ART unique ID','art_number'],['Age','age'],['Booking date','booking_date'],
+    ['Newly diagnosed &amp; started ART','newly_diagnosed'],['Known HIV+','known_positive'],
+    ['LNMP','lnmp'],['EDD','edd'],['GA (weeks)','ga_weeks'],['Ferrous/folic','ifa_provided'],['Syphilis','syphilis_result'],
+    ['Feeding option','feeding_option'],['Date of delivery','delivery_date'],['Sex of infant','infant_sex'],
+    ['Place of delivery','place_of_delivery'],['Delivery outcome','delivery_outcome'],['ART in labour','art_during_labour'],
+    ['Infant ARV prophylaxis','infant_arv_prophylaxis'],['FP counselled','fp_counselled'],
+    ['New',r=>r.fp_acceptor==='new'?'✓':''],['Repeat',r=>r.fp_acceptor==='repeat'?'✓':''],['Contraceptive','fp_method'],
+    ['Partner accepted',tickCell('partner_accepted')],['Partner tested','partner_result'],['Partner target pop','partner_target_pop'],
+    ['Partner linked to ART',tickCell('partner_linked_art')],
+    ['TB screening','tb_screening'],['INH started','inh_start_date'],['TB Rx started','tb_rx_date'],['Unit TB no.','tb_unit_number'],
+    ['Initial CD4','cd4_count'],['WHO stage','who_stage'],['CPT started','cpt_started'],['ART initiated','art_start_date'],['Initial regimen','art_regimen'],
+    ['Infant MRN','infant_mrn'],['HEI enrolment','hei_enrol_date'],['Infant ARV date','arv_start_date'],['Infant feeding (6m)','feeding_6m'],
+    ['Age (wks) CPT','cpt_age_weeks'],['Age (wks) DNA/PCR','pcr_age_weeks'],['DNA/PCR result','pcr_result'],['Rapid HIV-Ab','rapid_ab_result'],
+    ['Counselled CCD','cnsl_ccd'],['Counselled nutrition','cnsl_nutrition'],
+    ['Cohort month 0','cohort_month0'],['Mother status','mother_status'],['Latest viral load','last_vl'],['Infant outcome','infant_outcome'],
+    ['Remark','remark']],
   pregtally:[['Age band','band'],['Women tested','tested'],['HCG positive','positive'],['Negative','negative'],
     ['Negative — FP offered','negative_offered_fp'],['Linked to ANC','linked_to_anc'],['Linked to FP','linked_to_fp']]
 };
@@ -1792,6 +1855,7 @@ async function registersScreen(){
     <label>Register<select id="rt">
       ${opt('anc','3. Antenatal care (ANC)')}${opt('delivery','4. Delivery')}${opt('pnc','5. Postnatal care (PNC)')}
       ${opt('fp','1. Family planning')}${opt('lafp','2. Long-acting FP removal')}
+      ${opt('pmtct','6. PMTCT — integrated MNCH/PMTCT')}
       ${opt('td','10. Td immunization')}${opt('hpv','9. HPV immunization')}
       ${opt('pregtally','Pregnancy test — tally sheet')}
     </select></label>
@@ -1815,6 +1879,7 @@ async function registersScreen(){
     $('#rm').textContent=' '+d.count+' row(s)';
     const RNAME={anc:'ANC register',delivery:'Delivery register',pnc:'PNC register',fp:'Family planning register',
       lafp:'Long-acting FP removal register',td:'Td immunization register',hpv:'HPV immunization register',
+      pmtct:'Integrated MNCH/PMTCT register — one row per exposed infant',
       pregtally:'Pregnancy test — tally sheet (aggregate, by age band)'};
     $('#regout').innerHTML=`<div class="card"><h3>${esc(RNAME[d.type]||d.type)}</h3>
       <p class="muted">${esc(d.facility||'')} &middot; ${esc(d.from)} to ${esc(d.to)} &middot; ${d.count} row(s)</p>
@@ -2091,6 +2156,425 @@ async function immClient(id){
     try{ const r=await api('POST','imm_doses',{client_id:+id,dose_no:+dno.value,dose_date:ecGet('ddt')});
       if(r&&(r.id||r.queued)){ toast(prog+'-'+dno.value+' recorded','ok'); setTimeout(()=>immClient(id),500); }
       else $('#dm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+// ============================================================================
+// PMTCT  (MoH register 6 — Integrated MNCH/PMTCT register, 47 items + cohort grid)
+//
+// This is a COHORT register, not an encounter register. The mother and her HIV-exposed
+// infant are each followed month by month, and the whole point is the outcome:
+//   * is she retained on ART with an undetectable viral load, and
+//   * did the infant get a DNA/PCR at about 6 weeks and end up HIV-negative?
+// Everything below exists to make those two questions answerable at a glance.
+// ============================================================================
+const PM_ENTRY=[['1','Newly diagnosed at ANC'],['2','Newly diagnosed in labour &amp; delivery'],['3','Newly diagnosed postpartum']];
+const PM_KNOWN=[['1','Known positive — already on ART at entry'],['2','Known positive — NOT on ART at entry']];
+const PM_FEED=[['EBF','EBF — exclusive breastfeeding'],['ERF','ERF — exclusive replacement feeding'],['MF','MF — mixed feeding']];
+const PM_PLACE=[['1','This facility'],['2','Another health facility'],['3','Home']];
+const PM_PN=[['P','Positive'],['N','Negative'],['ND','Not done']];
+const PM_MSTATUS=[['on_art','Alive and on ART'],['ltf','Lost to follow-up'],['transferred_out','Transferred out'],
+  ['transferred_in','Transferred in'],['malnourished','Malnourished'],['died','Died']];
+const PM_ISTATUS=[['exposed_bf','Exposed — still breastfeeding'],['discharged_negative','Discharged negative'],
+  ['positive','HIV positive'],['ltf','Lost to follow-up'],['transferred_out','Transferred out'],['died','Died']];
+const PM_IOUT=[['discharged_negative','Discharged HIV-negative'],['positive_on_art','HIV positive — on ART'],
+  ['ltf','Lost to follow-up'],['transferred_out','Transferred out'],['died','Died']];
+
+const wksSince=(d)=>{ if(!d) return null; const t=Date.parse(d); if(isNaN(t)) return null; return Math.floor((Date.now()-t)/6048e5); };
+const monthsSince=(d)=>{ if(!d) return null; const t=Date.parse(d); if(isNaN(t)) return null; return Math.floor((Date.now()-t)/2629800000); };
+const onArt=(m)=>!!(m.art_start_date || String(m.known_positive)==='1');
+
+// Cheap triage from the LIST row alone (no per-mother fetch), so the home tile and the
+// cohort table can both say "this one needs you" without N+1 requests.
+function pmtctNeedsAction(m){
+  if(!onArt(m)) return true;
+  if(m.last_vl==='detectable') return true;
+  if(m.last_status==='ltf') return true;
+  if(m.feeding_option==='MF') return true;
+  if(m.delivery_date && m.delivery_outcome==='LB' && !(+m.infant_count)) return true;
+  const ageW=wksSince(m.delivery_date);
+  if((+m.infant_count) > (+m.pcr_done) && ageW!=null && ageW>=6) return true;   // EID due or overdue
+  return false;
+}
+
+// The clinical to-do list for one mother-infant pair. This is the module's real value:
+// it turns a register into a worklist.
+function pmtctAlerts(m,infants){
+  const a=[];
+  if(!onArt(m)) a.push(['red','Not on ART','She is HIV positive and no ART start date is recorded. ART is the single most effective intervention to prevent transmission to the infant — start it today and record the date.']);
+  const vl=(m.last_vl||'');
+  if(vl==='detectable') a.push(['red','Viral load detectable (&gt;1,000 copies/ml)','Transmission risk to the infant is high. Give enhanced adherence counselling, repeat the viral load after 3 months, and refer for regimen review if it stays detectable.']);
+  if(onArt(m) && m.art_start_date && !vl && monthsSince(m.art_start_date)>=3)
+    a.push(['amber','Viral load overdue','The first viral load is due 3 months after ART initiation, then every 6 months. None has been recorded.']);
+  if(m.feeding_option==='MF') a.push(['red','Mixed feeding','Mixed feeding carries the highest risk of transmission of the three options. Counsel her to choose either exclusive breastfeeding or exclusive replacement feeding, and record the change.']);
+  if(m.last_status==='ltf') a.push(['red','Lost to follow-up','She has missed her appointment by more than two months. Trace her — she and the infant are both at risk.']);
+  if(m.delivery_date && m.delivery_outcome==='LB' && !(infants||[]).length)
+    a.push(['amber','Infant not enrolled','She has delivered a live baby but no HIV-exposed infant is enrolled in the HEI cohort. Enrol the infant so early infant diagnosis can be tracked.']);
+  if(m.delivery_date && m.infant_arv_prophylaxis!=='Y' && m.delivery_outcome==='LB')
+    a.push(['red','Infant ARV prophylaxis not given','The infant needs AZT + NVP for the first 6 weeks, then NVP alone for the next 6 weeks — 12 weeks in total.']);
+  if(m.tb_screening==='P' && !m.tb_rx_date) a.push(['amber','TB screen positive, no treatment recorded','She screened positive for TB symptoms and no TB treatment start date is recorded.']);
+  (infants||[]).forEach((i,n)=>{
+    const nm='Infant '+(n+1)+(i.mrn?' ('+i.mrn+')':'');
+    const ageW=wksSince(m.delivery_date);
+    if(i.pcr_result==null && ageW!=null && ageW>=6)
+      a.push([ageW>8?'red':'amber',nm+' — DNA/PCR due','The infant is '+ageW+' weeks old. The DNA/PCR test is due at 6 weeks of age'+(ageW>8?' and is now overdue':'')+'. Collect the sample and send it.']);
+    if(i.pcr_result==='P' && i.outcome!=='positive_on_art')
+      a.push(['red',nm+' — DNA/PCR POSITIVE','The infant is HIV infected. Link to the ART clinic today and start antiretroviral treatment.']);
+    if(i.pcr_result==='N' && i.cpt_age_weeks==null)
+      a.push(['amber',nm+' — cotrimoxazole not started','Cotrimoxazole prophylaxis is given to every HIV-exposed infant from 6 weeks until HIV infection is excluded.']);
+    if(!i.arv_start_date) a.push(['red',nm+' — no ARV prophylaxis date','Record the date the infant started ARV prophylaxis.']);
+  });
+  return a;
+}
+function alertBox(tone,title,text){
+  const c = tone==='red' ? ['#fcebeb','#f09595','#791f1f'] : ['#faeeda','#ef9f27','#633806'];
+  return `<div style="background:${c[0]};border:1px solid ${c[1]};color:${c[2]};border-radius:10px;padding:9px 12px;margin:6px 0;font-size:13px"><b>${title}</b> &mdash; ${text}</div>`;
+}
+
+async function pmtctScreen(){
+  const rows=await api('GET','pmtct').catch(()=>[]);
+  const need=(rows||[]).filter(pmtctNeedsAction).length;
+  app().innerHTML=nav()+`<div class="card"><h3>PMTCT</h3>
+   <p class="muted">Preventing mother-to-child transmission. Every HIV-positive mother and her exposed infant are followed as a cohort from enrolment until the infant&rsquo;s HIV status is finally known.</p>
+   ${need?alertBox('amber',need+' mother'+(need>1?'s':'')+' need action',
+      'Something is outstanding in their cascade &mdash; not on ART, a detectable viral load, an infant not yet tested, or lost to follow-up. Open each one to see what.'):''}
+   <button class="act" id="pnew">Enrol a mother</button>
+   <table style="margin-top:10px"><tr><th></th><th>ART no.</th><th>Name</th><th>Age</th><th>Enrolled</th><th>On ART</th><th>Viral load</th><th>Infants</th><th>EID</th><th>Status</th><th></th></tr>
+    ${(rows||[]).map(m=>{
+      const vl=m.last_vl||'';
+      const vlPill = vl==='undetectable' ? '<span class="pill green">Undetectable</span>'
+                   : vl==='detectable'   ? '<span class="pill red">Detectable</span>'
+                   : '<span class="pill amber">Not done</span>';
+      const nI=+m.infant_count||0, nP=+m.pcr_done||0;
+      const eid = !nI ? '<span class="muted">—</span>'
+                : nP>=nI ? '<span class="pill green">'+nP+'/'+nI+' tested</span>'
+                : '<span class="pill amber">'+nP+'/'+nI+' tested</span>';
+      return `<tr><td>${pmtctNeedsAction(m)?'<span title="Something is outstanding — open her">&#9888;&#65039;</span>':''}</td>
+       <td>${esc(m.art_number||'—')}</td><td>${esc(m.name||'')}</td><td>${esc(m.age||'')}</td>
+       <td>${esc(m.booking_date||'')}</td>
+       <td>${onArt(m)?'<span class="pill green">Yes</span>':'<span class="pill red">No</span>'}</td>
+       <td>${vlPill}</td><td>${nI||'<span class="muted">—</span>'}</td><td>${eid}</td>
+       <td>${m.last_status==='ltf'?'<span class="pill red">LTF</span>':(m.last_status==='died'?'<span class="pill red">Died</span>':(m.last_status==='transferred_out'?'<span class="pill">TO</span>':'<span class="pill green">Active</span>'))}</td>
+       <td><a class="nav" href="#pmtctclient/${m.id}">Open</a></td></tr>`;}).join('')
+      ||'<tr><td colspan=11 class=muted>No mothers enrolled in PMTCT yet.</td></tr>'}
+   </table></div>
+   <div id="pmform"></div>`;
+  $('#pnew').onclick=()=>pmtctNewForm();
+}
+
+function pmtctNewForm(){
+  $('#pmform').innerHTML=`<div class="card"><h3>Enrol a mother in PMTCT</h3>
+   <p class="muted">If she is already registered for maternity care, link her record &mdash; her delivery and her newborn then flow into the PMTCT cohort automatically instead of being typed twice.</p>
+   <div class="grid">
+    <label>Link her maternity record (MRN or name)<input id="pmq" placeholder="type to search — optional"></label>
+    <label>&nbsp;<select id="pmw"><option value="">— not linked / not registered —</option></select></label>
+   </div>
+   <div class="grid">
+    <label>Mother&rsquo;s name<input id="pmnm"></label>
+    <label>MRN<input id="pmmrn"></label>
+    <label>Age<input id="pmage" type="number" min="10" max="60"></label>
+    <label>ART unique ID number<input id="pmart" placeholder="e.g. 03/09/001/00001"></label>
+    ${ecPicker('pmbk','Booking date',true)}
+   </div>
+   <p class="muted" style="font-size:12px;margin:-2px 0 8px">ART number is region / facility type / facility / patient. Facility type: 08 = hospital, 09 = health centre.</p>
+
+   <h4 style="margin:12px 0 4px">How did she enter PMTCT?</h4>
+   <p class="muted" style="font-size:12px;margin:0 0 6px">She is either newly diagnosed here, or she came in already knowing she is positive. It cannot be both.</p>
+   <div class="grid">
+    <label>Newly diagnosed &amp; started on ART<select id="pmnd"><option value="">— not newly diagnosed —</option>${selOpts(PM_ENTRY).replace(/^<option value="">.*?<\/option>/,'')}</select></label>
+    <label>Known HIV positive<select id="pmkp"><option value="">— not previously known —</option>${selOpts(PM_KNOWN).replace(/^<option value="">.*?<\/option>/,'')}</select></label>
+   </div>
+   <div id="pmentrywarn"></div>
+
+   <h4 style="margin:12px 0 4px">Antenatal</h4>
+   <div class="grid">
+    ${ecPicker('pmlnmp','LNMP')}
+    ${ecPicker('pmedd','EDD')}
+    <label>Gestational age (weeks)<input id="pmga" type="number" min="0" max="45"></label>
+    <label>Ferrous sulfate / folic acid given<select id="pmifa">${selOpts([['Y','Yes'],['N','No']])}</select></label>
+    <label>Syphilis test result<select id="pmsyph">${selOpts([['R','Reactive'],['NR','Non-reactive'],['ND','Not done']])}</select></label>
+    <label>Selected infant feeding option<select id="pmfeed">${selOpts(PM_FEED)}</select></label>
+   </div>
+   <div id="pmfeedwarn"></div>
+
+   <h4 style="margin:12px 0 4px">HIV care</h4>
+   <div class="grid">
+    <label>Initial CD4 count<input id="pmcd4" placeholder="value, or ND"></label>
+    <label>WHO clinical stage<select id="pmwho">${selOpts([[1,'Stage 1'],[2,'Stage 2'],[3,'Stage 3'],[4,'Stage 4']])}</select></label>
+    <label>Cotrimoxazole (CPT) started<select id="pmcpt">${selOpts([['Y','Yes'],['N','No']])}</select></label>
+    ${ecPicker('pmarts','Date ART initiated')}
+    <label>Initial ART regimen<input id="pmreg" placeholder="e.g. TDF/3TC/DTG"></label>
+   </div>
+
+   <h4 style="margin:12px 0 4px">TB screening</h4>
+   <div class="grid">
+    <label>TB symptom screening<select id="pmtb">${selOpts(PM_PN)}</select></label>
+    ${ecPicker('pminh','Date INH prophylaxis started')}
+    ${ecPicker('pmtbrx','Date TB treatment started')}
+    <label>Unit TB number<input id="pmtbn"></label>
+   </div>
+
+   <h4 style="margin:12px 0 4px">Partner</h4>
+   <div class="grid">
+    <label>Partner HIV result<select id="pmpr">${selOpts(PM_PN)}</select></label>
+    ${tpSel('pmptp','Partner target population category')}
+   </div>
+   <div class="ticks">${tick('pmpa','Partner accepted HIV testing')}${tick('pmpl','HIV-positive partner linked to ART')}</div>
+
+   <div class="ticks" style="margin-top:8px">${tick('pmccd','Counselled on care for child development')}${tick('pmnut','Counselled on nutrition')}</div>
+   <label>Remark<input id="pmrmk"></label>
+   <button class="act" id="pmsave" style="margin-top:10px">Enrol mother</button> <span class="muted" id="pmm"></span></div>`;
+
+  // Linking her maternity record fills in what we already know, rather than asking twice.
+  let wfound=[];
+  $('#pmq').addEventListener('input',async()=>{ const q=pmq.value.trim(); if(q.length<2) return;
+    wfound=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
+    pmw.innerHTML='<option value="">— not linked / not registered —</option>'+(wfound||[]).map(w=>
+      `<option value="${w.id}">${esc(w.mrn||'')} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
+  $('#pmw').addEventListener('change',()=>{ const w=(wfound||[]).find(x=>x.id==pmw.value); if(!w) return;
+    pmnm.value=((w.first_name||'')+' '+(w.father_name||'')).trim(); pmmrn.value=w.mrn||''; pmage.value=w.age||'';
+    if(w.lnmp) ecSet('pmlnmp',w.lnmp); if(w.edd) ecSet('pmedd',w.edd);
+    if(w.art_regimen) pmreg.value=w.art_regimen;
+    // She is in the maternity record as a known HIV-positive woman: that IS her entry point.
+    if(String(w.hiv_known_positive)==='1' && !$('#pmnd').value && !$('#pmkp').value){ $('#pmkp').value= w.art_regimen?'1':'2'; entryChk(); }
+  });
+
+  const entryChk=()=>{ const nd=$('#pmnd').value, kp=$('#pmkp').value;
+    $('#pmentrywarn').innerHTML = (nd&&kp)
+      ? alertBox('red','These two cannot both be true','She is either newly diagnosed at this visit, or she came in already knowing she is HIV positive. Choose one and clear the other.')
+      : (!nd&&!kp) ? alertBox('amber','Entry point not recorded','Record how she entered PMTCT — it is what the whole cohort is counted by.') : ''; };
+  $('#pmnd').addEventListener('change',entryChk); $('#pmkp').addEventListener('change',entryChk);
+  const feedChk=()=>{ $('#pmfeedwarn').innerHTML=($('#pmfeed').value==='MF')
+    ? alertBox('red','Mixed feeding carries the highest transmission risk','Of the three options, mixed feeding is the most dangerous for the infant. Counsel her towards exclusive breastfeeding or exclusive replacement feeding.') : ''; };
+  $('#pmfeed').addEventListener('change',feedChk);
+
+  $('#pmsave').onclick=async()=>{ const b=$('#pmsave'); if(b.disabled) return; b.disabled=true;
+    try{
+      if(!pmnm.value.trim()){ modal('Name required','Enter the mother&rsquo;s name.'); return; }
+      const nd=$('#pmnd').value, kp=$('#pmkp').value;
+      if(nd&&kp){ modal('Entry point conflicts','She cannot be both newly diagnosed and previously known positive. Choose one.'); return; }
+      if(!nd&&!kp){ modal('Entry point required','Record whether she was newly diagnosed here (and where), or came in already known to be HIV positive. The whole PMTCT cohort is counted by this.'); return; }
+      if(pmart.value && !/^\d{2}\/\d{2}\/\d{3}\/\d{4,6}$/.test(pmart.value.trim())){
+        modal('Check the ART number','It should look like <b>03/09/001/00001</b> — region / facility type / facility / patient. Correct it, or clear it and add it later.'); return; }
+      const r=await api('POST','pmtct',{woman_id:(+pmw.value||null),name:pmnm.value,mrn:(pmmrn.value||null),age:(+pmage.value||null),
+        art_number:(pmart.value.trim()||null),booking_date:ecGet('pmbk'),
+        newly_diagnosed:(nd?+nd:null),known_positive:(kp?+kp:null),
+        lnmp:ecGet('pmlnmp'),edd:ecGet('pmedd'),ga_weeks:(+pmga.value||null),
+        ifa_provided:(pmifa.value||null),syphilis_result:(pmsyph.value||null),feeding_option:(pmfeed.value||null),
+        cd4_count:(pmcd4.value||null),who_stage:(+pmwho.value||null),cpt_started:(pmcpt.value||null),
+        art_start_date:ecGet('pmarts'),art_regimen:(pmreg.value||null),
+        tb_screening:(pmtb.value||null),inh_start_date:ecGet('pminh'),tb_rx_date:ecGet('pmtbrx'),tb_unit_number:(pmtbn.value||null),
+        partner_accepted:tk('pmpa'),partner_result:(pmpr.value||null),partner_target_pop:(pmptp.value||null),partner_linked_art:tk('pmpl'),
+        cnsl_ccd:(tk('pmccd')?'Y':'N'),cnsl_nutrition:(tk('pmnut')?'Y':'N'),remark:(pmrmk.value||null)});
+      if(r&&r.id){ toast('Enrolled in PMTCT','ok'); location.hash='#pmtctclient/'+r.id; }
+      else $('#pmm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+async function pmtctClient(id){
+  const [ms,infants,fu]=await Promise.all([
+    api('GET','pmtct').catch(()=>[]),
+    api('GET','pmtct_infants?mother='+id).catch(()=>[]),
+    api('GET','pmtct_fu?mother='+id).catch(()=>[])]);
+  const m=(ms||[]).find(x=>x.id==id)||{};
+
+  // If she is linked to her maternity record, pull the newborns that were actually delivered
+  // here. An exposed baby recorded in the delivery room must not have to be typed again to
+  // exist in the PMTCT cohort — that gap is exactly how exposed infants get lost.
+  let borne=[];
+  if(m.woman_id){
+    try{
+      const eps=await api('GET','episodes');
+      const hers=(eps||[]).filter(e=>e.woman_id==m.woman_id && e.service_category==='labour');
+      const sets=await Promise.all(hers.map(e=>api('GET','babies?episode='+e.id).catch(()=>[])));
+      borne=[].concat(...sets.map(s=>s||[]));
+    }catch(e){}
+  }
+  const enrolled=new Set((infants||[]).map(i=>+i.baby_id).filter(Boolean));
+  const unlinked=borne.filter(b=>!enrolled.has(+b.id) && b.outcome==='live_birth');
+
+  const alerts=pmtctAlerts(m,infants);
+  const mfu=(fu||[]).filter(f=>f.subject==='mother').sort((a,b)=>a.month_no-b.month_no);
+  const nextMonth=(mfu.length?Math.max(...mfu.map(f=>+f.month_no))+1:0);
+  const entry = String(m.known_positive)==='1' ? 'Known positive — on ART at entry'
+              : String(m.known_positive)==='2' ? 'Known positive — not on ART at entry'
+              : (PM_ENTRY.find(x=>x[0]===String(m.newly_diagnosed))||[,'—'])[1];
+
+  app().innerHTML=nav()+`<div class="card">
+   <h3>${esc(m.name||'PMTCT client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(m.art_number||m.mrn||'')}</span></h3>
+   <p class="muted">${esc(m.age||'?')} yrs · enrolled ${esc(m.booking_date||'—')} · ${entry.replace(/&amp;/g,'&')}
+     ${m.art_regimen?' · '+esc(m.art_regimen):''} ${m.feeding_option?' · feeding: '+esc(m.feeding_option):''}</p>
+   <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+     <span class="pill ${onArt(m)?'green':'red'}">${onArt(m)?'On ART':'Not on ART'}</span>
+     <span class="pill ${m.last_vl==='undetectable'?'green':(m.last_vl==='detectable'?'red':'amber')}">Viral load: ${esc(m.last_vl||'not done')}</span>
+     <span class="pill">${(infants||[]).length} exposed infant(s)</span>
+     ${m.tb_screening?`<span class="pill ${m.tb_screening==='P'?'red':''}">TB screen: ${esc(m.tb_screening)}</span>`:''}
+   </div>
+   <a class="nav" href="#pmtct">&lsaquo; Back to PMTCT</a></div>
+
+   ${alerts.length?`<div class="card"><h3>What needs to happen next</h3>
+     ${alerts.map(a=>alertBox(a[0],a[1],a[2])).join('')}</div>`:
+     `<div class="card"><h3>What needs to happen next</h3>
+       <div style="background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;font-size:13px">Nothing outstanding. She is on ART, her viral load is recorded, and every enrolled infant has been tested.</div></div>`}
+
+   <div class="card"><h3>Delivery &amp; postpartum</h3>
+    <div class="grid">
+     ${ecPicker('pdd','Date of delivery',false,m.delivery_date)}
+     <label>Sex of infant<select id="psx">${selOpts([['M','Male'],['F','Female']],m.infant_sex)}</select></label>
+     <label>Place of delivery<select id="ppl">${selOpts(PM_PLACE,m.place_of_delivery)}</select></label>
+     <label>Delivery outcome<select id="pout">${selOpts([['LB','Live birth'],['SB','Stillbirth']],m.delivery_outcome)}</select></label>
+     <label>ART taken during labour<select id="pal">${selOpts([['Y','Yes'],['N','No']],m.art_during_labour)}</select></label>
+     <label>Infant received ARV prophylaxis<select id="pip">${selOpts([['Y','Yes'],['N','No']],m.infant_arv_prophylaxis)}</select></label>
+    </div>
+    <p class="muted" style="font-size:12px;margin:2px 0 8px">Infant prophylaxis is AZT + NVP for the first 6 weeks, then NVP alone for the next 6 weeks &mdash; 12 weeks in total.</p>
+    <h4 style="margin:10px 0 4px">Family planning</h4>
+    <div class="grid">
+     <label>FP counselled<select id="pfc">${selOpts([['Y','Yes'],['N','No']],m.fp_counselled)}</select></label>
+     <label>Acceptor<select id="pfa">${selOpts(ACCEPTOR,m.fp_acceptor)}</select></label>
+     <label>Contraceptive provided<select id="pfm">${selOpts(FP_METHODS,m.fp_method)}</select></label>
+    </div>
+    <button class="act" id="pdsave" style="margin-top:10px">Save</button> <span class="muted" id="pdm"></span>
+   </div>
+
+   ${unlinked.length?`<div class="card"><h3>Newborns from her delivery record</h3>
+    <p class="muted">These babies were recorded in the delivery room. Every one of them is HIV-exposed and belongs in the HEI cohort &mdash; enrol them here rather than typing them in again.</p>
+    <table><tr><th>Baby MRN</th><th>Sex</th><th>Weight</th><th>Born</th><th>Already recorded in delivery</th><th></th></tr>
+     ${unlinked.map(b=>`<tr><td>${esc(b.mrn||'—')}</td><td>${esc(b.sex||'')}</td><td>${esc(b.weight_g?b.weight_g+' g':'')}</td>
+       <td>${esc((b.recorded_at||'').slice(0,10))}</td>
+       <td class="muted" style="font-size:12px">${[b.arv_prophylaxis?'ARV: '+esc(b.arv_prophylaxis):'',b.dbs_sample?'DBS: '+esc(b.dbs_sample):''].filter(Boolean).join(' · ')||'—'}</td>
+       <td><button class="sec" data-enrol="${b.id}">Enrol in HEI cohort</button></td></tr>`).join('')}
+    </table></div>`:''}
+
+   <div class="card"><h3>HIV-exposed infants</h3>
+    <p class="muted">Each exposed infant is followed until her HIV status is finally known. The DNA/PCR is due at about 6 weeks of age; the antibody test confirms at 18 months.</p>
+    <table><tr><th>Infant MRN</th><th>Enrolled</th><th>ARV started</th><th>Feeding</th><th>CPT (wks)</th><th>DNA/PCR (wks)</th><th>PCR</th><th>Antibody</th><th>Outcome</th></tr>
+     ${(infants||[]).map(i=>`<tr>
+       <td>${esc(i.mrn||'')}</td><td>${esc(i.hei_enrol_date||'')}</td><td>${esc(i.arv_start_date||'')}</td>
+       <td>${esc(i.feeding_6m||'')}</td><td>${esc(i.cpt_age_weeks??'')}</td>
+       <td>${esc(i.pcr_age_weeks??'')}${(i.pcr_age_weeks>8)?' <span class="pill amber">late</span>':''}</td>
+       <td>${i.pcr_result==='P'?'<span class="pill red">Positive</span>':(i.pcr_result==='N'?'<span class="pill green">Negative</span>':'<span class="muted">—</span>')}</td>
+       <td>${i.rapid_ab_result==='P'?'<span class="pill red">Positive</span>':(i.rapid_ab_result==='N'?'<span class="pill green">Negative</span>':'<span class="muted">—</span>')}</td>
+       <td>${esc((PM_IOUT.find(x=>x[0]===i.outcome)||[,''])[1])}</td></tr>`).join('')
+       ||'<tr><td colspan=9 class=muted>No exposed infant enrolled yet.</td></tr>'}
+    </table>
+    <button class="sec" id="pinew" style="margin-top:10px">Add / update an infant</button>
+    <div id="piform"></div>
+   </div>
+
+   <div class="card"><h3>Cohort follow-up &mdash; mother</h3>
+    <p class="muted">Month 0 is the month she was enrolled. Viral load is due 3 months after ART initiation, then every 6 months. Below 1,000 copies/ml is undetectable.</p>
+    <table><tr><th>Month</th><th>Date seen</th><th>Status</th><th>Viral load</th><th>Copies/ml</th><th>Note</th></tr>
+     ${mfu.map(f=>`<tr><td><b>${esc(f.month_no)}</b></td><td>${esc(f.visit_date||'')}</td>
+       <td>${esc((PM_MSTATUS.find(x=>x[0]===f.status)||[,f.status||''])[1])}</td>
+       <td>${f.viral_load==='undetectable'?'<span class="pill green">Undetectable</span>':(f.viral_load==='detectable'?'<span class="pill red">Detectable</span>':'')}</td>
+       <td>${esc(f.vl_value??'')}</td><td>${esc(f.note||'')}</td></tr>`).join('')
+       ||'<tr><td colspan=6 class=muted>No follow-up recorded yet.</td></tr>'}
+    </table>
+    <div class="grid" style="margin-top:12px">
+     <label>Month<input id="fmn" type="number" min="0" max="60" value="${nextMonth}"></label>
+     ${ecPicker('fdt','Date seen',true)}
+     <label>Status this month<select id="fst">${selOpts(PM_MSTATUS,'on_art')}</select></label>
+     <label>Viral load<select id="fvl">${selOpts([['undetectable','Undetectable (&lt;1,000)'],['detectable','Detectable (&gt;1,000)']])}</select></label>
+     <label>Copies/ml (if known)<input id="fvv" type="number" min="0"></label>
+    </div>
+    <label>Note<input id="fnt"></label>
+    <div id="fvlwarn"></div>
+    <button class="act" id="fsav" style="margin-top:10px">Save this month</button> <span class="muted" id="fm2"></span>
+   </div>`;
+
+  // delivery / FP block
+  $('#pdsave').onclick=async()=>{ const b=$('#pdsave'); if(b.disabled) return; b.disabled=true;
+    try{ const r=await api('PATCH','pmtct/'+id,{delivery_date:ecGet('pdd'),infant_sex:(psx.value||null),
+        place_of_delivery:(+ppl.value||null),delivery_outcome:(pout.value||null),art_during_labour:(pal.value||null),
+        infant_arv_prophylaxis:(pip.value||null),fp_counselled:(pfc.value||null),fp_acceptor:(pfa.value||null),fp_method:(pfm.value||null)});
+      if(r&&(r.ok||r.queued)){ toast('Saved','ok'); setTimeout(()=>pmtctClient(id),500); }
+      else $('#pdm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+
+  $('#pinew').onclick=()=>pmtctInfantForm(id,infants,m);
+
+  // Carry the delivery-room newborn straight into the HEI cohort, bringing what is already
+  // known with her: her MRN, and the date her ARV prophylaxis was started.
+  document.querySelectorAll('[data-enrol]').forEach(btn=>btn.onclick=async()=>{
+    if(btn.disabled) return; btn.disabled=true;
+    const b=borne.find(x=>x.id==btn.dataset.enrol)||{};
+    try{
+      const r=await api('POST','pmtct_infants',{mother_id:+id,baby_id:+b.id,mrn:(b.mrn||null),
+        hei_enrol_date:new Date().toISOString().slice(0,10),
+        arv_start_date:((b.arv_prophylaxis&&b.arv_prophylaxis!=='not_given')?(m.delivery_date||(b.recorded_at||'').slice(0,10)||null):null)});
+      if(r&&(r.id||r.queued)){ toast('Infant enrolled in the HEI cohort','ok'); setTimeout(()=>pmtctClient(id),500); }
+      else { btn.disabled=false; toast((r&&r.error)||'error'); }
+    }catch(e){ btn.disabled=false; toast(e.message||'error'); }
+  });
+
+  // the viral-load number and the band must agree — a typed 45,000 with "undetectable" is a lie
+  const vlChk=()=>{ const v=+fvv.value, band=fvl.value; let w='';
+    if(fvv.value!==''){
+      if(v>=1000 && band==='undetectable') w=alertBox('red','These disagree',v.toLocaleString()+' copies/ml is <b>detectable</b> — 1,000 or more. Change the band, or correct the number.');
+      if(v<1000 && band==='detectable')   w=alertBox('red','These disagree',v.toLocaleString()+' copies/ml is <b>undetectable</b> — below 1,000. Change the band, or correct the number.');
+    }
+    $('#fvlwarn').innerHTML=w; };
+  fvv.addEventListener('input',vlChk); fvl.addEventListener('change',vlChk);
+
+  $('#fsav').onclick=async()=>{ const b=$('#fsav'); if(b.disabled) return; b.disabled=true;
+    try{
+      const v=fvv.value===''?null:+fvv.value, band=fvl.value||null;
+      if(v!=null && band && ((v>=1000&&band==='undetectable')||(v<1000&&band==='detectable'))){
+        modal('Viral load disagrees with itself','You have entered <b>'+v.toLocaleString()+' copies/ml</b> but marked it <b>'+band+'</b>. Below 1,000 is undetectable; 1,000 or more is detectable. Correct one of them.'); return; }
+      const r=await api('POST','pmtct_fu',{mother_id:+id,subject:'mother',month_no:(+fmn.value||0),visit_date:ecGet('fdt'),
+        status:(fst.value||null),viral_load:band,vl_value:v,note:(fnt.value||null)});
+      if(r&&(r.id||r.queued)){ toast('Month recorded','ok'); setTimeout(()=>pmtctClient(id),500); }
+      else $('#fm2').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+function pmtctInfantForm(mid,infants,m){
+  const opts=[['','— new infant —']].concat((infants||[]).map((i,n)=>[i.id,'Infant '+(n+1)+(i.mrn?' ('+i.mrn+')':'')]));
+  $('#piform').innerHTML=`<div style="margin-top:12px;border-top:1px solid #e6eae8;padding-top:12px">
+   <div class="grid">
+    <label>Record<select id="pisel">${opts.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join('')}</select></label>
+    <label>Infant MRN<input id="pimrn"></label>
+    ${ecPicker('piehd','Date of HEI enrolment',true)}
+    ${ecPicker('piarv','Date infant started ARV prophylaxis')}
+    <label>Feeding practice (first 6 months)<select id="pifd">${selOpts(PM_FEED)}</select></label>
+    <label>Age in weeks CPT started<input id="picpt" type="number" min="0" max="120"></label>
+    <label>Age in weeks DNA/PCR done<input id="pipw" type="number" min="0" max="120"></label>
+    <label>DNA/PCR result<select id="pipr">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+    <label>Rapid HIV antibody result (18 months)<select id="piab">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+    <label>Final outcome<select id="pio">${selOpts(PM_IOUT)}</select></label>
+   </div>
+   <div id="piwarn"></div>
+   <button class="act" id="pisave" style="margin-top:10px">Save infant</button> <span class="muted" id="pim"></span></div>`;
+
+  // Editing an existing infant must LOAD her values first — otherwise saving would blank
+  // every field the provider did not retype, including the dates.
+  const fill=()=>{ const i=(infants||[]).find(x=>x.id==pisel.value);
+    pimrn.value=i?(i.mrn||''):''; picpt.value=i?(i.cpt_age_weeks??''):''; pipw.value=i?(i.pcr_age_weeks??''):'';
+    pipr.value=i?(i.pcr_result||''):''; piab.value=i?(i.rapid_ab_result||''):''; pio.value=i?(i.outcome||''):'';
+    pifd.value=i?(i.feeding_6m||''):'';
+    ecSet('piehd', i?i.hei_enrol_date:null); ecSet('piarv', i?i.arv_start_date:null);
+    chk(); };
+  const chk=()=>{ let w='';
+    if(pipr.value==='P') w+=alertBox('red','DNA/PCR positive','The infant is HIV infected. Link to the ART clinic <b>today</b> and start treatment. Set the outcome to &ldquo;HIV positive — on ART&rdquo; once she is linked.');
+    if(pipw.value!=='' && +pipw.value>8) w+=alertBox('amber','Test done late','The DNA/PCR is due at about 6 weeks of age. This one was at '+pipw.value+' weeks. Every week of delay is a week an infected infant spends untreated.');
+    if(pipr.value==='N' && pio.value==='discharged_negative' && piab.value!=='N')
+      w+=alertBox('amber','Discharge needs the antibody test','A negative DNA/PCR is not the final answer while she is still breastfeeding. The infant is discharged HIV-negative only after the rapid antibody test at 18 months, at least 6 weeks after breastfeeding stopped.');
+    $('#piwarn').innerHTML=w; };
+  pisel.addEventListener('change',fill);
+  [pipr,pipw,piab,pio].forEach(el=>el.addEventListener('change',chk));
+  pipw.addEventListener('input',chk);
+
+  $('#pisave').onclick=async()=>{ const b=$('#pisave'); if(b.disabled) return; b.disabled=true;
+    try{
+      const payload={mrn:(pimrn.value||null),hei_enrol_date:ecGet('piehd'),arv_start_date:ecGet('piarv'),
+        feeding_6m:(pifd.value||null),cpt_age_weeks:(picpt.value===''?null:+picpt.value),
+        pcr_age_weeks:(pipw.value===''?null:+pipw.value),pcr_result:(pipr.value||null),
+        rapid_ab_result:(piab.value||null),outcome:(pio.value||null)};
+      const r = pisel.value
+        ? await api('PATCH','pmtct_infants/'+pisel.value,payload)
+        : await api('POST','pmtct_infants',Object.assign({mother_id:+mid},payload));
+      if(r&&(r.id||r.ok||r.queued)){ toast('Infant saved','ok'); setTimeout(()=>pmtctClient(mid),500); }
+      else $('#pim').textContent=' '+((r&&r.error)||'error');
     } finally{ b.disabled=false; } };
 }
 

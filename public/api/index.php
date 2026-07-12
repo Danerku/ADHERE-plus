@@ -279,21 +279,47 @@ try {
     'lafp'=>['lafp_removals',['woman_id','fp_client_id','mrn','name','age','reg_date','insertion_date','lafp_type','place_code','removal_date','duration_months','removal_reason','hiv_offered','hiv_performed','hiv_result','hiv_counselled','hiv_linked_art','target_pop_code','post_removal_method','remark']],
     'imm_clients'=>['immunization_clients',['woman_id','programme','mrn','name','age','dob','pregnant','in_school_grade','out_of_school','woreda','kebele','ketena','house_no','reg_date','remark']],
     'imm_doses'=>['immunization_doses',['client_id','dose_no','dose_date']],
+    // ---- PMTCT: mother, her HIV-exposed infant(s), and the monthly cohort grid ----
+    'pmtct'=>['pmtct_mothers',['woman_id','name','mrn','art_number','age','booking_date','newly_diagnosed','known_positive',
+        'lnmp','edd','ga_weeks','ifa_provided','syphilis_result','feeding_option',
+        'delivery_date','infant_sex','place_of_delivery','delivery_outcome','art_during_labour','infant_arv_prophylaxis',
+        'fp_counselled','fp_acceptor','fp_method',
+        'partner_accepted','partner_result','partner_target_pop','partner_linked_art',
+        'tb_screening','inh_start_date','tb_rx_date','tb_unit_number','cd4_count','who_stage','cpt_started',
+        'art_start_date','art_regimen','cnsl_ccd','cnsl_nutrition','remark','cohort_month0']],
+    'pmtct_infants'=>['pmtct_infants',['mother_id','baby_id','mrn','hei_enrol_date','arv_start_date','feeding_6m',
+        'cpt_age_weeks','pcr_age_weeks','pcr_result','rapid_ab_result','outcome']],
+    'pmtct_fu'=>['pmtct_followup',['mother_id','subject','infant_id','month_no','visit_date','status','viral_load','vl_value','note']],
   ];
   if(isset($mods[$r])){
     [$tbl,$allow]=$mods[$r]; $u=require_auth();
-    $hasFac=in_array($tbl,['fp_clients','lafp_removals','immunization_clients']);
+    $hasFac=in_array($tbl,['fp_clients','lafp_removals','immunization_clients','pmtct_mothers']);
+    // PMTCT child rows hang off the mother, who is the one carrying facility_id
+    $pmtctChild = in_array($tbl,['pmtct_infants','pmtct_followup']);
+    $ownsMother = function($mid) use($u){ $c=db()->prepare("SELECT id FROM pmtct_mothers WHERE id=? AND facility_id=?"); $c->execute([(int)$mid,$u['facility_id']]); return (bool)$c->fetch(); };
     if($m==='GET'){
       if($tbl==='fp_visits'){ $st=db()->prepare("SELECT v.* FROM fp_visits v JOIN fp_clients c ON c.id=v.fp_client_id WHERE c.facility_id=? AND v.fp_client_id=? ORDER BY v.visit_no, v.id");
         $st->execute([$u['facility_id'],(int)($_GET['client']??0)]); out($st->fetchAll()); }
       if($tbl==='immunization_doses'){ $st=db()->prepare("SELECT d.* FROM immunization_doses d JOIN immunization_clients c ON c.id=d.client_id WHERE c.facility_id=? AND d.client_id=? ORDER BY d.dose_no");
         $st->execute([$u['facility_id'],(int)($_GET['client']??0)]); out($st->fetchAll()); }
+      if($tbl==='pmtct_infants'){ $st=db()->prepare("SELECT i.* FROM pmtct_infants i JOIN pmtct_mothers p ON p.id=i.mother_id WHERE p.facility_id=? AND i.mother_id=? ORDER BY i.id");
+        $st->execute([$u['facility_id'],(int)($_GET['mother']??0)]); out($st->fetchAll()); }
+      if($tbl==='pmtct_followup'){ $st=db()->prepare("SELECT f.* FROM pmtct_followup f JOIN pmtct_mothers p ON p.id=f.mother_id WHERE p.facility_id=? AND f.mother_id=? ORDER BY f.subject, f.infant_id, f.month_no");
+        $st->execute([$u['facility_id'],(int)($_GET['mother']??0)]); out($st->fetchAll()); }
       $q='%'.($_GET['q']??'').'%';
       $extra = ($tbl==='immunization_clients' && !empty($_GET['programme'])) ? " AND programme=".db()->quote($_GET['programme']) : '';
       // the immunization list needs the dose count to show completion at a glance
       $cols = ($tbl==='immunization_clients')
         ? "*, (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=`$tbl`.id) AS dose_count"
         : "*";
+      // the PMTCT list carries its infants and latest viral load, so the cohort can be read at a glance
+      if($tbl==='pmtct_mothers'){
+        $cols="*, (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id) AS infant_count,
+                  (SELECT COUNT(*) FROM pmtct_infants i WHERE i.mother_id=pmtct_mothers.id AND i.pcr_result IS NOT NULL) AS pcr_done,
+                  (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
+                  (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_status,
+                  (SELECT MAX(f.visit_date) FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother') AS last_seen";
+      }
       $st=db()->prepare("SELECT $cols FROM `$tbl` WHERE facility_id=?$extra AND (COALESCE(mrn,'') LIKE ? OR COALESCE(name,'') LIKE ?) ORDER BY id DESC LIMIT 300");
       $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll());
     }
@@ -306,9 +332,21 @@ try {
       if($tbl==='immunization_doses'){ $c=db()->prepare("SELECT id FROM immunization_clients WHERE id=? AND facility_id=?"); $c->execute([$row['client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('immunization client not in your facility',404);
         // one row per dose: re-recording a dose updates its date rather than duplicating it
         db()->prepare("DELETE FROM immunization_doses WHERE client_id=? AND dose_no=?")->execute([$row['client_id'],$row['dose_no']]); }
+      if($pmtctChild){ if(!$ownsMother($row['mother_id']??0)) err('PMTCT client not in your facility',404); }
+      if($tbl==='pmtct_mothers'){
+        // Month 0 is the shared cohort event for BOTH the maternal and the HEI cohort.
+        if(empty($row['cohort_month0'])) $row['cohort_month0']=substr(($row['booking_date']??date('Y-m-d')),0,7);
+      }
+      if($tbl==='pmtct_followup'){
+        // One cell per subject per month — re-recording a month corrects it, never duplicates it.
+        db()->prepare("DELETE FROM pmtct_followup WHERE mother_id=? AND subject=? AND month_no=? AND (infant_id <=> ?)")
+            ->execute([$row['mother_id'],$row['subject']??'mother',$row['month_no']??0,$row['infant_id']??null]);
+      }
       $id2=insert($tbl,$row); audit('create',$tbl,$id2); out(['id'=>$id2],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
       if($hasFac){ $c=db()->prepare("SELECT id FROM `$tbl` WHERE id=? AND facility_id=?"); $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
+      if($pmtctChild){ $c=db()->prepare("SELECT p.id FROM `$tbl` x JOIN pmtct_mothers p ON p.id=x.mother_id WHERE x.id=? AND p.facility_id=?");
+        $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
       $f=array_intersect_key($b,array_flip($allow));
       foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
       audit('update',$tbl,$id,array_keys($f)); out(['ok'=>true]); }
@@ -378,6 +416,31 @@ try {
        'linked_anc'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.linked_episode_id IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'negative_to_fp'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative' AND e.linked_fp_client_id IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
      ],
+
+     // ---- PMTCT: the cascade, mother and infant ----
+     // The only questions that matter: is she on ART and suppressed, and did the infant
+     // get tested at ~6 weeks and end up negative?
+     'pmtct'=>[
+       'mothers'      =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'newly_diagnosed'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.newly_diagnosed IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'known_positive'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.known_positive IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'on_art'       =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (e.art_start_date IS NOT NULL OR e.known_positive=1)".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'art_in_labour'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.art_during_labour='Y'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_done'      =>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_suppressed'=>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load='undetectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_detectable'=>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load='detectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'ltf'          =>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.status='ltf'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infants'      =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infant_arv'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.arv_start_date IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'pcr_done'     =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       // EID timeliness: the DNA/PCR is meant to happen at about 6 weeks of age
+       'pcr_by_8wk'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL AND i.pcr_age_weeks<=8".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'pcr_positive' =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result='P'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infant_cpt'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.cpt_age_weeks IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'discharged_neg'=>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.outcome='discharged_negative'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+     ],
+     'pmtct_entry'=>$grp("SELECT CASE e.newly_diagnosed WHEN 1 THEN 'ANC' WHEN 2 THEN 'Labour & delivery' WHEN 3 THEN 'Postpartum' ELSE 'Known positive' END k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY k"),
+     'pmtct_feeding'=>$grp("SELECT e.feeding_option k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.feeding_option IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.feeding_option"),
 
      'newborn_care'=>[
        'lbw'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.prob_lbw=1$since"),
@@ -487,6 +550,17 @@ try {
        WHERE c.facility_id=? AND c.programme=".db()->quote($prog)."
          AND (c.reg_date BETWEEN ? AND ? OR d.dose_date BETWEEN ".db()->quote($from)." AND ".db()->quote($to).")
        GROUP BY c.id ORDER BY c.mrn");
+    } elseif($type==='pmtct'){
+      // One row per HIV-exposed infant, falling back to a mother-only row when she has not
+      // yet delivered — the paper register works the same way: the mother's line is opened at
+      // booking and the infant columns are filled in later.
+      $st=db()->prepare("SELECT p.*, i.id AS infant_row_id, i.mrn AS infant_mrn, i.hei_enrol_date, i.arv_start_date,
+             i.feeding_6m, i.cpt_age_weeks, i.pcr_age_weeks, i.pcr_result, i.rapid_ab_result, i.outcome AS infant_outcome,
+             (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=p.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
+             (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=p.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS mother_status
+        FROM pmtct_mothers p LEFT JOIN pmtct_infants i ON i.mother_id=p.id
+       WHERE p.facility_id=? AND COALESCE(p.booking_date, DATE(p.created_at)) BETWEEN ? AND ?
+       ORDER BY p.booking_date, p.id, i.id");
     } elseif($type==='pregtally'){
       // The MoH pregnancy-test artifact is a TALLY SHEET, not a line register:
       // women tested and HCG positive, by age band. Computed from the per-client records.
