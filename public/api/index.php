@@ -21,6 +21,15 @@ require __DIR__.'/lib.php'; require __DIR__.'/db.php';
 // lands on the person it belongs to and follows her.
 // =====================================================================================
 
+// Close an episode of care. The schema has always had `closed` and `closed_datetime`; nothing in
+// the application ever wrote either, so no episode in ADHERE+ has ever ended. Closing is the ONLY
+// thing that takes a woman off a worklist — it does not touch a single clinical row, and the whole
+// record stays readable by id.
+function close_episode(int $eid, string $why=''): void {
+  db()->prepare("UPDATE episodes SET status='closed', closed_datetime=NOW() WHERE id=? AND status<>'closed'")
+     ->execute([$eid]);
+  audit('close','episodes',$eid,['why'=>$why]);
+}
 function woman_of_episode(int $eid): ?int {
   $q=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $q->execute([$eid]);
   $r=$q->fetch(); return $r ? (int)$r['woman_id'] : null;
@@ -33,15 +42,32 @@ function screening_to_woman(int $eid, array $rows): void {
   $map=['OBS_PREV_CS'=>'prior_cs','OBS_PREV_STILLBIRTH'=>'prior_stillbirth','OBS_PREV_PPH'=>'prior_pph',
         'OBS_PREV_PREECLAMPSIA'=>'prior_preeclampsia','OBS_PREV_OBSTRUCTED'=>'prior_obstructed',
         'MED_CHRONIC_HTN'=>'chronic_htn','MED_DIABETES'=>'diabetes','MED_CARDIAC_RENAL'=>'cardiac_renal'];
+  // These items are PERMANENT FACTS OF HER HISTORY. A previous caesarean does not stop having
+  // happened; nor does a previous stillbirth, PPH, pre-eclampsia or obstructed labour.
+  $permanent=['prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed'];
   foreach($rows as $row){
     $code=$row['item_code']??''; if(!isset($map[$code])) continue;
-    $resp=$row['response']??'';
-    // ONLY an explicit yes or no is written. A BLANK (unanswered) item must never clear a
-    // recorded "yes" — otherwise re-saving the screening form with an item left blank would
-    // silently erase her previous caesarean, which is precisely the data-blanking bug this
-    // release exists to eliminate. An explicit "no" is a retraction and does clear it.
+    $col=$map[$code]; $resp=$row['response']??'';
+    // ONLY an explicit yes or no is considered. A BLANK (unanswered) item must never clear a
+    // recorded "yes" — re-saving the form with an item left blank would silently erase her
+    // previous caesarean.
     if($resp!=='yes' && $resp!=='no') continue;
-    db()->prepare("UPDATE women SET `{$map[$code]}`=? WHERE id=?")->execute([$resp,$wid]);
+
+    // AND AN EXPLICIT "no" MUST NOT ERASE A "yes" EITHER, for the permanent items. The screening
+    // form is episode-scoped and starts blank in each new pregnancy, so a provider who works down
+    // it in pregnancy #2 and answers "No" to "previous caesarean" was overwriting women.prior_cs
+    // from 'yes' to 'no'. The record then contradicted itself — anc_risk_screening still held the
+    // 'yes' from pregnancy #1 — and motherFeats() handed the intrapartum model prior_cs = 0 for a
+    // woman with a scarred uterus. That is the single most important feature the model has, and it
+    // is the reason scar rupture is a risk at all.
+    // Correcting a genuine mis-entry is still possible: the obstetric-details screen (PATCH /women)
+    // writes these columns directly, which is a deliberate, explicit retraction rather than a
+    // by-product of working down a form.
+    if($resp==='no' && in_array($col,$permanent,true)){
+      $cur=db()->prepare("SELECT `$col` c FROM women WHERE id=?"); $cur->execute([$wid]); $r=$cur->fetch();
+      if($r && $r['c']==='yes'){ audit('screening_no_ignored','women',$wid,['column'=>$col,'kept'=>'yes']); continue; }
+    }
+    db()->prepare("UPDATE women SET `$col`=? WHERE id=?")->execute([$resp,$wid]);
   }
 }
 
@@ -325,10 +351,52 @@ try {
       // A high-risk woman who has DELIVERED is still high risk — postpartum haemorrhage and
       // eclampsia both happen after the birth. Excluding 'delivered' dropped exactly the women
       // the postnatal period is dangerous for.
-      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active','delivered')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
+      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active','delivered')"; }
+      // CLOSED EPISODES LEAVE THE WORKLISTS. Nothing in ADHERE+ ever wrote 'closed' or
+      // 'discharged' — the enum had them, closed_datetime existed, and no code touched either. So a
+      // woman transferred from ANC into labour kept her ANC episode 'active' for ever: she appeared
+      // on the antenatal list AND the labour ward at the same time, the high-risk list returned her
+      // twice, and the Home tile counts only ever grew. Episodes now close, and closed episodes
+      // drop out of every list — but they are still fully readable by id (?ep=) or by woman
+      // (?woman=), because closing an episode ends the care, not the record.
+      if(!$epOne && !$wom && empty($_GET['all'])) $sql.=" AND e.status <> 'closed'";
+      $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
+      $wid=(int)$b['woman_id']; $cat=$b['service_category']??'';
+
+      // ---- ONE EPISODE PER EPISODE OF CARE ---------------------------------------------------
+      // Nothing stopped a second open episode being created for the same woman in the same service.
+      // The "Find a woman -> admit her" screen — built precisely to stop her record splitting — did
+      // it every time she came back: contact 1 sat on the old episode, and the new episode counted
+      // its own visits from 1 again, so the MoH ANC register printed TWO "contact 1" rows for her
+      // and her risk screening was invisible from the new chart.
+      $open=db()->prepare("SELECT id,status FROM episodes
+                            WHERE woman_id=? AND facility_id=? AND service_category=? AND status<>'closed'
+                            ORDER BY id DESC LIMIT 1");
+      $open->execute([$wid,$u['facility_id'],$cat]);
+      if($ex=$open->fetch()){ out(['id'=>(int)$ex['id'],'reused'=>true],200); }   // hand back the one she already has
+
+      // Postnatal care belongs on the birth. If she delivered HERE, her PNC visits must hang off that
+      // labour episode — which owns the delivery record and the babies. A separate pnc episode put
+      // her on the postnatal list twice, labelled the second one "delivered elsewhere" (false), and
+      // left the newborn dropdown empty so her baby's assessment was tied to no infant at all.
+      if($cat==='pnc'){
+        $dl=db()->prepare("SELECT e.id FROM episodes e JOIN delivery_summary d ON d.episode_id=e.id
+                            WHERE e.woman_id=? AND e.facility_id=? AND e.status<>'closed'
+                            ORDER BY e.id DESC LIMIT 1");
+        $dl->execute([$wid,$u['facility_id']]);
+        if($d=$dl->fetch()) out(['id'=>(int)$d['id'],'reused'=>true,'on_delivery'=>true],200);
+      }
+
+      // Admitting her in labour ENDS her antenatal care. It does not run alongside it.
+      if($cat==='labour'){
+        $anc=db()->prepare("SELECT id FROM episodes WHERE woman_id=? AND facility_id=? AND service_category='anc' AND status<>'closed'");
+        $anc->execute([$wid,$u['facility_id']]);
+        foreach($anc->fetchAll() as $r){ close_episode((int)$r['id'],'admitted in labour'); }
+      }
+
       $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','ruptured_datetime','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob'])));
       audit('create','episodes',$eid); out(['id'=>$eid],201); }
@@ -342,6 +410,25 @@ try {
         db()->prepare("UPDATE episodes SET referred=1, referred_at=NOW() WHERE id=?")->execute([$id]);
         unset($b['status']);
         audit('refer','episodes',$id,['referred']);
+      }
+      // Closing (and re-opening) an episode goes through here so closed_datetime is always kept in
+      // step with the status. Only a provider or admin may close: it is a clinical decision that she
+      // no longer needs this episode of care, and it removes her from the worklist.
+      if(($b['status']??'')==='closed'){
+        require_role(['provider','admin']);
+        close_episode((int)$id, (string)($b['close_reason']??'closed by provider'));
+        out(['ok'=>true,'closed'=>true]);
+      }
+      if(($b['status']??'')==='reopen'){
+        require_role(['provider','admin']);
+        // She came back, or it was closed by mistake. Restore the state she was actually in — never
+        // guess 'active' for a woman who has delivered, or she leaves the postnatal list.
+        $st=db()->prepare("SELECT e.service_category, (SELECT COUNT(*) FROM delivery_summary d WHERE d.episode_id=e.id) dn FROM episodes e WHERE e.id=?");
+        $st->execute([$id]); $r=$st->fetch();
+        $back = ($r && $r['dn']>0) ? 'delivered' : ((($r['service_category']??'')==='labour') ? 'laboring' : 'active');
+        db()->prepare("UPDATE episodes SET status=?, closed_datetime=NULL WHERE id=?")->execute([$back,$id]);
+        audit('reopen','episodes',$id,['status'=>$back]);
+        out(['ok'=>true,'status'=>$back]);
       }
       // `ruptured_datetime` is admitted here deliberately. The partograph derives rom_hours from it
       // and hands that to the scorer, but it was in NO allow-list — so the column was never written
