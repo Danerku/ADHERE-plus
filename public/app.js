@@ -159,6 +159,7 @@ function route(){
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
+    find:findWoman,
     account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
@@ -252,6 +253,8 @@ async function home(){
        anc=(eps||[]).filter(e=>e.service_category==='anc'&&e.status==='active').length;
        pnc=(eps||[]).filter(e=>e.service_category==='pnc'&&e.status==='active').length; }catch(e){}
   try{ const pms=await api('GET','pmtct'); pm=(pms||[]).filter(pmtctNeedsAction).length; }catch(e){}
+  let pt=0;
+  try{ const pts=await api('GET','pregnancy_tests'); pt=(pts||[]).filter(x=>x.result==='pending').length; }catch(e){}
   const roClin=!canDo('clinical'), roIntake=!canDo('intake'), roFp=!canDo('fp');
   const n=(c,unit,idle)=>c?(c+' '+unit):idle;
 
@@ -262,7 +265,9 @@ async function home(){
 
     ${sectionLabel('CARE CONTINUUM')}
     ${tileGrid(
-      tileHtml('#register','&#128100;','Register','New client · pregnancy test','teal',roIntake)+
+      tileHtml('#register','&#128100;','Register','New client','teal',roIntake)+
+      tileHtml('#find','&#128269;','Find a woman','Already registered · new episode','teal',roIntake)+
+      tileHtml('#pregtest','&#129514;','Pregnancy test',(pt?pt+' awaiting result':'Results & routing'),(pt?'red':'teal'),roIntake)+
       tileHtml('#antenatal','&#128197;','Antenatal',n(anc,'in care','8 contacts'),'teal',roClin)+
       tileHtml('#labour','&#128147;','Labour ward',n(lab,'in labour','Partograph · AI'),'teal',roClin)+
       tileHtml('#pnc','&#128118;','Postnatal',n(pnc,'in care','Mother + newborn'),'teal',roClin)+
@@ -460,9 +465,17 @@ async function register(){
     <label>Next of kin / husband<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
     <label>Emergency contact address<input id="kad" placeholder="kebele, woreda, landmark"></label>
     <label>Why is she here?<select id="cat">
-      <option value="pregtest">Pregnancy test &mdash; not confirmed yet</option>
-      <option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option></select></label>
+      <option value="pregtest">Pregnancy test</option>
+      <option value="anc">Antenatal care (ANC)</option>
+      <option value="labour" selected>Labour &amp; delivery</option>
+      <option value="pnc">Postnatal care — including a birth at home or elsewhere</option>
+      <option value="fp">Family planning</option>
+      <option value="pmtct">PMTCT — HIV positive</option>
+      <option value="td">Immunization — Td</option>
+      <option value="hpv">Immunization — HPV</option>
+    </select></label>
    </div>
+   <p class="muted" style="font-size:12px;margin:-4px 0 8px">Every service the tool provides has a door here. Registering her for family planning, PMTCT or immunization creates that record <b>linked to her</b> — not a second, unconnected identity.</p>
    <div id="riskbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
 
    <!-- The pregnancy test is the FRONT DOOR, so it lives here, at the front door. It used to be
@@ -470,7 +483,13 @@ async function register(){
         a triage test happens before she is a maternity patient at all. Now one flow does both. -->
    <div id="ptbox" style="display:none">
     <div class="grid">
-     <label>Test result<select id="ptr"><option value="">— select —</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
+     <label>Test result<select id="ptr">
+       <option value="pending" selected>Not back yet — she is going to the lab</option>
+       <option value="negative">Negative</option>
+       <option value="positive">Positive</option></select></label>
+    </div>
+    <div id="ptpend" style="background:#eef6f5;border:1px solid #dbe7e4;color:#0b3d3a;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+      She will appear on the <b>pregnancy-test worklist</b> as awaiting a result. Record the result there when it comes back, and she will be routed then &mdash; positive opens her ANC episode, negative opens her family-planning record.
     </div>
     <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
       <b>Positive.</b> She needs antenatal care. Registering her opens her ANC episode straight away, so she is handed over to the ANC room rather than merely told to walk there.
@@ -541,13 +560,13 @@ async function register(){
     $('#ptbox').style.display=on?'':'none';
     if(!on){ $('#ptpos').style.display='none'; $('#ptneg').style.display='none'; } };
   const ptRes=()=>{ $('#ptpos').style.display=(ptr.value==='positive')?'':'none';
-                    $('#ptneg').style.display=(ptr.value==='negative')?'':'none'; };
-  cat.addEventListener('change',ptShow); ptr.addEventListener('change',ptRes); ptShow();
+                    $('#ptneg').style.display=(ptr.value==='negative')?'':'none';
+                    $('#ptpend').style.display=(ptr.value==='pending')?'':'none'; };
+  cat.addEventListener('change',()=>{ ptShow(); ptRes(); }); ptr.addEventListener('change',ptRes); ptShow(); ptRes();
 
   $('#save').onclick=async()=>{
     const em=mrnError(mrn.value); if(em){ $('#m').textContent=' '+em; modal('Check the MRN',em); return; }
     const ea=ageError(age.value); if(ea){ $('#m').textContent=' '+ea; modal('Check the age',ea); return; }
-    if(cat.value==='pregtest' && !ptr.value){ modal('Record the test result','She is here for a pregnancy test — record whether it was positive or negative. The result is what decides where she goes next: positive opens her ANC episode, negative opens her family-planning record.'); return; }
     $('#m').textContent=' saving…';
     try{
       const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
@@ -560,25 +579,126 @@ async function register(){
         ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null)});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
 
-      // PREGNANCY TEST: the result decides the door she goes through. The server opens the ANC
-      // episode on a positive, or the family-planning record on a negative — so the handover is
-      // recorded, not left to chance.
-      if(cat.value==='pregtest'){
-        const pos=(ptr.value==='positive');
-        const t=await api('POST','pregnancy_tests',{woman_id:wid,test_date:new Date().toISOString().slice(0,10),
-          result:ptr.value,note:(ptn.value||null),
-          link_to_anc:(pos?1:0), link_to_fp:((!pos&&tk('ptfp'))?1:0), fp_offered:(!pos&&tk('ptfp'))?1:0});
-        if(t&&t.episode_id){ $('#m').textContent=' registered — ANC episode opened';
-          toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+t.episode_id,700); return; }
-        if(t&&t.fp_client_id){ $('#m').textContent=' registered — family-planning record opened';
-          toast('Negative — family planning record opened','ok'); setTimeout(()=>location.hash='#fpclient/'+t.fp_client_id,700); return; }
-        $('#m').textContent=' test recorded'; toast('Test recorded','ok'); setTimeout(()=>location.hash='#home',700); return;
+      await routeNewClient(cat.value, wid, {name:(fn.value+' '+fa.value).trim(), mrn:mrn.value.trim(), age:(+age.value||null),
+        result:ptr.value, note:(ptn.value||null), fp:tk('ptfp')});
+    }catch(e){
+      // SHE IS ALREADY ON FILE. This used to be a dead end: the server said "This MRN already
+      // exists at your facility" and the recorder's only options were to invent a second MRN —
+      // splitting her history in two — or give up. A woman returning pregnant after last year's
+      // postnatal care simply could not be admitted.
+      if(String(e.message||'').indexOf('already exists')>=0){
+        const found=await api('GET','women?q='+encodeURIComponent(mrn.value.trim())).catch(()=>[]);
+        const w=(found||[]).find(x=>String(x.mrn)===mrn.value.trim());
+        if(w){ $('#m').textContent='';
+          modal('She is already registered',
+            '<b>'+esc(((w.first_name||'')+' '+(w.father_name||'')).trim())+'</b> (MRN '+esc(w.mrn)+', '+esc(w.age||'?')+' yrs) is already on file here.<br><br>'+
+            'Do not register her again — that would split her history across two records. Open her existing record and start a new episode instead.',
+            'risk');
+          const mdl=document.getElementById('mdl');
+          if(mdl){ const btn=document.createElement('button'); btn.className='act'; btn.style.marginTop='10px';
+            btn.textContent='Open her record and admit her';
+            btn.onclick=()=>{ document.getElementById('mdl')?.remove(); location.hash='#find/'+w.id; };
+            mdl.querySelector('div')?.appendChild(btn); }
+          return; }
       }
-
-      await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
-      $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
-    }catch(e){ $('#m').textContent=' '+(e.message||'could not register'); }
+      $('#m').textContent=' '+(e.message||'could not register');
+    }
   };
+}
+
+// ---- Find a woman already on file, and start a new episode ------------------------------
+// THE MISSING SCREEN. A woman returning for a new pregnancy could not be admitted at all: the
+// only intake path always created a NEW `women` row, and the server rejected her own MRN as a
+// duplicate. The recorder's choices were to invent a second MRN — splitting her history in two —
+// or turn her away. There was no way anywhere in the application to open an existing woman and
+// start a new episode.
+async function findWoman(arg){
+  const preId=(arg&&/^\d+$/.test(arg))?+arg:null;
+  app().innerHTML=nav()+`<div class="card"><h3>Find a woman already registered</h3>
+   <p class="muted">She is on file from a previous pregnancy or visit. Open her record and start a new episode &mdash; do not register her again, or her history is split across two records.</p>
+   <label>Search by MRN or name<input id="fq" placeholder="type at least 2 characters" autofocus></label>
+   <div id="fres" style="margin-top:10px"></div></div>
+   <div id="fsel"></div>`;
+  const render=(list)=>{
+    $('#fres').innerHTML = (list&&list.length)
+      ? `<table><tr><th>MRN</th><th>Name</th><th>Age</th><th></th></tr>`+list.map(w=>`<tr>
+          <td>${esc(w.mrn||'')}</td><td>${esc(((w.first_name||'')+' '+(w.father_name||'')).trim())}</td>
+          <td>${esc(w.age||'')}</td><td><button class="sec" data-pick="${w.id}">Open</button></td></tr>`).join('')+`</table>`
+      : '<p class="muted">No match. If she has never been seen here, register her instead.</p>';
+    document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>openWoman(+b.dataset.pick,list));
+  };
+  let t=null;
+  $('#fq').addEventListener('input',()=>{ clearTimeout(t); const q=fq.value.trim(); if(q.length<2){ $('#fres').innerHTML=''; return; }
+    t=setTimeout(async()=>{ const r=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]); render(r||[]); },250); });
+
+  async function openWoman(wid,list){
+    const w=(list||[]).find(x=>x.id==wid)||{};
+    const eps=await api('GET','episodes?woman='+wid).catch(()=>[]);
+    $('#fsel').innerHTML=`<div class="card">
+      <h3>${esc(((w.first_name||'')+' '+(w.father_name||'')).trim())} <span class="muted" style="font-size:13px;font-weight:400">— MRN ${esc(w.mrn||'')} · ${esc(w.age||'?')} yrs</span></h3>
+      <h4>Her episodes</h4>
+      <table><tr><th>#</th><th>Service</th><th>Status</th><th></th></tr>
+      ${(eps||[]).map(e=>`<tr><td>${esc(e.id)}</td><td>${esc(e.service_category)}</td><td>${esc(e.status)}${e.referred==1?' <span class="pill amber">referred</span>':''}</td>
+        <td><a class="nav" href="#patient/${e.id}">Open</a></td></tr>`).join('')||'<tr><td colspan=4 class=muted>No episodes yet.</td></tr>'}
+      </table>
+      <h4 style="margin-top:14px">Start a new episode</h4>
+      <div class="grid">
+       <label>Why is she here now?<select id="nsvc">
+        <option value="anc">Antenatal care (ANC)</option>
+        <option value="labour">Labour &amp; delivery</option>
+        <option value="pnc">Postnatal care</option>
+        <option value="pregtest">Pregnancy test</option>
+        <option value="fp">Family planning</option>
+        <option value="pmtct">PMTCT — HIV positive</option>
+        <option value="td">Immunization — Td</option>
+        <option value="hpv">Immunization — HPV</option>
+       </select></label>
+      </div>
+      <button class="act" id="nsave" style="margin-top:10px">Admit her</button> <span class="muted" id="nm"></span>
+      <p class="muted" style="font-size:12px;margin-top:8px">This keeps her one record. Everything already known about her — her risk factors, blood group, Rh, HIV status — follows her into the new episode.</p>
+    </div>`;
+    $('#nsave').onclick=async()=>{ const b=$('#nsave'); if(b.disabled) return; b.disabled=true;
+      try{ await routeNewClient(nsvc.value, wid, {name:((w.first_name||'')+' '+(w.father_name||'')).trim(), mrn:w.mrn, age:w.age, result:'pending', fp:0}); }
+      catch(e){ b.disabled=false; $('#nm').textContent=' '+(e.message||'error'); } };
+  }
+  if(preId){ const r=await api('GET','women?q=').catch(()=>[]); const w=(r||[]).find(x=>x.id===preId); if(w){ render([w]); openWoman(preId,[w]); } }
+}
+
+// One front door, every service. Registration used to create an `episodes` row and nothing else,
+// so family planning, immunization and PMTCT had NO way in from the front desk — their clients
+// were typed in separately, under a second identity with no link back to the woman.
+async function routeNewClient(cat, wid, d){
+  const today=new Date().toISOString().slice(0,10);
+  if(cat==='pregtest'){
+    const res=d.result||'pending'; const pos=(res==='positive');
+    const t=await api('POST','pregnancy_tests',{woman_id:wid,test_date:today,result:res,note:d.note,
+      link_to_anc:(pos?1:0), link_to_fp:((res==='negative'&&d.fp)?1:0), fp_offered:(res==='negative'&&d.fp)?1:0});
+    if(t&&t.episode_id){ toast('Positive — ANC episode opened','ok'); location.hash='#patient/'+t.episode_id; return; }
+    if(t&&t.fp_client_id){ toast('Negative — family planning record opened','ok'); location.hash='#fpclient/'+t.fp_client_id; return; }
+    toast('Registered — awaiting the test result','ok'); location.hash='#pregtest'; return;
+  }
+  if(cat==='fp'){
+    const r=await api('POST','fp_clients',{woman_id:wid,mrn:d.mrn,name:d.name,age:d.age,sex:'F',reg_date:today,acceptor:'new'});
+    if(r&&r.id){ toast('Family planning record opened','ok'); location.hash='#fpclient/'+r.id; return; }
+    toast('Registered','ok'); location.hash='#fp'; return;
+  }
+  if(cat==='td'||cat==='hpv'){
+    const prog=(cat==='td')?'Td':'HPV';
+    const r=await api('POST','imm_clients',{woman_id:wid,programme:prog,mrn:d.mrn,name:d.name,age:d.age,
+      pregnant:(prog==='Td'?1:null),reg_date:today});
+    if(r&&r.id){ toast(prog+' record opened','ok'); location.hash='#immclient/'+r.id; return; }
+    toast('Registered','ok'); location.hash='#imm'; return;
+  }
+  if(cat==='pmtct'){
+    const r=await api('POST','pmtct',{woman_id:wid,name:d.name,mrn:d.mrn,age:d.age,booking_date:today,known_positive:2});
+    if(r&&r.id){ toast('Enrolled in PMTCT — complete her ART details','ok'); location.hash='#pmtctclient/'+r.id; return; }
+    toast('Registered','ok'); location.hash='#pmtct'; return;
+  }
+  // maternity: ANC, labour, PNC (PNC includes a birth at home or another facility)
+  const ep=await api('POST','episodes',{woman_id:wid,service_category:cat,status:(cat==='labour'?'laboring':'active'),
+    provider_id:(ME.role==='provider'?ME.id:null),admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
+  if(ep&&ep.id){ location.hash='#patient/'+ep.id; return; }
+  location.hash='#'+(cat==='anc'?'antenatal':cat==='pnc'?'pnc':'labour');
 }
 
 // ---- Why is she high risk? ---------------------------------------------------
@@ -593,25 +713,29 @@ async function register(){
 // a tool a provider acts on, so the unsourced instructions have been REMOVED rather than
 // dressed up as national protocol. Where the guideline is silent, the tool now says so.
 // (See ADHERE+ audit, July 2026.)
-const NO_SRC='The National ANC Guideline lists this as a high-risk condition (Table 4) but does not specify how the birth should be managed. Follow your facility&rsquo;s obstetric protocol and senior clinician.';
+// An entry carries an ACTION only where an MoH source actually specifies one. Where the guideline
+// names the risk but says nothing about management (it is an ANTENATAL guideline; for several
+// conditions it is silent on the birth), the entry carries the reason ALONE. Earlier versions
+// filled that silence with general obstetric practice, written in the same confident voice as
+// the sourced advice. That has been removed rather than dressed up as national protocol.
 const G='National ANC Guideline (MoH, Feb 2022)';
 const RISK_INFO={
- AGE_LT19:['Age under 19 — teenage/adolescent pregnancy',NO_SRC,G+', Table 4 (risk only)'],
- AGE_GT35:['Age over 35 — advanced maternal age',NO_SRC,G+', Table 4 (risk only)'],
- UNPLANNED:['Unplanned or unwanted pregnancy','Counsel and assess her support needs. Screen for mental health problems and intimate-partner violence. Offer postpartum family planning.',G+' — mental health, IPV and postpartum FP are all in the ANC package'],
- PRIOR_CS:['Previous caesarean section',NO_SRC,G+', Table 4 (risk only)'],
- PRIOR_STILLBIRTH:['Previous stillbirth',NO_SRC,G+', Table 4 (risk only)'],
- PRIOR_PPH:['Previous postpartum haemorrhage',NO_SRC,G+', Table 4 (risk only)'],
- PRIOR_PREECLAMPSIA:['Previous pre-eclampsia or eclampsia','Calcium supplementation. Check blood pressure and urine protein at every contact.',G+' — calcium supplementation and BP/urine protein at every contact'],
- PRIOR_OBSTRUCTED:['Previous obstructed or prolonged labour',NO_SRC,G+', Table 4 (risk only)'],
- CHRONIC_HTN:['Chronic hypertension','Blood pressure at every contact. Calcium supplementation. Watch for superimposed pre-eclampsia.',G+' — calcium supplementation and BP at every contact'],
- DIABETES:['Diabetes mellitus',NO_SRC,G+', Table 4 (risk only)'],
+ AGE_LT19:['Age under 19 — teenage/adolescent pregnancy','',''],
+ AGE_GT35:['Age over 35 — advanced maternal age','',''],
+ UNPLANNED:['Unplanned or unwanted pregnancy','Counsel and assess her support needs. Screen for mental health problems and intimate-partner violence. Offer postpartum family planning.',G],
+ PRIOR_CS:['Previous caesarean section','',''],
+ PRIOR_STILLBIRTH:['Previous stillbirth','',''],
+ PRIOR_PPH:['Previous postpartum haemorrhage','',''],
+ PRIOR_PREECLAMPSIA:['Previous pre-eclampsia or eclampsia','Calcium supplementation. Check blood pressure and urine protein at every contact.',G],
+ PRIOR_OBSTRUCTED:['Previous obstructed or prolonged labour','',''],
+ CHRONIC_HTN:['Chronic hypertension','Blood pressure at every contact. Calcium supplementation. Watch for superimposed pre-eclampsia.',G],
+ DIABETES:['Diabetes mellitus','',''],
  CARDIAC_RENAL:['Cardiac or renal disease','Refer for specialist care. This may be a pregnancy that endangers her life.',G+', Annex 2'],
- RH_NEG:['Rh negative','Anti-D immunoglobulin 300 micrograms for every Rh-negative, Coombs-negative woman at 28 weeks, and again soon after birth if the newborn is Rh positive. Screen the mother, the father and the baby for Rh antigen.',G+' — verbatim'],
- LATE_ANC:['Late ANC initiation (booked after 12 weeks)','Catch up on the missed ANC package: screening, iron-folic acid, calcium, Td and deworming.',G+' — the ANC package'],
- HIV_POS:['Known HIV positive','Continue ART — do not re-test her. Check the viral load. Ensure PMTCT linkage, and plan infant ARV prophylaxis and DNA/PCR.','MoH Integrated MNCH/PMTCT register (register 6) instructions'],
- ANAEMIA:['Anaemia on the last contact','Therapeutic iron (60 mg elemental iron). If severe (Hb &lt;7 g/dl): refer to hospital for complete investigation and possible blood transfusion, and continue therapeutic iron.',G+', §5.2.2 anaemia table — verbatim'],
- MUAC_LOW:['Acute malnutrition (MUAC <23 cm)','Treat as recommended by the national guideline for the management of acute malnutrition, and counsel on nutrition.',G+' — verbatim'],
+ RH_NEG:['Rh negative','Anti-D immunoglobulin 300 micrograms at 28 weeks for every Rh-negative, Coombs-negative woman, and again soon after birth if the newborn is Rh positive.',G],
+ LATE_ANC:['Late ANC initiation (booked after 12 weeks)','Catch up on the missed ANC package: screening, iron-folic acid, calcium, Td and deworming.',G],
+ HIV_POS:['Known HIV positive','Continue ART — do not re-test her. Check the viral load. Ensure PMTCT linkage, and plan infant ARV prophylaxis and DNA/PCR.','MoH PMTCT register'],
+ ANAEMIA:['Anaemia on the last contact','Therapeutic iron (60 mg elemental iron). If severe (Hb &lt;7 g/dl): refer to hospital for investigation and possible blood transfusion, and continue therapeutic iron.',G+', §5.2.2'],
+ MUAC_LOW:['Acute malnutrition (MUAC <23 cm)','Treat as recommended by the national guideline for the management of acute malnutrition, and counsel on nutrition.',G],
 };
 function riskReasons(e){
   const codes=[];
@@ -647,8 +771,8 @@ function wireRisk(rows){
     const body=rs.length
       ? rs.map((r,i)=>`<div style="padding:8px 0;border-bottom:0.5px solid #eee">
            <div style="font-weight:600;color:#791f1f">${i+1}. ${esc(r.why)}</div>
-           <div style="font-size:13px;color:#334155;margin-top:2px"><b>Next:</b> ${r.action}</div>
-           ${r.src?`<div style="font-size:11px;color:#8a9490;margin-top:3px">Source: ${esc(r.src)}</div>`:''}</div>`).join('')
+           ${r.action?`<div style="font-size:13px;color:#334155;margin-top:2px"><b>Next:</b> ${r.action}</div>`:''}
+           ${r.src?`<div style="font-size:11px;color:#8a9490;margin-top:3px">${esc(r.src)}</div>`:''}</div>`).join('')
       : '<div class="muted">Flagged, but no specific condition is recorded. Complete her ANC risk screening.</div>';
     const old=document.getElementById('mdl'); if(old) old.remove();
     const d=document.createElement('div'); d.id='mdl';
@@ -3026,13 +3150,28 @@ function pmtctInfantForm(mid,infants,m){
 //  instead of depending on her finding the ANC room herself.
 async function pregTest(){
   const past=await api('GET','pregnancy_tests').catch(()=>[]);
-  app().innerHTML=nav()+`<div class="card"><h3>Pregnancy test <span class="muted" style="font-size:13px;font-weight:400">— OPD</span></h3>
-   <p class="muted">Record the test. If it is positive, ADHERE+ can open her ANC episode straight away — she is linked to the ANC room, not just told to go there.</p>
+  const pending=(past||[]).filter(p=>p.result==='pending');
+  app().innerHTML=nav()+`
+   ${pending.length?`<div class="card"><h3>Awaiting a result <span class="pill amber">${pending.length}</span></h3>
+    <p class="muted">These women were registered for a pregnancy test and the result has not come back. Record it here and she is routed straight away &mdash; positive opens her ANC episode, negative opens her family-planning record.</p>
+    <table><tr><th>Registered</th><th>MRN</th><th>Name</th><th>Result</th><th></th></tr>
+    ${pending.map(p=>`<tr>
+      <td>${esc(p.test_date||'')}</td><td>${esc(p.mrn||'')}</td>
+      <td>${esc(((p.first_name||'')+' '+(p.father_name||'')).trim())}</td>
+      <td><select data-res="${p.id}" style="min-width:130px"><option value="">— select —</option><option value="negative">Negative</option><option value="positive">Positive</option></select></td>
+      <td><button class="sec" data-save="${p.id}">Record</button></td></tr>`).join('')}
+    </table>
+    <div class="ticks" style="margin-top:8px">${tick('ptfpall','If negative, open her family-planning record')}</div>
+    <p class="muted" style="font-size:12px">A negative test is the highest-yield moment there is to offer contraception &mdash; she is in the building, thinking about her fertility, with a provider in front of her.</p>
+    </div>`:''}
+
+   <div class="card"><h3>Pregnancy test <span class="muted" style="font-size:13px;font-weight:400">— for a woman already registered</span></h3>
+   <p class="muted">To register a NEW woman for a test, use <a class="nav" href="#register" style="padding:0">Register</a> and choose &ldquo;Pregnancy test&rdquo;.</p>
    <div class="grid">
     <label>Find the woman (MRN or name)<input id="ptq" placeholder="type to search"></label>
     <label>&nbsp;<select id="ptw"><option value="">— search first —</option></select></label>
     ${ecPicker('ptd','Test date',true)}
-    <label>Result<select id="ptr"><option value="">— select —</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
+    <label>Result<select id="ptr"><option value="pending">Not back yet</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
    </div>
    <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
      <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
@@ -3061,10 +3200,27 @@ async function pregTest(){
     $('#ptneg').style.display=(ptr.value==='negative')?'':'none';
   });
 
+  // Record a result that has come back from the lab. THIS is where she gets routed.
+  document.querySelectorAll('[data-save]').forEach(btn=>btn.onclick=async()=>{
+    if(btn.disabled) return;
+    const pid=btn.dataset.save;
+    const sel=document.querySelector('[data-res="'+pid+'"]');
+    if(!sel.value){ modal('Select the result','Record whether her test was positive or negative.'); return; }
+    btn.disabled=true;
+    try{
+      const neg=(sel.value==='negative');
+      const r=await api('PATCH','pregnancy_tests/'+pid,{result:sel.value,
+        link_to_anc:(sel.value==='positive')?1:0,
+        link_to_fp:(neg&&tk('ptfpall'))?1:0, fp_offered:(neg&&tk('ptfpall'))?1:0});
+      if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); location.hash='#patient/'+r.episode_id; return; }
+      if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); location.hash='#fpclient/'+r.fp_client_id; return; }
+      toast('Result recorded','ok'); setTimeout(pregTest,500);
+    }catch(e){ btn.disabled=false; toast(e.message||'error'); }
+  });
+
   $('#ptsave').onclick=async()=>{
     const b=$('#ptsave'); if(b.disabled) return;
     if(!ptw.value){ modal('Select the woman','Search for her by MRN or name and select her from the list. If she is not registered yet, register her first.'); return; }
-    if(!ptr.value){ modal('Select the result','Record whether the pregnancy test was positive or negative.'); return; }
     b.disabled=true;
     try{
       const r=await api('POST','pregnancy_tests',{woman_id:+ptw.value,test_date:ecGet('ptd'),result:ptr.value,

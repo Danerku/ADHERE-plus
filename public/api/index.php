@@ -90,6 +90,44 @@ function sync_hiv_from_baby(int $babyId): void {
     'recorded_by'=>(int)($b['recorded_by']??0) ?: null]);
 }
 
+// A pregnancy test result is a FORK IN THE ROAD, and it may arrive at the desk or hours later
+// from the lab. This is the routing, shared by POST (result known now) and PATCH (result came
+// back later), so a woman is handed on identically either way.
+//   positive -> her ANC episode is opened, so the handoff to the ANC room is RECORDED
+//   negative -> her family-planning record is opened. She is in the building, thinking about her
+//               fertility, with a provider in front of her. It is the highest-yield moment there
+//               is to offer contraception, and it used to be a dead end.
+function pregtest_link(int $pid, int $wid, string $res, array $b, array $u): array {
+  $eid=null; $fpid=null;
+  if($res==='positive' && !empty($b['link_to_anc'])){
+    // Never open a SECOND ANC episode for a woman who already has one open — that splits her
+    // contacts across two charts.
+    $ex=db()->prepare("SELECT id FROM episodes WHERE woman_id=? AND service_category='anc' AND status='active' ORDER BY id DESC LIMIT 1");
+    $ex->execute([$wid]); $row=$ex->fetch();
+    $eid = $row ? (int)$row['id']
+                : insert('episodes',['woman_id'=>$wid,'service_category'=>'anc','status'=>'active',
+                    'admitted_from'=>'new','admission_datetime'=>date('Y-m-d H:i:s'),
+                    'facility_id'=>$u['facility_id'],'created_by'=>$u['id']]);
+    db()->prepare("UPDATE pregnancy_tests SET linked_episode_id=?, linked_at=NOW() WHERE id=?")->execute([$eid,$pid]);
+  }
+  if($res==='negative' && !empty($b['link_to_fp'])){
+    $ex=db()->prepare("SELECT id FROM fp_clients WHERE woman_id=? AND facility_id=? ORDER BY id DESC LIMIT 1");
+    $ex->execute([$wid,$u['facility_id']]); $row=$ex->fetch();
+    if($row){ $fpid=(int)$row['id']; }
+    else {
+      $w2=db()->prepare("SELECT mrn,first_name,father_name,age FROM women WHERE id=?"); $w2->execute([$wid]); $wr=$w2->fetch();
+      $fpid=insert('fp_clients',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,
+        'mrn'=>($wr['mrn']??null),'name'=>trim(($wr['first_name']??'').' '.($wr['father_name']??'')),
+        'age'=>($wr['age']??null),'sex'=>'F','reg_date'=>date('Y-m-d'),'acceptor'=>'new',
+        'from_preg_test_id'=>$pid,'recorded_by'=>$u['id']]);
+    }
+    db()->prepare("UPDATE pregnancy_tests SET fp_offered=1, linked_fp_client_id=?, linked_at=NOW() WHERE id=?")->execute([$fpid,$pid]);
+  } elseif($res==='negative'){
+    db()->prepare("UPDATE pregnancy_tests SET fp_offered=? WHERE id=?")->execute([!empty($b['fp_offered'])?1:0,$pid]);
+  }
+  return [$eid,$fpid];
+}
+
 $m = $_SERVER['REQUEST_METHOD'];
 $path = trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/');
 $path = preg_replace('#^.*api/#','',$path);           // normalise to route after /api/
@@ -715,30 +753,29 @@ try {
       $wid=(int)($b['woman_id']??0);
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$wid,$u['facility_id']]);
       if(!$wc->fetch()) err('woman not in your facility',404);
+      // 'pending' is the NORMAL state. She is registered at the desk, walks to the lab, and the
+      // strip is read later. The tool used to refuse to save a test without a result, so she
+      // could not be registered at all until it was known — and there was no way to add it
+      // afterwards, because this route had no PATCH.
+      $res=$b['result']??'pending'; if($res==='') $res='pending';
       $pid=insert('pregnancy_tests',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,
-        'test_date'=>($b['test_date']??date('Y-m-d')),'result'=>($b['result']??null),
+        'test_date'=>($b['test_date']??date('Y-m-d')),'result'=>$res,
+        'resulted_at'=>($res==='pending'?null:date('Y-m-d H:i:s')),
         'note'=>($b['note']??null),'recorded_by'=>$u['id']]);
-      $eid=null; $fpid=null;
-      // POSITIVE -> open the ANC episode in one step.
-      if(($b['result']??'')==='positive' && !empty($b['link_to_anc'])){
-        $eid=insert('episodes',['woman_id'=>$wid,'service_category'=>'anc','status'=>'active',
-          'admitted_from'=>'new','admission_datetime'=>date('Y-m-d H:i:s'),
-          'facility_id'=>$u['facility_id'],'created_by'=>$u['id']]);
-        db()->prepare("UPDATE pregnancy_tests SET linked_episode_id=?, linked_at=NOW() WHERE id=?")->execute([$eid,$pid]);
-      }
-      // NEGATIVE -> open her as a family-planning client. A negative test is the highest-yield
-      // moment to offer contraception; until now it was a dead end and she simply left.
-      if(($b['result']??'')==='negative' && !empty($b['link_to_fp'])){
-        $w2=db()->prepare("SELECT mrn,first_name,father_name,age FROM women WHERE id=?"); $w2->execute([$wid]); $wr=$w2->fetch();
-        $fpid=insert('fp_clients',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,
-          'mrn'=>($wr['mrn']??null),'name'=>trim(($wr['first_name']??'').' '.($wr['father_name']??'')),
-          'age'=>($wr['age']??null),'sex'=>'F','reg_date'=>date('Y-m-d'),'acceptor'=>'new',
-          'from_preg_test_id'=>$pid,'recorded_by'=>$u['id']]);
-        db()->prepare("UPDATE pregnancy_tests SET fp_offered=1, linked_fp_client_id=?, linked_at=NOW() WHERE id=?")->execute([$fpid,$pid]);
-      } elseif(($b['result']??'')==='negative'){
-        db()->prepare("UPDATE pregnancy_tests SET fp_offered=? WHERE id=?")->execute([!empty($b['fp_offered'])?1:0,$pid]);
-      }
-      audit('create','pregnancy_tests',$pid); out(['id'=>$pid,'episode_id'=>$eid,'fp_client_id'=>$fpid],201); }
+      [$eid,$fpid]=pregtest_link($pid,$wid,$res,$b,$u);
+      audit('create','pregnancy_tests',$pid); out(['id'=>$pid,'result'=>$res,'episode_id'=>$eid,'fp_client_id'=>$fpid],201); }
+
+    // The result comes back from the lab. THIS is where she is routed.
+    if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
+      $q=db()->prepare("SELECT * FROM pregnancy_tests WHERE id=? AND facility_id=?");
+      $q->execute([$id,$u['facility_id']]); $t=$q->fetch();
+      if(!$t) err('pregnancy test not found',404);
+      $res=$b['result']??''; if(!in_array($res,['pending','positive','negative'])) err('result must be pending, positive or negative');
+      db()->prepare("UPDATE pregnancy_tests SET result=?, resulted_at=?, note=COALESCE(NULLIF(?,''),note) WHERE id=?")
+          ->execute([$res, ($res==='pending'?null:date('Y-m-d H:i:s')), ($b['note']??''), $id]);
+      [$eid,$fpid]=pregtest_link((int)$id,(int)$t['woman_id'],$res,$b,$u);
+      audit('result','pregnancy_tests',$id,['result'=>$res]);
+      out(['ok'=>true,'result'=>$res,'episode_id'=>$eid,'fp_client_id'=>$fpid]); }
   }
 
   // ---- MoH paper-register export -------------------------------------------
