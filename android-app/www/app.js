@@ -379,7 +379,10 @@ function tileHtml(href,icon,title,sub,tone,ro){
 //   fp        = family planning, LAFP removal, immunization
 function canDo(what){
   const r=ME.role;
-  if(r==='admin') return true;
+  // ADMIN() covers admin AND super_admin. Testing r==='admin' literally here made a super_admin
+  // fall through to the observer branch: every clinical tile came up VIEW ONLY for the one account
+  // that is supposed to be able to do everything.
+  if(ADMIN()) return true;
   if(r==='provider') return what!=='admin';
   if(r==='recorder') return (what==='intake'||what==='fp');
   return false;                                  // observer, supervisor: read-only
@@ -1846,6 +1849,24 @@ const LAB_TESTS=[['HGB','Haemoglobin / haematocrit'],['BLOOD_GROUP_RH','Blood gr
  ['URINE_GRAM','Urine microscopy / gram stain'],['HIV','HIV test'],['SYPHILIS','Syphilis (RPR/VDRL)'],['HBV','Hepatitis B (HBsAg)'],
  ['OGTT','OGTT (75g, 2-hour)'],['USS','Obstetric ultrasound'],['OTHER','Other']];
 
+// The HIV result on a past contact. If it is recorded, show it. If it is not — because the sample
+// went to the lab and the result was not back on the day — offer the control that records it.
+//
+// P and N ONLY. anc_visits.hiv_test_result is CHAR(1) (MoH coding: P/N), so a two-letter value like
+// "NT" would be silently TRUNCATED to "N" — turning "not tested" into "negative" in a woman's HIV
+// record. Never offer a value the column cannot hold.
+function hivCell(p){
+  const r=String(p.hiv_test_result||'');
+  if(r==='P') return '<span class="pill red">Positive</span>';
+  if(r==='N') return '<span class="pill green">Negative</span>';
+  if(r)       return esc(r);
+  return `<select data-hiv="${p.id}" style="width:auto;min-width:118px">
+      <option value="">— result pending —</option>
+      <option value="N">Negative</option>
+      <option value="P">Positive</option>
+    </select>`;
+}
+
 async function ancVisits(id){
   const [past,e,labs]=await Promise.all([
     api('GET','anc_visits?episode='+id).catch(()=>[]),
@@ -1953,9 +1974,30 @@ async function ancVisits(id){
    <label>Remark<input id="rmk" placeholder="appointment or anything not covered above"></label>
    <div id="ancreqbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
    <button class="act" id="asave" style="margin-top:10px">Save contact</button> <span class="muted" id="am"></span></div>
-   <div class="card"><h3>Previous contacts</h3><table><tr><th>Date</th><th>#</th><th>GA</th><th>Wt</th><th>BP</th><th>MUAC</th><th>Hb</th><th>Anaemia</th><th>Next</th></tr>
-    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.contact_no||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.muac||'')}${p.muac_flag==1?' <span class="pill amber">&lt;23</span>':''}</td><td>${esc(p.hgb||'')}</td><td>${p.anaemia_grade&&p.anaemia_grade!=='normal'?('<span class="pill amber">'+esc(p.anaemia_grade)+'</span>'):esc(p.anaemia_grade||'')}</td><td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=9 class=muted>No contacts yet.</td></tr>'}
-   </table></div>`;
+   <div class="card"><h3>Previous contacts</h3><table><tr><th>Date</th><th>#</th><th>GA</th><th>Wt</th><th>BP</th><th>MUAC</th><th>Hb</th><th>Anaemia</th><th>HIV result</th><th>Next</th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.contact_no||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.muac||'')}${p.muac_flag==1?' <span class="pill amber">&lt;23</span>':''}</td><td>${esc(p.hgb||'')}</td><td>${p.anaemia_grade&&p.anaemia_grade!=='normal'?('<span class="pill amber">'+esc(p.anaemia_grade)+'</span>'):esc(p.anaemia_grade||'')}</td>
+      <td>${hivCell(p)}</td>
+      <td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=10 class=muted>No contacts yet.</td></tr>'}
+   </table>
+   <p class="muted" style="font-size:12px">A test sent to the lab has no result on the day. Record it here when it comes back &mdash; it updates <b>this</b> contact, and a positive result puts her on the high-risk worklist and into PMTCT.</p></div>`;
+
+  // ---- LATE RESULTS -------------------------------------------------------------------------
+  // An HIV test sent to the lab does not come back the same day in most facilities. The result was
+  // recorded on the visit row and NOTHING happened: the linkage that sets women.hiv_known_positive
+  // ran on POST only, so a result entered later never reached it. She stayed off the high-risk
+  // worklist, was re-offered a test at her next contact, and no PMTCT prompt fired. She could not
+  // even be corrected — no screen called the PATCH route at all.
+  document.querySelectorAll('#app select[data-hiv]').forEach(sel=>sel.onchange=async()=>{
+    const vid=sel.dataset.hiv, val=sel.value;
+    if(!val) return;
+    if(val==='P' && !confirm('Record a POSITIVE HIV result for this contact?\n\nShe will be flagged high-risk and enrolled in the PMTCT pathway.')){ sel.value=''; return; }
+    sel.disabled=true;
+    const r=await api('PATCH','anc_visits/'+vid,{hiv_test_result:val});
+    if(r&&(r.ok||r.queued)){
+      toast(val==='P' ? 'Positive recorded — she is now flagged high-risk and linked to PMTCT' : 'Result recorded','ok');
+      ancVisits(id);
+    } else { sel.disabled=false; toast((r&&r.error)||'Could not save the result'); }
+  });
 
   // ---- derived clinical classification, shown live and stored on save ----
   const showDerived=()=>{
@@ -2214,11 +2256,31 @@ async function pncVisits(id){
     $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); } finally{ b.disabled=false; } };
 }
 
+// Which baby (if any) we are EDITING rather than adding. Module-scoped so the Edit button in the
+// table can re-render the form prefilled.
+let EDIT_BABY=null;
+
+// The form controls, mapped to their columns. Used to prefill an existing baby for editing, so a
+// late DBS result is a CORRECTION and not a second newborn.
+const BABY_FIELDS={bo:'birth_order',sx:'sex',wg:'weight_g',a1:'apgar_1min',a5:'apgar_5min',rs:'resuscitated',
+  oc:'outcome',dr:'enc_dried',brb:'enc_breathing',vkt:'vitamin_k_time',eo:'enc_eye_ointment',cc:'enc_cord_care',
+  cco:'cord_care_other',nmrn:'mrn',bfi:'breastfeed_initiated',hex:'hiv_exposed',arvp:'arv_prophylaxis',
+  dbss:'dbs_sample',dbsr:'dbs_result',kmc:'kmc',pht:'phototherapy',abx:'antibiotics',oxy:'oxygen',
+  nicu:'nicu',nicuf:'nicu_facility',bpot:'prob_other_text',bdd:'death_age_days',bdh:'death_age_hours',bdc:'death_cause'};
+const BABY_TICKS={artl:'art_linked',vbcg:'vacc_bcg',vopv:'vacc_opv0',vhbv:'vacc_hbv',bpre:'prob_prematurity',
+  bsep:'prob_sepsis_vsd',brds:'prob_resp_distress',bjau:'prob_jaundice',bcon:'prob_congenital',both:'prob_other',
+  brsv:'resuscitated_survived',bnot:'birth_notification'};
+
 async function babiesScreen(id){
   const past=await api('GET','babies?episode='+id).catch(()=>[]);
   const nextOrder=(past.length||0)+1;
+  const ed=EDIT_BABY;                       // the baby being corrected, or null when adding
   app().innerHTML=nav()+`<div class="card"><h3>Newborn record — episode ${esc(id)}</h3>
-   <p class="muted">Add one row per baby (supports twins and multiples).</p>
+   ${ed
+     ? `<div style="background:#e8f3f0;border:1px solid #0f766e;color:#0f5c55;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">
+          <b>Correcting baby #${esc(ed.birth_order||'')}</b> — this updates the existing record. It does not add another newborn.
+          <button class="sm" id="bcancel" style="margin-left:8px">Cancel</button></div>`
+     : `<p class="muted">Add one row per baby (supports twins and multiples). A result that comes back later &mdash; a DBS, a corrected weight &mdash; should be recorded with <b>Correct</b> on the baby below, not by adding a second one.</p>`}
    <div class="grid">
     <label>Birth order<input id="bo" type="number" value="${nextOrder}"></label>
     <label>Sex<select id="sx"><option value="female">Female</option><option value="male">Male</option><option value="ambiguous">Ambiguous</option></select></label>
@@ -2284,10 +2346,24 @@ async function babiesScreen(id){
     <label>If died — cause<select id="bdc">${selOpts([['1','1. Prematurity'],['2','2. Infection'],['3','3. Asphyxia'],['4','4. Other']])}</select></label>
    </div></details>
 
-   <button class="act" id="bsave" style="margin-top:10px">Add baby</button> <span class="muted" id="bm"></span></div>
-   <div class="card"><h3>Babies</h3><table><tr><th>#</th><th>Sex</th><th>Weight</th><th>APGAR</th><th>Resus</th><th>Outcome</th></tr>
-    ${past.map(p=>`<tr><td>${esc(p.birth_order||'')}</td><td>${esc(p.sex||'')}</td><td>${esc(p.weight_g||'')}</td><td>${esc((p.apgar_1min||'')+'/'+(p.apgar_5min||''))}</td><td>${p.resuscitated==1?'yes':'no'}</td><td>${esc(p.outcome||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No babies recorded yet.</td></tr>'}
-   </table></div>`;
+   <button class="act" id="bsave" style="margin-top:10px">${ed?'Save the correction':'Add baby'}</button> <span class="muted" id="bm"></span></div>
+   <div class="card"><h3>Babies</h3><table><tr><th>#</th><th>Sex</th><th>Weight</th><th>APGAR</th><th>Resus</th><th>Outcome</th><th>DBS</th><th></th></tr>
+    ${past.map(p=>`<tr><td>${esc(p.birth_order||'')}</td><td>${esc(p.sex||'')}</td><td>${esc(p.weight_g||'')}</td><td>${esc((p.apgar_1min||'')+'/'+(p.apgar_5min||''))}</td><td>${p.resuscitated==1?'yes':'no'}</td><td>${esc(p.outcome||'')}</td>
+      <td>${p.hiv_exposed==1?esc(p.dbs_result||'pending'):'<span class="muted">—</span>'}</td>
+      <td><button class="sm" data-edit="${p.id}">Correct</button></td></tr>`).join('')||'<tr><td colspan=8 class=muted>No babies recorded yet.</td></tr>'}
+   </table>
+   <p class="muted" style="font-size:12px">Use <b>Correct</b> to record a result that came back later. Adding a second row for the same baby creates a phantom twin &mdash; it double-counts the birth and prints twice in the MoH delivery register.</p></div>`;
+  document.querySelectorAll('#app button[data-edit]').forEach(b=>b.onclick=()=>{
+    EDIT_BABY=(past||[]).find(x=>String(x.id)===String(b.dataset.edit))||null;
+    babiesScreen(id);
+  });
+  const bc=$('#bcancel'); if(bc) bc.onclick=()=>{ EDIT_BABY=null; babiesScreen(id); };
+  // Prefill the form from the baby being corrected.
+  if(ed){
+    Object.keys(BABY_FIELDS).forEach(k=>{ const el=$('#'+k); if(!el) return;
+      const v=ed[BABY_FIELDS[k]]; if(v!==null&&v!==undefined) el.value=String(v); });
+    Object.keys(BABY_TICKS).forEach(k=>{ const el=$('#'+k); if(el) el.checked=(+ed[BABY_TICKS[k]]===1); });
+  }
   // ---- live consistency + validation ------------------------------------------
   // Collaborator caught this: "Resuscitated: No" was accepted alongside
   // "Breathing at birth: Needed resuscitation". Contradictory data must be blocked.
@@ -2322,7 +2398,14 @@ async function babiesScreen(id){
   $('#bsave').onclick=async()=>{
     const blocking=nbIssues().filter(i=>i.block);
     if(blocking.length){ modal('Check the newborn record',blocking.map(i=>i.t).join('\n\n'),'risk'); return; }
-    const b=$('#bsave'); b.disabled=true; try{ const r=await api('POST','babies',{episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),
+    const b=$('#bsave'); b.disabled=true; try{
+    // CORRECT the existing baby, or add a new one. Until now the screen could only ADD — so a DBS
+    // result that came back a week later could only be recorded by saving the form again, which
+    // inserted a SECOND baby at birth_order = past.length + 1. A phantom twin: it inflated births
+    // and stillbirths and printed a duplicate line in the MoH delivery register.
+    const editing = EDIT_BABY && EDIT_BABY.id;
+    const r=await api(editing?'PATCH':'POST', editing?('babies/'+EDIT_BABY.id):'babies',
+    {episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),
     mrn:(nmrn.value||null),breastfeed_initiated:(+bfi.value||null),
     vitamin_k_time:(vkt.value||null),cord_care_other:(cc.value==='other'?(cco.value||null):null),
     apgar_flag:(a5.value!==''?((+a5.value<7)?'low':'normal'):null),
@@ -2338,7 +2421,10 @@ async function babiesScreen(id){
     prob_lbw:((+wg.value||0)>0&&(+wg.value)<2500)?1:0,   // MoH item 55 — derived, never asked
     resuscitated_survived:tk('brsv'),birth_notification:tk('bnot'),
     death_age_days:(+bdd.value||null),death_age_hours:(+bdh.value||null),death_cause:(+bdc.value||null)});
-    $('#bm').textContent=(r&&(r.ids||r.queued))?' added':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>babiesScreen(id),400); } finally{ b.disabled=false; } };
+    const ok = r && (r.ids || r.ok || r.queued);
+    $('#bm').textContent = ok ? (editing?' correction saved':' added') : ' '+((r&&r.error)||'error');
+    if(ok && !r.queued){ EDIT_BABY=null; setTimeout(()=>babiesScreen(id),400); }
+    } finally{ b.disabled=false; } };
 }
 
 async function vitalsScreen(id){
