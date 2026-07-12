@@ -822,6 +822,7 @@ async function partograph(id){
      <label>Amniotic fluid<select id="amn"><option value="">Not assessed</option><option value="I">Intact</option><option value="C">Clear</option><option value="M">Meconium</option><option value="B">Blood</option><option value="A">Absent</option></select></label>
      <label>Systolic BP<input id="sbp" type="number" placeholder="mmHg"></label>
      <label>Diastolic BP<input id="dbp" type="number" placeholder="mmHg"></label>
+     <label>Pulse<input id="pls" type="number" placeholder="bpm"></label>
      <label>Temp °C<input id="tmp" type="number" step="0.1" placeholder="°C"></label>
      <label>Urine protein<select id="uprot"><option value="">Not done</option><option value="neg">Neg</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
      <label>Urine acetone<select id="uacet"><option value="">Not done</option><option value="neg">Neg</option><option value="+">+</option><option value="++">++</option><option value="+++">+++</option></select></label>
@@ -860,10 +861,11 @@ async function partograph(id){
     try{
     const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:(ctx.value===''?null:+ctx.value),mld:+mld.value,
              sbp:(sbp.value===''?null:+sbp.value),dbp:(dbp.value===''?null:+dbp.value),tmp:(tmp.value===''?null:+tmp.value),
+             pls:(pls.value===''?null:+pls.value),
              dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null),uprot:(uprot.value||null)};
     const mld3=Math.max(0,Math.min(3,Math.round(o.mld)||0));
     // Save the observation FIRST — a failed save must never show a misleading chart/score.
-    const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,bp_diastolic:o.dbp,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
+    const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,bp_diastolic:o.dbp,pulse:o.pls,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
     OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id); obs.push({obs_datetime:new Date().toISOString().slice(0,19).replace('T',' ')}); renderMonSched(id,obs);
     const mecon=(o.amn==='M')?1:0;
     // THE PRE-ECLAMPSIA CLUSTER NOW REACHES THE MODEL. The danger-signs screen has always
@@ -885,8 +887,15 @@ async function partograph(id){
     // disabled the DBP>=110 severe-hypertension red flag: a woman at 150/115 was graded amber.
     // Anything genuinely NOT MEASURED is left out entirely, so the model falls back to its own
     // trained defaults rather than being handed a number nobody took.
+    // PULSE and ROM_HOURS were two more features the model consumed and the tool never supplied —
+    // the same defect as prior_cs. Pulse is now measured (the database and API always accepted it;
+    // only the form never asked). ROM hours is DERIVED from the rupture time already recorded on
+    // the episode, rather than invented. Prolonged rupture is the main driver of intrapartum sepsis.
+    const romH=(W.ruptured_datetime)
+      ? Math.max(0, Math.round(((Date.now()-Date.parse(W.ruptured_datetime.replace(' ','T')))/36e5)*10)/10)
+      : null;
     const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,
-      ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:o.dbp,temp:o.tmp});
+      ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:o.dbp,pulse:o.pls,temp:o.tmp,rom_hours:romH});
     Object.keys(feat).forEach(k=>{ if(feat[k]==null||Number.isNaN(feat[k])) delete feat[k]; });
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
     const cf=clinicalFlags(o); const finalBand=escalate(r.band,cf.band);   // safety guardrail
