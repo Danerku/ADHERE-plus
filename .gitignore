@@ -1,2 +1,5 @@
 **/node_modules/
 android-app/www/api/
+
+# local lint deps (scripts/check.sh)
+node_modules/
