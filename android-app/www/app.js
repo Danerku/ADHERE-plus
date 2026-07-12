@@ -582,6 +582,19 @@ function parseLocal(s){
   const d=new Date(t+tzOffset(d0));
   return isNaN(d)?d0:d;
 }
+// ---- RESOLVE ONE EPISODE ------------------------------------------------------------------
+// Six clinical screens used to pull the LIMIT-200 episode list and .find() their patient in the
+// browser. Past 200 episodes — one busy quarter — an older woman simply was not in the list, the
+// find() returned undefined, and the screen carried on with an EMPTY object. Silently, and
+// clinically: her Rh-negative / Anti-D banner disappeared, a woman on ART was offered an HIV test,
+// her delivered partograph reopened for editing, and the risk model scored her on defaults —
+// age 25, parity 1, no previous caesarean. Ask the server for the one episode instead.
+async function epOne(id){
+  try{ const r=await api('GET','episodes?ep='+id); const e=(Array.isArray(r)?r[0]:r)||null;
+    if(!e) toast('Could not load this patient\'s record — please go back and open her again.');
+    return e||{};
+  }catch(err){ toast('Could not load this patient\'s record — '+(err.message||'')); return {}; }
+}
 // Hours since the membranes ruptured. Feeds the model's rom_hours feature.
 function romHrs(s){ const d=parseLocal(s); if(!d) return null;
   return Math.max(0, Math.round(((Date.now()-d.getTime())/36e5)*10)/10); }
@@ -1017,9 +1030,11 @@ async function labour(){
 
 const OB={}; // per-episode in-memory observations for the chart
 async function partograph(id){
-  const [obs,eps]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),api('GET','episodes').catch(()=>[])]);
-  const W=(eps||[]).find(x=>x.id==id)||{}; const MF=motherFeats(W);
-  const locked=(String(W.status||'').toLowerCase()==='delivered');
+  const [obs,W]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),epOne(id)]);
+  const MF=motherFeats(W);
+  // A delivered — or closed — episode is a finished record. Read-only.
+  const st=String(W.status||'').toLowerCase();
+  const locked=(st==='delivered'||st==='closed');
   OB[id]=obs.map(o=>({hrs:+o.hours_since_active,cvx:+o.cervix_cm,fhr:+o.fetal_heart_rate,ctx:+o.contractions_per10,mld:+o.moulding,sbp:+o.bp_systolic,tmp:+o.temperature,dsc:(o.descent_head==null?null:+o.descent_head),amn:o.amniotic_fluid}));
   if(!BTS[id]) BTS[id]=new BayesTracker(0.15);
   app().innerHTML=nav()+`<div class="card"><h3>Partograph — episode ${esc(id)} <span id="band" class="pill"></span></h3>${locked?'<div class="pill amber" style="display:inline-block;margin:0 0 8px">Delivered - partograph is read-only</div>':''}
@@ -1528,11 +1543,10 @@ async function delivery(id){
   const obs=await api('GET','observations?episode='+id).catch(()=>[]);
   const pUsed=(obs||[]).some(o=>o.fetal_heart_rate) && (obs||[]).some(o=>o.cervix_cm!=null) &&
               (obs||[]).some(o=>o.bp_systolic||o.pulse||o.temperature) ? 'Y' : 'N';
-  const [eps0,already,prevDel]=await Promise.all([
-    api('GET','episodes').catch(()=>[]),
+  const [W,already,prevDel]=await Promise.all([
+    epOne(id),
     api('GET','babies?episode='+id).catch(()=>[]),
     api('GET','delivery?episode='+id).catch(()=>[])]);
-  const W=(eps0||[]).find(x=>x.id==id)||{};
   const rhNegD=String(W.rh_factor||'').toLowerCase()==='neg';
   // Guard against saving the delivery twice — it double-counts deliveries, AMTSL and the
   // partograph rate, and duplicates every newborn row in the MoH register.
@@ -1623,10 +1637,24 @@ async function pnc(){
     api('GET','episodes?category=pnc').catch(()=>[]),
     api('GET','providers').catch(()=>[])]);
   const del=(lab||[]).filter(r=>r.status==='delivered');
-  const rows=del.concat(pncEps||[]);
-  const where=r=>r.service_category==='pnc'
-    ? '<span class="pill amber">delivered elsewhere</span>'
-    : (r.referred==1?'<span class="pill amber">referred</span>':'');
+  // De-duplicate by WOMAN. A woman who delivered here and then had a pnc episode opened for her
+  // appeared on this list TWICE — once correctly, once tagged "delivered elsewhere", which was
+  // false. The labour episode wins: it owns the delivery record and the babies, so it is the one
+  // whose PNC visits can be tied to an actual infant.
+  const seen=new Set(del.map(r=>String(r.woman_id)));
+  const rows=del.concat((pncEps||[]).filter(r=>!seen.has(String(r.woman_id))));
+  // "Delivered elsewhere" is a fact about the BIRTH, not about which table the episode sits in.
+  const elsewhere=r=>{
+    const p=String(r.place_of_delivery||'').toLowerCase();
+    if(p==='home') return 'delivered at home';
+    if(p==='other_facility'||p==='other') return 'delivered at another facility';
+    if(r.service_category==='pnc' && !p) return 'delivered elsewhere';   // pnc episode, place not recorded
+    return '';
+  };
+  const where=r=>{
+    const el=elsewhere(r);
+    return (el?`<span class="pill amber">${el}</span> `:'') + (r.referred==1?'<span class="pill amber">referred</span>':'');
+  };
   app().innerHTML=nav()+`<div class="card"><h3>Postnatal care</h3>
    <p class="muted">Women after delivery — whether they delivered here, at another facility, or at home. WHO postnatal contacts: within 24 hours, day 3, day 7, and week 6. Open <b>PNC follow-up</b> to record the mother-and-newborn check.</p>
    <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th></th><th>Provider</th><th>Actions</th></tr>
@@ -1675,14 +1703,24 @@ const ANC_ITEMS=[
  ['MED_OTHER_SEVERE','general_medical','Any other severe or chronic medical condition']
 ];
 async function ancScreen(id){
-  const [existing,eps]=await Promise.all([api('GET','anc_screening?episode='+id).catch(()=>[]),api('GET','episodes').catch(()=>[])]);
-  const e=(eps||[]).find(x=>x.id==id)||{};
+  const [existing,e]=await Promise.all([api('GET','anc_screening?episode='+id).catch(()=>[]),epOne(id)]);
   const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
   const notePrev=prev['PLAN_NOTE']||'';
   // Items we can answer from data already held — prefilled, but the provider may override.
   const derived={};
   if(e.age){ derived.CUR_AGE_LT19=(+e.age<19)?'yes':'no'; derived.CUR_AGE_GT35=(+e.age>35)?'yes':'no'; }
   if(e.pregnancy_planned!==null&&e.pregnancy_planned!==undefined&&e.pregnancy_planned!=='') derived.CUR_UNPLANNED=(+e.pregnancy_planned===0)?'yes':'no';
+  // HER HISTORY IS ALREADY KNOWN — prefill it rather than asking her to say it again.
+  // This form is episode-scoped, so in a second pregnancy it opened completely blank, and a
+  // provider working down it answered "No" to "previous caesarean" — overwriting a recorded 'yes'
+  // and handing the intrapartum model prior_cs = 0 for a scarred uterus. The server now refuses to
+  // downgrade these, but the real fix is that she should never be asked to re-assert a permanent
+  // fact: it arrives already answered, from her own record.
+  const HIST={OBS_PREV_CS:'prior_cs', OBS_PREV_STILLBIRTH:'prior_stillbirth', OBS_PREV_PPH:'prior_pph',
+              OBS_PREV_PREECLAMPSIA:'prior_preeclampsia', OBS_PREV_OBSTRUCTED:'prior_obstructed',
+              MED_CHRONIC_HTN:'chronic_htn', MED_DIABETES:'diabetes', MED_CARDIAC_RENAL:'cardiac_renal'};
+  const fromRecord={};
+  Object.keys(HIST).forEach(code=>{ const v=e[HIST[code]]; if(v==='yes'||v==='no'){ derived[code]=v; fromRecord[code]=1; } });
 
   let html=nav()+`<div class="card"><h3>ANC risk screening — episode ${esc(id)} <span id="ancband" class="pill"></span></h3>
     <p class="muted">Risk conditions from the National ANC Guideline (MoH, Feb 2022), Table 4 and Annex 6. <b>Every item must be answered</b> — an unanswered item is not the same as "No". Prefilled items were derived from her record; change them if they are wrong.</p>
@@ -1745,7 +1783,12 @@ async function highriskList(){
 
 async function transfer(womanId,cat,from){
   const r=await api('POST','episodes',{woman_id:womanId,service_category:cat,status:cat==='labour'?'laboring':'active',admitted_from:from,provider_id:ME.role==='provider'?ME.id:null,admission_datetime:localDateTime()});
+  // The server hands back the episode she ALREADY has rather than opening a second one, and
+  // closes her antenatal episode when she is admitted in labour — so she stops appearing on the
+  // antenatal list and the labour ward at the same time.
+  if(r&&r.reused) toast('She already has an open '+(cat==='labour'?'labour':cat)+' record — opening it.','ok');
   if(r&&r.id){ location.hash=cat==='labour'?'#labour':(cat==='highrisk'?'#highrisk':'#antenatal'); route(); }
+  else if(r&&r.queued) toast('Saved — will be sent when you are back online','ok');
   else alert('Could not admit: '+((r&&r.error)||'error'));
 }
 
@@ -1790,11 +1833,10 @@ const LAB_TESTS=[['HGB','Haemoglobin / haematocrit'],['BLOOD_GROUP_RH','Blood gr
  ['OGTT','OGTT (75g, 2-hour)'],['USS','Obstetric ultrasound'],['OTHER','Other']];
 
 async function ancVisits(id){
-  const [past,eps,labs]=await Promise.all([
+  const [past,e,labs]=await Promise.all([
     api('GET','anc_visits?episode='+id).catch(()=>[]),
-    api('GET','episodes').catch(()=>[]),
+    epOne(id),
     api('GET','labs?episode='+id).catch(()=>[])]);
-  const e=(eps||[]).find(x=>x.id==id)||{};
   const nextNo=Math.min(8,(past||[]).filter(p=>/^\d+$/.test(String(p.contact_no||''))).length+1);
   const rhNeg=String(e.rh_factor||'').toLowerCase()==='neg';
   // "She was already on ART and then became pregnant" — she is not a testing candidate.
@@ -1997,8 +2039,7 @@ async function ancVisits(id){
     // Contact 1 IS the booking contact: its GA is the booking GA. Store it once on the
     // woman so it survives even when later contacts are entered out of order.
     if(r&&r.ids&&String(cno.value)==='1'&&+ga.value){
-      const eps=await api('GET','episodes').catch(()=>[]);
-      const ep=(eps||[]).find(x=>x.id==id);
+      const ep=await epOne(id);
       if(ep&&ep.woman_id){ await api('PATCH','women/'+ep.woman_id,{ga_first_contact:+ga.value,first_contact_date:ecGet('vd'),late_anc_initiation:lateAnc(ga.value)?1:0}).catch(()=>{}); }
       const msg=gaRisk(ga.value); if(msg) modal('Late ANC initiation',msg,'risk');
     }
@@ -2006,9 +2047,8 @@ async function ancVisits(id){
 }
 
 async function pncVisits(id){
-  const [past,delv,bbs,epsP]=await Promise.all([api('GET','pnc_visits?episode='+id).catch(()=>[]),api('GET','delivery?episode='+id).catch(()=>[]),api('GET','babies?episode='+id).catch(()=>[]),api('GET','episodes').catch(()=>[])]);
+  const [past,delv,bbs,WP]=await Promise.all([api('GET','pnc_visits?episode='+id).catch(()=>[]),api('GET','delivery?episode='+id).catch(()=>[]),api('GET','babies?episode='+id).catch(()=>[]),epOne(id)]);
   const dv=(delv&&delv[0])||null;
-  const WP=(epsP||[]).find(x=>x.id==id)||{};
   app().innerHTML=nav()+`<div class="card"><h3>PNC follow-up visit — episode ${esc(id)}</h3>
    ${carryForward(WP,String(WP.rh_factor||'').toLowerCase()==='neg')}
    <div style="background:#e9f8f4;border-radius:10px;padding:8px 12px;margin-bottom:10px">
@@ -3458,12 +3498,12 @@ async function pregTest(){
 }
 
 async function reportScreen(id){
-  const [ep,obs,chk,deliv,babies,anc,pnc,refs]=await Promise.all([
-    api('GET','episodes').catch(()=>[]), api('GET','observations?episode='+id).catch(()=>[]),
+  const [e,obs,chk,deliv,babies,anc,pnc,refs]=await Promise.all([
+    epOne(id), api('GET','observations?episode='+id).catch(()=>[]),
     api('GET','checklist?episode='+id).catch(()=>[]), api('GET','delivery?episode='+id).catch(()=>[]),
     api('GET','babies?episode='+id).catch(()=>[]), api('GET','anc_screening?episode='+id).catch(()=>[]),
     api('GET','pnc_visits?episode='+id).catch(()=>[]), api('GET','referrals?episode='+id).catch(()=>[])]);
-  const e=(ep||[]).find(x=>x.id==id)||{}; const d=(deliv||[])[0]||{}; const last=obs[obs.length-1]||{};
+  const d=(deliv||[])[0]||{}; const last=obs[obs.length-1]||{};
   const ancYes=(anc||[]).filter(a=>a.response==='yes').length;
   app().innerHTML=nav()+`<div class="card"><h3>Care summary — episode ${esc(id)}</h3>
    <p><b>${esc((e.first_name||'')+' '+(e.father_name||''))}</b> · MRN ${esc(e.mrn||'')} · G${esc(e.gravida||'?')}/P${esc(e.para||'?')} · ${esc(e.service_category||'')} · status ${esc(e.status||'')}</p>
@@ -3560,7 +3600,32 @@ async function patientHub(id){
     ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select>
       <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
       <span id="rmtshow" class="muted"></span></p>`:''}
-    <div class="hubgrid">${tiles.join('')}</div>${fold}</div>`;
+    <div class="hubgrid">${tiles.join('')}</div>${fold}
+    ${(ME.role==='provider'||ME.role==='admin')?`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+      ${String(e.status||'')==='closed'
+        ? `<span class="pill" style="background:#eef1f0;color:#4a5754">This episode of care is closed${e.closed_datetime?(' &middot; '+esc(String(e.closed_datetime).slice(0,16))):''}</span>
+           <button id="epreopen" class="sm" style="margin-left:8px">She has come back &mdash; reopen</button>`
+        : `<button id="epclose" class="sm">Close this episode of care</button>
+           <span class="muted" style="font-size:12px">Takes her off the worklist. The record stays, and can be reopened.</span>`}
+     </div>`:''}</div>`;
+  // CLOSING AN EPISODE. Nothing in ADHERE+ ever ended one — the enum had 'closed', the schema had
+  // closed_datetime, and no code touched either. So every woman ever registered stayed on a
+  // worklist for ever, and a woman moved from ANC to labour sat on both at once.
+  const cbtn=$('#epclose');
+  if(cbtn) cbtn.onclick=async()=>{
+    if(!confirm('Close this episode of care?\n\nShe comes off the worklist. Nothing is deleted — the whole record stays readable, and you can reopen it if she comes back.')) return;
+    cbtn.disabled=true;
+    const r=await api('PATCH','episodes/'+id,{status:'closed'});
+    if(r&&(r.ok||r.closed)){ toast('Episode closed','ok'); patientHub(id); }
+    else { cbtn.disabled=false; toast((r&&r.error)||'Could not close'); }
+  };
+  const rbtn=$('#epreopen');
+  if(rbtn) rbtn.onclick=async()=>{
+    rbtn.disabled=true;
+    const r=await api('PATCH','episodes/'+id,{status:'reopen'});
+    if(r&&r.ok){ toast('Reopened as "'+(r.status||'active')+'"','ok'); patientHub(id); }
+    else { rbtn.disabled=false; toast((r&&r.error)||'Could not reopen'); }
+  };
   // Rupture TIME, not just the fact of rupture. The scorer derives rom_hours from this column and
   // the model was trained on it; until now nothing could write it, so the feature was dead.
   if(isLab&&!delivered){
