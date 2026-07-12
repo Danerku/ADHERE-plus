@@ -56,19 +56,28 @@ BEGIN
   IF EXISTS (SELECT 1 FROM schema_fixups WHERE name='close_stranded_anc_v23') THEN
     SELECT 'ALREADY APPLIED — nothing done.' AS result;
   ELSE
+    -- NOTE ON THE SHAPE OF THIS STATEMENT.
+    -- The obvious form — UPDATE episodes a ... WHERE EXISTS (SELECT ... FROM episodes l ...) —
+    -- is rejected by MySQL with error 1093 ("You can't specify target table 'a' for update in
+    -- FROM clause"): you may not read the table you are updating in a subquery. Joining against a
+    -- DERIVED table is allowed, because MySQL materialises it first, so the read is finished
+    -- before the write begins. Same result, and it is a single atomic statement.
     UPDATE episodes a
-       SET a.status='closed',
-           a.closed_datetime = COALESCE(
-             -- close it as of the moment she was admitted in labour, not "now"
-             (SELECT MIN(l.admission_datetime) FROM episodes l
-               WHERE l.woman_id=a.woman_id AND l.facility_id=a.facility_id
-                 AND l.service_category='labour' AND l.id>a.id),
-             NOW())
-     WHERE a.service_category='anc'
-       AND a.status<>'closed'
-       AND EXISTS (SELECT 1 FROM episodes l
-                    WHERE l.woman_id=a.woman_id AND l.facility_id=a.facility_id
-                      AND l.service_category='labour' AND l.id>a.id);
+      JOIN (
+        SELECT anc.id AS anc_id,
+               MIN(lab.admission_datetime) AS labour_started   -- close it as of the labour admission, not "now"
+          FROM episodes anc
+          JOIN episodes lab
+            ON  lab.woman_id        = anc.woman_id
+            AND lab.facility_id     = anc.facility_id
+            AND lab.service_category= 'labour'
+            AND lab.id              > anc.id                    -- the labour admission came AFTER the ANC episode
+         WHERE anc.service_category = 'anc'
+           AND anc.status          <> 'closed'
+         GROUP BY anc.id
+      ) x ON x.anc_id = a.id
+       SET a.status          = 'closed',
+           a.closed_datetime = COALESCE(x.labour_started, NOW());
     SET v_n = ROW_COUNT();
 
     INSERT INTO schema_fixups(name,applied_at,note)
@@ -83,10 +92,30 @@ DELIMITER ;
 CALL adhere_close_stranded();
 DROP PROCEDURE IF EXISTS adhere_close_stranded;
 
+-- ---- WHO IS STILL ON MORE THAN ONE WORKLIST, AND WHY --------------------------------------
+-- The migration closes only what it can PROVE is finished (an antenatal episode superseded by a
+-- labour admission). Anything else is left alone on purpose — a woman may still legitimately be
+-- under labour and postnatal care at once, and inventing a discharge we do not have would be
+-- fabricating clinical data. This lists whatever remains, with enough detail to decide, so a
+-- provider can close them from the patient's record (Open her chart -> "Close this episode of
+-- care"). Going forward, the application no longer creates these.
+SELECT e.woman_id,
+       w.mrn,
+       CONCAT(w.first_name,' ',w.father_name) AS name,
+       e.id            AS episode_id,
+       e.service_category,
+       e.status,
+       DATE(e.admission_datetime) AS admitted,
+       (SELECT COUNT(*) FROM delivery_summary d WHERE d.episode_id=e.id) AS has_delivery
+  FROM episodes e
+  JOIN women  w ON w.id = e.woman_id
+ WHERE e.status <> 'closed'
+   AND e.woman_id IN (SELECT woman_id FROM (
+         SELECT woman_id FROM episodes WHERE status<>'closed'
+          GROUP BY woman_id HAVING COUNT(*) > 1) t)
+ ORDER BY e.woman_id, e.id;
+
 -- ---------------------------------------------------------------------------------------
 -- VERIFY
---   SELECT * FROM schema_fixups;
---   -- nobody should now be on two worklists at once:
---   SELECT woman_id, COUNT(*) open_episodes
---     FROM episodes WHERE status<>'closed' GROUP BY woman_id HAVING COUNT(*)>1;
+--   SELECT * FROM schema_fixups;                       -- expect close_stranded_anc_v23
 -- ---------------------------------------------------------------------------------------
