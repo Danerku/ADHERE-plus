@@ -1,0 +1,11 @@
+{
+  "name": "adhere-plus-devtools",
+  "private": true,
+  "description": "Local development tooling only. ADHERE+ itself ships no build step and no npm runtime dependencies — public/ is served as-is. This file exists solely so scripts/check.sh can lint the PHP.",
+  "scripts": {
+    "check": "bash scripts/check.sh"
+  },
+  "devDependencies": {
+    "php-parser": "^3.7.0"
+  }
+}
