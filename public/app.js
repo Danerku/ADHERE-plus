@@ -151,30 +151,43 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   const _pid=(_p[0]==='patient'||_EP.indexOf(_p[0])>=0)?_p[1]:null; const C=window.CTX;
   const pbar=(_pid && C && String(C.id)===String(_pid))?`<div class="pbar"><div class="pav">${esc(C.ini)}</div><div class="pinfo"><div class="pnm">${esc(C.name)}</div><div class="pmeta">${esc(C.meta)}</div></div>${_p[0]!=='patient'?`<a class="pback" href="#patient/${_pid}">Hub</a>`:''}</div>`:'';
   if(ME.role==='supervisor') return pbar+`<nav class="navbar">${L('#supervisor','Supervisor')}${L('#reminders','Reminders')}</nav><nav class="botnav">${B('#supervisor','Board')}${B('#reminders','Alerts')}</nav>`;
-  // The top bar stays SHORT on purpose: only the screens used constantly. Everything
-  // else lives on Home, which is the launcher. Otherwise the tab strip grows with every
-  // new module until it is unusable.
+  // ONE place to navigate: Home. The tab strip used to repeat Antenatal / Labour / Postnatal /
+  // Dashboard, which are the very same links as the Home tiles — two controls for one
+  // destination, and a strip that grew with every new module. Home is the launcher now, and it
+  // can do what a tab never could: show live counts, and show what a role is allowed to touch.
   const top=`<nav class="navbar">${back}
   ${L('#home','Home')}
-  ${L('#antenatal','Antenatal')}
-  ${L('#labour','Labour ward')}
-  ${L('#pnc','Postnatal')}
   ${L('#dashboard','Dashboard')}</nav>`;
-  const bot=`<nav class="botnav">${B('#home','Home')}${B('#antenatal','ANC')}${B('#labour','Labour')}${B('#pnc','PNC')}${B('#dashboard','Dash')}</nav>`;
+  const bot=`<nav class="botnav">${B('#home','Home')}${B('#dashboard','Dashboard')}</nav>`;
   return pbar+top+bot; }
 
 // ---- HOME = the launcher -----------------------------------------------------
 // Full-width tiles grouped by what the provider is DOING, not by which paper register
 // it maps to. Adding a module adds a tile, not a tab.
-function tileHtml(href,icon,title,sub,tone){
+function tileHtml(href,icon,title,sub,tone,ro){
   const c={teal:['#e1f5ee','#5dcaa5','#04342c','#0f6e56'],
            red:['#fcebeb','#f09595','#791f1f','#a32d2d'],
            soft:['#eef6f5','#dbe7e4','#0b3d3a','#5b6663'],
            plain:['#f7f9f9','#e6eae8','#334155','#5b6663']}[tone||'soft'];
+  // `ro` = this role may open it but may not save. Say so on the tile, rather than letting
+  // them fill in a form and meet a 403 at the end of it.
+  const badge = ro ? `<span style="float:right;font-size:10px;font-weight:600;letter-spacing:.03em;background:#fff;border:1px solid ${c[1]};color:${c[3]};border-radius:20px;padding:1px 7px">VIEW ONLY</span>` : '';
   return `<a href="${href}" class="tile" style="display:block;text-decoration:none;background:${c[0]};border:1px solid ${c[1]};border-radius:12px;padding:14px 13px">
-    <div style="font-size:20px;line-height:1">${icon}</div>
+    <div style="font-size:20px;line-height:1">${icon}${badge}</div>
     <div style="font-size:14px;font-weight:600;color:${c[2]};margin-top:6px">${title}</div>
     <div style="font-size:11px;color:${c[3]};margin-top:1px">${sub||''}</div></a>`;
+}
+// What each role may actually WRITE. This mirrors the server's require_role() gates exactly —
+// the server is the enforcement, this is only so the UI stops misleading people.
+//   clinical  = partograph, ANC/delivery/PNC entry, newborn, labs, risk scores, PMTCT
+//   intake    = registering a woman, pregnancy test, opening an episode
+//   fp        = family planning, LAFP removal, immunization
+function canDo(what){
+  const r=ME.role;
+  if(r==='admin') return true;
+  if(r==='provider') return what!=='admin';
+  if(r==='recorder') return (what==='intake'||what==='fp');
+  return false;                                  // observer, supervisor: read-only
 }
 function tileGrid(inner){ return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px">${inner}</div>`; }
 function sectionLabel(t){ return `<div style="font-size:11px;letter-spacing:.05em;color:#8a9490;margin:2px 0 6px">${t}</div>`; }
@@ -182,32 +195,37 @@ function sectionLabel(t){ return `<div style="font-size:11px;letter-spacing:.05e
 async function home(){
   const ec=(window.Ethiopian?Ethiopian.fmt(new Date()):'');
   const isAdmin=(ME.role==='admin');
-  const canWrite=(ME.role==='recorder'||ME.role==='provider'||ME.role==='admin');
-  // live counts so the tiles mean something the moment you land
-  let hr=0,lab=0,pm=0;
-  try{ const eps=await api('GET','episodes'); hr=(eps||[]).filter(e=>e.high_risk==1).length;
-       lab=(eps||[]).filter(e=>e.service_category==='labour'&&e.status==='laboring').length; }catch(e){}
+  // Home is now the ONLY way to navigate, so its tiles have to carry real information:
+  // how many are waiting, and whether you are allowed to act.
+  let hr=0,lab=0,pm=0,anc=0,pnc=0;
+  try{ const eps=await api('GET','episodes');
+       hr =(eps||[]).filter(e=>e.high_risk==1).length;
+       lab=(eps||[]).filter(e=>e.service_category==='labour'&&e.status==='laboring').length;
+       anc=(eps||[]).filter(e=>e.service_category==='anc'&&e.status==='active').length;
+       pnc=(eps||[]).filter(e=>e.service_category==='pnc'&&e.status==='active').length; }catch(e){}
   try{ const pms=await api('GET','pmtct'); pm=(pms||[]).filter(pmtctNeedsAction).length; }catch(e){}
+  const roClin=!canDo('clinical'), roIntake=!canDo('intake'), roFp=!canDo('fp');
+  const n=(c,unit,idle)=>c?(c+' '+unit):idle;
 
   app().innerHTML=nav()+`<div class="card">
     <h3>Welcome, ${esc(ME.full_name)}</h3>
     <p class="muted" style="margin-bottom:14px">${esc(ME.role)}${ME.facility_name?' · '+esc(ME.facility_name):''}${ec?' · '+ec:''}</p>
+    ${roClin&&ME.role!=='admin'?`<p class="muted" style="font-size:12px;margin:-8px 0 12px">Tiles marked <b>VIEW ONLY</b> can be opened and read, but not saved to, with your role.</p>`:''}
 
     ${sectionLabel('CARE CONTINUUM')}
     ${tileGrid(
-      (canWrite?tileHtml('#pregtest','&#129514;','Pregnancy test','The front door','teal'):'')+
-      (canWrite?tileHtml('#register','&#128100;','Register','New client','teal'):'')+
-      tileHtml('#antenatal','&#128197;','Antenatal','8 contacts','teal')+
-      tileHtml('#labour','&#128147;','Labour ward',(lab?lab+' in labour':'Partograph · AI'),'teal')+
-      tileHtml('#pnc','&#128118;','Postnatal','Mother + newborn','teal')+
-      tileHtml('#highrisk','&#9888;&#65039;','High risk',(hr?hr+' flagged':'None flagged'),'red')
+      tileHtml('#register','&#128100;','Register','New client · pregnancy test','teal',roIntake)+
+      tileHtml('#antenatal','&#128197;','Antenatal',n(anc,'in care','8 contacts'),'teal',roClin)+
+      tileHtml('#labour','&#128147;','Labour ward',n(lab,'in labour','Partograph · AI'),'teal',roClin)+
+      tileHtml('#pnc','&#128118;','Postnatal',n(pnc,'in care','Mother + newborn'),'teal',roClin)+
+      tileHtml('#highrisk','&#9888;&#65039;','High risk',n(hr,'flagged','None flagged'),(hr?'red':'soft'),roClin)
     )}
 
     ${sectionLabel('FAMILY PLANNING &amp; PREVENTION')}
     ${tileGrid(
-      tileHtml('#fp','&#128737;','Family planning','Methods · LAFP removal','soft')+
-      tileHtml('#pmtct','&#129656;','PMTCT',(pm?pm+' need action':'Mother + exposed infant'),(pm?'red':'soft'))+
-      tileHtml('#imm','&#128137;','Immunization','Td · HPV','soft')
+      tileHtml('#fp','&#128737;','Family planning','Methods · LAFP removal','soft',roFp)+
+      tileHtml('#pmtct','&#129656;','PMTCT',n(pm,'need action','Mother + exposed infant'),(pm?'red':'soft'),roClin)+
+      tileHtml('#imm','&#128137;','Immunization','Td · HPV','soft',roFp)
     )}
 
     ${sectionLabel('REPORTS')}
@@ -393,9 +411,28 @@ async function register(){
     <label>Phone<input id="ph" placeholder="09..."></label><label>Kebele<input id="kb"></label>
     <label>Next of kin / husband<input id="nok"></label><label>Kin phone<input id="kph" placeholder="09..."></label>
     <label>Emergency contact address<input id="kad" placeholder="kebele, woreda, landmark"></label>
-    <label>Service<select id="cat"><option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option></select></label>
+    <label>Why is she here?<select id="cat">
+      <option value="pregtest">Pregnancy test &mdash; not confirmed yet</option>
+      <option value="anc">ANC</option><option value="labour" selected>Labour &amp; delivery</option><option value="pnc">PNC</option></select></label>
    </div>
    <div id="riskbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
+
+   <!-- The pregnancy test is the FRONT DOOR, so it lives here, at the front door. It used to be
+        its own screen that could only test a woman who was already registered — which is backwards:
+        a triage test happens before she is a maternity patient at all. Now one flow does both. -->
+   <div id="ptbox" style="display:none">
+    <div class="grid">
+     <label>Test result<select id="ptr"><option value="">— select —</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
+    </div>
+    <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+      <b>Positive.</b> She needs antenatal care. Registering her opens her ANC episode straight away, so she is handed over to the ANC room rather than merely told to walk there.
+    </div>
+    <div id="ptneg" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+      <div class="ticks">${tick('ptfp','Offer family planning now (open her family-planning record)')}</div>
+      <div style="margin-top:4px">She is not pregnant &mdash; and she is in the building, thinking about her fertility, with a provider in front of her. This is the highest-yield moment to offer contraception. Without this she leaves with nothing.</div>
+    </div>
+    <label>Note<input id="ptn" placeholder="optional"></label>
+   </div>
 
    <details class="moh" open><summary>Obstetric history <span class="muted">&mdash; ANC card, Annex 6</span></summary><div class="grid">
     <label>Gravida<input id="gr" type="number" min="0"></label>
@@ -424,7 +461,8 @@ async function register(){
    <div class="muted" style="font-size:12px;margin-top:6px">Blood group and Rh are required for every pregnant woman (Guideline 4.2.2a). Rh-negative women need Anti-D.</div>
    <div class="muted" style="font-size:12px;margin-top:6px">Full risk screening (previous C/S, PPH, pre-eclampsia, obstructed labour, chronic conditions) is done by the provider on the ANC screening screen.</div></details>
 
-   <button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span></div>`;
+   <button class="act" id="save" style="margin-top:6px">Register</button> <span class="muted" id="m"></span>
+   <p class="muted" style="font-size:12px;margin-top:10px">Already registered and needs a pregnancy test? <a class="nav" href="#pregtest" style="padding:0">Record it on her existing record</a> &mdash; no need to register her twice.</p></div>`;
 
   const showRisk=()=>{ const b=$('#riskbox'); const msg=ageRisk(age.value);
     if(msg){ b.style.display=''; b.textContent=msg; } else { b.style.display='none'; } };
@@ -450,9 +488,18 @@ async function register(){
     if(rh.value==='neg'){ b.style.display=''; b.textContent='Rh NEGATIVE — Anti-D prophylaxis is indicated (if indirect Coombs negative). This will be flagged at every ANC contact.'; }
     else b.style.display='none'; });
 
+  // Show the test block only when she is here for a test, and route the messaging off the result.
+  const ptShow=()=>{ const on=(cat.value==='pregtest');
+    $('#ptbox').style.display=on?'':'none';
+    if(!on){ $('#ptpos').style.display='none'; $('#ptneg').style.display='none'; } };
+  const ptRes=()=>{ $('#ptpos').style.display=(ptr.value==='positive')?'':'none';
+                    $('#ptneg').style.display=(ptr.value==='negative')?'':'none'; };
+  cat.addEventListener('change',ptShow); ptr.addEventListener('change',ptRes); ptShow();
+
   $('#save').onclick=async()=>{
     const em=mrnError(mrn.value); if(em){ $('#m').textContent=' '+em; modal('Check the MRN',em); return; }
     const ea=ageError(age.value); if(ea){ $('#m').textContent=' '+ea; modal('Check the age',ea); return; }
+    if(cat.value==='pregtest' && !ptr.value){ modal('Record the test result','She is here for a pregnancy test — record whether it was positive or negative. The result is what decides where she goes next: positive opens her ANC episode, negative opens her family-planning record.'); return; }
     $('#m').textContent=' saving…';
     try{
       const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
@@ -464,6 +511,22 @@ async function register(){
         height_cm:(+ht.value||null),   // without this, BMI (a Table 4 risk factor) can never be computed
         ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null)});
       const wid=w.id; if(!wid){ $('#m').textContent=' saved (offline queued)'; return; }
+
+      // PREGNANCY TEST: the result decides the door she goes through. The server opens the ANC
+      // episode on a positive, or the family-planning record on a negative — so the handover is
+      // recorded, not left to chance.
+      if(cat.value==='pregtest'){
+        const pos=(ptr.value==='positive');
+        const t=await api('POST','pregnancy_tests',{woman_id:wid,test_date:new Date().toISOString().slice(0,10),
+          result:ptr.value,note:(ptn.value||null),
+          link_to_anc:(pos?1:0), link_to_fp:((!pos&&tk('ptfp'))?1:0), fp_offered:(!pos&&tk('ptfp'))?1:0});
+        if(t&&t.episode_id){ $('#m').textContent=' registered — ANC episode opened';
+          toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+t.episode_id,700); return; }
+        if(t&&t.fp_client_id){ $('#m').textContent=' registered — family-planning record opened';
+          toast('Negative — family planning record opened','ok'); setTimeout(()=>location.hash='#fpclient/'+t.fp_client_id,700); return; }
+        $('#m').textContent=' test recorded'; toast('Test recorded','ok'); setTimeout(()=>location.hash='#home',700); return;
+      }
+
       await api('POST','episodes',{woman_id:wid,service_category:cat.value,status:cat.value==='labour'?'laboring':'active',provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
       $('#m').textContent=' registered'; setTimeout(()=>location.hash='#'+(cat.value==='anc'?'antenatal':cat.value==='pnc'?'pnc':cat.value==='highrisk'?'highrisk':'labour'),600);
     }catch(e){ $('#m').textContent=' '+(e.message||'could not register'); }
