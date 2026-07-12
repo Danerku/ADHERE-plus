@@ -57,6 +57,11 @@ function riskDrivers(o,feat){ const D=[];
   if(o.hrs>=8) D.push('prolonged labour ('+o.hrs+'h)');
   return D;
 }
+// A super_admin is an admin, plus the estate (facilities) and cross-facility user management.
+// Every admin gate in the UI goes through ADMIN() so that promoting the system owner to
+// super_admin does not lock them out of the screens they already use.
+const ADMIN=()=> !!(ME && (ME.role==='admin' || ME.role==='super_admin'));
+const SUPER=()=> !!(ME && ME.role==='super_admin');
 const online=()=>navigator.onLine;
 function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.now()+Math.random().toString(36).slice(2); } }
 
@@ -384,7 +389,7 @@ function sectionLabel(t){ return `<div style="font-size:11px;letter-spacing:.05e
 
 async function home(){
   const ec=(window.Ethiopian?Ethiopian.fmt(new Date()):'');
-  const isAdmin=(ME.role==='admin');
+  const isAdmin=ADMIN();
   // Home is now the ONLY way to navigate, so its tiles have to carry real information:
   // how many are waiting, and whether you are allowed to act.
   let hr=0,lab=0,pm=0,anc=0,pnc=0;
@@ -402,7 +407,7 @@ async function home(){
   app().innerHTML=nav()+`<div class="card">
     <h3>Welcome, ${esc(ME.full_name)}</h3>
     <p class="muted" style="margin-bottom:14px">${esc(ME.role)}${ME.facility_name?' · '+esc(ME.facility_name):''}${ec?' · '+ec:''}</p>
-    ${roClin&&ME.role!=='admin'?`<p class="muted" style="font-size:12px;margin:-8px 0 12px">Tiles marked <b>VIEW ONLY</b> can be opened and read, but not saved to, with your role.</p>`:''}
+    ${roClin&&!ADMIN()?`<p class="muted" style="font-size:12px;margin:-8px 0 12px">Tiles marked <b>VIEW ONLY</b> can be opened and read, but not saved to, with your role.</p>`:''}
 
     ${sectionLabel('CARE CONTINUUM')}
     ${tileGrid(
@@ -1179,9 +1184,13 @@ function renderAdh(id,enc){ if(!RE){return;} const r=RE.evaluate(enc);
 function parseCSV(text){ const lines=String(text).replace(/\r/g,'').split('\n').filter(l=>l.trim()!==''); if(!lines.length) return []; const head=lines[0].split(',').map(h=>h.trim().toLowerCase()); return lines.slice(1).map(l=>{ const c=l.split(','); const o={}; head.forEach((h,i)=>o[h]=(c[i]||'').trim()); return o; }); }
 
 async function facilities(){
-  if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  if(!ADMIN()){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
   const list=await api('GET','facilities').catch(()=>[]);
-  app().innerHTML=nav()+`<div class="card"><h3>Add a facility</h3>
+  // The ESTATE is a super-admin's business. A facility administrator has no reason to create,
+  // rename or delete the health centre next door; the server refuses it, and offering a form that
+  // can only fail is worse than not offering it.
+  const canEdit=SUPER();
+  app().innerHTML=nav()+(canEdit?`<div class="card"><h3>Add a facility</h3>
     <div class="grid">
      <label>Name<input id="fnm" placeholder="Debre Tabor Health Center"></label>
      <label>Type<select id="fty"><option value="health_center">Health center</option><option value="primary_hospital">Primary hospital</option><option value="general_hospital">General hospital</option><option value="other">Other</option></select></label>
@@ -1191,26 +1200,31 @@ async function facilities(){
     </div><button class="act" id="fadd" style="margin-top:10px">Create facility</button> <span class="muted" id="fm"></span></div>
     <div class="card"><h3>Bulk add facilities (CSV)</h3>
      <p class="muted">Columns (first row = headers): <code>name, facility_type, kebele, woreda, zone, region, dhis2_org_unit</code>. facility_type = health_center / primary_hospital / general_hospital / other.</p>
-     <input type="file" id="fcsv" accept=".csv,text/csv"> <button class="sec" id="fcsvbtn">Upload CSV</button> <span class="muted" id="fcsvm"></span></div>
+     <input type="file" id="fcsv" accept=".csv,text/csv"> <button class="sec" id="fcsvbtn">Upload CSV</button> <span class="muted" id="fcsvm"></span></div>`
+    :`<div class="card"><p class="muted">Facilities are managed centrally. You can see the list below; creating or changing a facility is a super-admin action.</p></div>`)+`
     <div class="card"><h3>Facilities</h3><table><tr><th>ID</th><th>Name</th><th>Type</th><th>Woreda</th><th>Zone</th><th>Region</th><th>DHIS2</th><th></th></tr>
      ${list.map(f=>`<tr><td>${f.id}</td><td>${esc(f.name)}</td><td>${esc(f.facility_type||'')}</td>
-       <td>${esc(f.woreda||'')}</td><td>${esc(f.zone||'')}</td><td>${esc(f.region||'')}</td><td>${esc(f.dhis2_org_unit||'')}</td><td><a class="nav" href="#facilityedit/${f.id}">Edit</a> <button class="sec" data-del="${f.id}" data-nm="${esc(f.name)}">Delete</button></td></tr>`).join('')}
+       <td>${esc(f.woreda||'')}</td><td>${esc(f.zone||'')}</td><td>${esc(f.region||'')}</td><td>${esc(f.dhis2_org_unit||'')}</td><td>${canEdit?`<a class="nav" href="#facilityedit/${f.id}">Edit</a> <button class="sec" data-del="${f.id}" data-nm="${esc(f.name)}">Delete</button>`:'<span class="muted">—</span>'}</td></tr>`).join('')}
      </table><p class="muted">Each user and every patient belongs to a facility. Data is scoped per facility, and the dashboard/DHIS2 export roll up by facility.</p></div>`;
+  if(!canEdit) return;                                  // read-only for a facility admin
   $('#fadd').onclick=async()=>{ const r=await api('POST','facilities',{name:fnm.value,facility_type:fty.value,kebele:fke.value,woreda:fwo.value,zone:fzo.value,region:fre.value,dhis2_org_unit:fdh.value}); if(r.id){ facilities(); } else $('#fm').textContent=' '+(r.error||'error'); };
   $('#fcsvbtn').onclick=async()=>{ const fl=$('#fcsv').files[0]; if(!fl){ $('#fcsvm').textContent=' choose a CSV file first'; return; } const rows=parseCSV(await fl.text()).filter(r=>r.name); if(!rows.length){ $('#fcsvm').textContent=' no rows with a name found'; return; } $('#fcsvm').textContent=' uploading '+rows.length+'…'; try{ const r=await api('POST','facilities',rows); const n=(r.created||[]).length, e=(r.errors||[]).length; $('#fcsvm').textContent=' added '+n+(e?(', '+e+' skipped'):''); setTimeout(()=>facilities(),1000); }catch(err){ $('#fcsvm').textContent=' '+(err.message||'error'); } };
   document.querySelectorAll('#app button[data-del]').forEach(b=>b.onclick=async()=>{ if(confirm('Delete facility "'+b.dataset.nm+'"? This only works if it has no users or patients.')){ const r=await api('DELETE','facilities/'+b.dataset.del); if(r&&r.ok){ facilities(); } else alert((r&&r.error)||'error'); } });
 }
 
 async function users(){
-  if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  if(!ADMIN()){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
   const [list,facs]=await Promise.all([api('GET','users').catch(()=>[]),api('GET','facilities').catch(()=>[])]);
   const facName=id=>{ const f=facs.find(x=>x.id==id); return f?f.name:(id||'—'); };
   app().innerHTML=nav()+`<div class="card"><h3>Add a user</h3>
     <div class="grid">
      <label>Username<input id="nu"></label><label>Full name<input id="nn"></label>
      <label>Password<input id="np" type="text"></label>
-     <label>Role<select id="nr"><option value="recorder">Recorder</option><option value="provider">Provider</option><option value="observer">Observer</option><option value="supervisor">Supervisor</option><option value="admin">Admin</option></select></label>
-     <label>Facility<select id="nf">${facs.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select></label>
+     <label>Role<select id="nr"><option value="recorder">Recorder</option><option value="provider">Provider</option><option value="observer">Observer</option><option value="supervisor">Supervisor</option><option value="admin">Admin (this facility)</option>${SUPER()?'<option value="super_admin">Super-admin (all facilities)</option>':''}</select></label>
+     ${SUPER()
+       ? `<label>Facility<select id="nf">${facs.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select></label>`
+       : `<label>Facility<input value="${esc(String(facName(ME.facility_id)))}" disabled>
+            <span class="muted" style="font-size:11px">You can only create users at your own facility.</span></label>`}
      <label id="nsWrap" style="display:none">Supervisor scope<select id="ns"><option value="facility">This facility</option><option value="woreda">Woreda</option><option value="zone">Zone</option><option value="region">Region</option></select></label>
      <label>Cadre<input id="nc" placeholder="midwife / health officer / IESO"></label>
     </div><button class="act" id="add" style="margin-top:10px">Create user</button> <span class="muted" id="m"></span>
@@ -2655,8 +2669,10 @@ function fpNewForm(){
 }
 
 async function fpClient(id){
-  const [cs,visits]=await Promise.all([api('GET','fp_clients').catch(()=>[]),api('GET','fp_visits?client='+id).catch(()=>[])]);
-  const c=(cs||[]).find(x=>x.id==id)||{};
+  // Ask the server for THIS client, not for the first 300 and then hunt through them. See epOne().
+  const [cs,visits]=await Promise.all([api('GET','fp_clients?id='+id).catch(()=>[]),api('GET','fp_visits?client='+id).catch(()=>[])]);
+  const c=(cs||[])[0]||{};
+  if(!c.id) toast('Could not load this family-planning record — please go back and open her again.');
   const nextNo=Math.min(5,(visits||[]).length+1);
   app().innerHTML=nav()+`<div class="card"><h3>${esc(c.name||'FP client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(c.mrn||'')}</span></h3>
    <p class="muted">${esc(c.age||'?')} yrs · ${c.sex==='M'?'Male':'Female'} · ${c.acceptor==='new'?'New acceptor':'Repeat acceptor'} · Target pop ${esc(c.target_pop_code||'—')}
@@ -2801,8 +2817,9 @@ function immNewForm(prog){
 }
 
 async function immClient(id){
-  const [cs,doses]=await Promise.all([api('GET','imm_clients').catch(()=>[]),api('GET','imm_doses?client='+id).catch(()=>[])]);
-  const c=(cs||[]).find(x=>x.id==id)||{};
+  const [cs,doses]=await Promise.all([api('GET','imm_clients?id='+id).catch(()=>[]),api('GET','imm_doses?client='+id).catch(()=>[])]);
+  const c=(cs||[])[0]||{};
+  if(!c.id) toast('Could not load this immunisation record — please go back and open her again.');
   const prog=c.programme||'Td';
   const maxDose=(prog==='Td')?5:2;
   const given={}; (doses||[]).forEach(d=>given[d.dose_no]=d.dose_date);
@@ -3542,7 +3559,7 @@ async function bemoncScreen(id){
 }
 
 async function facilityEdit(id){
-  if(ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  if(!SUPER()){ app().innerHTML=nav()+'<div class="card">Facilities are managed centrally &mdash; a super-admin action.</div>'; return; }
   const list=await api('GET','facilities').catch(()=>[]); const f=(list||[]).find(x=>x.id==id)||{};
   const types=['health_center','primary_hospital','general_hospital','other'];
   app().innerHTML=nav()+`<div class="card"><h3>Edit facility</h3>
@@ -3601,7 +3618,7 @@ async function patientHub(id){
       <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
       <span id="rmtshow" class="muted"></span></p>`:''}
     <div class="hubgrid">${tiles.join('')}</div>${fold}
-    ${(ME.role==='provider'||ME.role==='admin')?`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+    ${(ME.role==='provider'||ADMIN())?`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
       ${String(e.status||'')==='closed'
         ? `<span class="pill" style="background:#eef1f0;color:#4a5754">This episode of care is closed${e.closed_datetime?(' &middot; '+esc(String(e.closed_datetime).slice(0,16))):''}</span>
            <button id="epreopen" class="sm" style="margin-left:8px">She has come back &mdash; reopen</button>`
@@ -3658,7 +3675,7 @@ async function patientHub(id){
 }
 
 async function supervisorDash(){
-  if(ME.role!=='supervisor'&&ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Supervisors only.</div>'; return; }
+  if(ME.role!=='supervisor'&&!ADMIN()){ app().innerHTML=nav()+'<div class="card">Supervisors only.</div>'; return; }
   const days=window._supDays||0;
   let d; try{ d=await api('GET','supervisor'+(days?('?days='+days):'')); }catch(e){ app().innerHTML=nav()+'<div class="card">Could not load dashboard: '+esc(e.message||'error')+'</div>'; return; }
   const fac=d.facilities||[];
@@ -3675,13 +3692,13 @@ async function supervisorDash(){
 }
 
 async function remindersScreen(){
-  if(ME.role!=='supervisor'&&ME.role!=='admin'){ app().innerHTML=nav()+'<div class="card">Admins &amp; supervisors only.</div>'; return; }
+  if(ME.role!=='supervisor'&&!ADMIN()){ app().innerHTML=nav()+'<div class="card">Admins &amp; supervisors only.</div>'; return; }
   const list=await api('GET','reminders').catch(()=>[]);
   const pill=s=>s==='sent'?'green':s==='pending'?'amber':s==='failed'?'red':'';
   const rowsHtml=(list||[]).map(r=>`<tr><td>${esc((r.created_at||'').slice(0,16))}</td><td>${esc(((r.first_name||'')+' '+(r.father_name||'')).trim())}</td><td>${esc(r.kind||'')}</td><td>${esc(r.due_date||'')}</td><td>${esc(r.phone||'')}</td><td><span class="pill ${pill(r.status)}">${esc(r.status||'')}</span>${r.provider_note?(' <span class="muted" style="font-size:11px">'+esc(r.provider_note)+'</span>'):''}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No reminders yet. Add ANC follow-up visits with a next-appointment date, capture SMS consent, then run the scheduler.</td></tr>';
   app().innerHTML=nav()+`<div class="card"><h3>SMS reminders</h3>
    <p class="muted">ANC follow-up reminders (Amharic) for women who gave SMS consent and have a phone on file. Sending runs on a schedule; you can also run it now. Actual delivery goes through the configured SMS gateway.</p>
-   ${ME.role==='admin'?'<button class="act" id="rrun">Generate &amp; send due reminders</button> <span class="muted" id="rmsg"></span>':''}</div>
+   ${ADMIN()?'<button class="act" id="rrun">Generate &amp; send due reminders</button> <span class="muted" id="rmsg"></span>':''}</div>
    <div class="card"><h3>Recent reminders</h3><table><tr><th>Created</th><th>Woman</th><th>Type</th><th>Due</th><th>Phone</th><th>Status</th></tr>${rowsHtml}</table></div>`;
   const b=$('#rrun'); if(b) b.onclick=async()=>{ $('#rmsg').textContent=' running…'; try{ const r=await api('POST','reminders/run'); $('#rmsg').textContent=' generated '+r.generated+', sent '+r.sent+', skipped '+r.skipped+(r.failed?(', failed '+r.failed):''); setTimeout(()=>remindersScreen(),1000); }catch(e){ $('#rmsg').textContent=' '+(e.message||'error'); } };
 }

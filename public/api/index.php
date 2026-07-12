@@ -185,31 +185,69 @@ try {
   if(in_array($m,['POST','PATCH','DELETE'],true)) idem_guard(); // dedup offline-replayed writes
 
   // ---- users (admin only) ----
-  if ($r==='users'){ require_role(['admin']);
-    if($m==='GET'){ $st=db()->query("SELECT id,username,full_name,role,cadre,facility_id,scope,is_active,last_login FROM users ORDER BY id"); out($st->fetchAll()); }
-    if($m==='POST'){ $me=user(); $b=body(); $rows=isset($b[0])?$b:[$b]; $created=[]; $errors=[];  // single object OR array (CSV bulk)
+  // ---- USERS: the one lateral path between facilities ------------------------------------
+  // Patient data is strictly facility-scoped everywhere else, so this route WAS the whole
+  // tenancy boundary — and it had none. require_role(['admin']) was the only gate: an admin at
+  // facility A could list every user everywhere, reset facility B's admin password, and sign in
+  // as them. A facility admin is now confined to their own facility; only a super_admin may
+  // reach across, or create another super_admin.
+  if ($r==='users'){ $me=require_role(['admin','super_admin']); $super=is_super($me);
+    // Roles a caller may hand out. An admin cannot mint a super_admin — that would hand back the
+    // cross-facility reach this whole change exists to remove.
+    $ROLES = $super ? ['recorder','provider','observer','supervisor','admin','super_admin']
+                    : ['recorder','provider','observer','supervisor','admin'];
+    // May the caller act on THIS user id?
+    $may_touch = function($uid) use ($me,$super){
+      $st=db()->prepare("SELECT id,facility_id,role FROM users WHERE id=?"); $st->execute([$uid]);
+      $t=$st->fetch(); if(!$t) err('user not found',404);
+      if($super) return $t;
+      if($t['role']==='super_admin')             err('not found',404);   // don't even confirm they exist
+      if((int)$t['facility_id']!==(int)$me['facility_id']) err('not found',404);
+      return $t;
+    };
+    if($m==='GET'){
+      if($super){ $st=db()->query("SELECT id,username,full_name,role,cadre,facility_id,scope,is_active,last_login FROM users ORDER BY id"); }
+      else { $st=db()->prepare("SELECT id,username,full_name,role,cadre,facility_id,scope,is_active,last_login FROM users WHERE facility_id=? AND role<>'super_admin' ORDER BY id"); $st->execute([$me['facility_id']]); }
+      out($st->fetchAll()); }
+    if($m==='POST'){ $b=body(); $rows=isset($b[0])?$b:[$b]; $created=[]; $errors=[];  // single object OR array (CSV bulk)
       foreach($rows as $i=>$row){
         $un=trim($row['username']??''); $pw=(string)($row['password']??''); $role=$row['role']??'';
         if($un===''||$pw===''||$role===''){ $errors[]=['row'=>$i,'error'=>'username, password and role are required']; continue; }
         if(strlen($pw)<8){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'password must be at least 8 characters']; continue; }
-        if(!in_array($role,['recorder','provider','observer','supervisor','admin'])){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'invalid role']; continue; }
+        if(!in_array($role,$ROLES,true)){ $errors[]=['row'=>$i,'user'=>$un,'error'=>($role==='super_admin'?'only a super-admin can create a super-admin':'invalid role')]; continue; }
         $ex=db()->prepare("SELECT id FROM users WHERE username=?"); $ex->execute([$un]); if($ex->fetch()){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'username already taken']; continue; }
         $scope=in_array(($row['scope']??'facility'),['facility','woreda','zone','region'])?($row['scope']??'facility'):'facility';
-        $nid=insert('users',['username'=>$un,'password_hash'=>password_hash($pw,PASSWORD_DEFAULT),'full_name'=>$row['full_name']??$un,'role'=>$role,'cadre'=>$row['cadre']??null,'facility_id'=>$row['facility_id']??$me['facility_id'],'scope'=>$scope]);
+        // The caller-supplied facility_id is HONOURED ONLY FOR A SUPER-ADMIN. This one line is what
+        // stopped an admin at facility A from minting themselves an admin at facility B.
+        $fid=admin_facility_scope($me, $row['facility_id']??null);
+        $nid=insert('users',['username'=>$un,'password_hash'=>password_hash($pw,PASSWORD_DEFAULT),'full_name'=>$row['full_name']??$un,'role'=>$role,'cadre'=>$row['cadre']??null,'facility_id'=>$fid,'scope'=>$scope]);
         $created[]=['id'=>$nid,'username'=>$un];
       }
       audit('create_user','users',$created[0]['id']??null,['count'=>count($created)]);
       if(!isset($b[0])){ if($errors) err($errors[0]['error'], $errors[0]['error']==='username already taken'?409:400); out(['id'=>$created[0]['id']],201); }
       out(['created'=>$created,'errors'=>$errors],201); }
-    if($m==='PATCH' && $id){ $b=body(); $me=user();
+    if($m==='PATCH' && $id){ $b=body();
+      // Resolve the target FIRST. A facility admin gets a 404 for anyone outside their facility and
+      // for any super_admin — a password reset on another facility's admin is precisely the attack.
+      $target=$may_touch((int)$id);
       if(isset($b['is_active'])){ if((int)$id===(int)$me['id'] && !$b['is_active']) err('you cannot deactivate your own account'); db()->prepare("UPDATE users SET is_active=? WHERE id=?")->execute([$b['is_active']?1:0,$id]); }
-      if(isset($b['role']) && in_array($b['role'],['recorder','provider','observer','supervisor','admin'])){ db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]); }
+      if(isset($b['role'])){
+        if(!in_array($b['role'],$ROLES,true)) err($b['role']==='super_admin'?'only a super-admin can grant super-admin':'invalid role');
+        if((int)$id===(int)$me['id'] && $b['role']!==$me['role']) err('you cannot change your own role');
+        db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]);
+      }
       if(isset($b['scope']) && in_array($b['scope'],['facility','woreda','zone','region'])){ db()->prepare("UPDATE users SET scope=? WHERE id=?")->execute([$b['scope'],$id]); }
+      // Moving a user between facilities is a super-admin act.
+      if(isset($b['facility_id']) && $super){ db()->prepare("UPDATE users SET facility_id=? WHERE id=?")->execute([(int)$b['facility_id'],$id]); }
       if(!empty($b['password'])){ if(strlen($b['password'])<8) err('password must be at least 8 characters'); db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
-      audit('update_user','users',$id); out(['ok'=>true]); }
+      audit('update_user','users',$id,['target_facility'=>$target['facility_id']??null,'by_super'=>$super?1:0]); out(['ok'=>true]); }
   }
-  if ($r==='facilities'){ require_role(['admin']);
+  if ($r==='facilities'){ $me=require_role(['admin','super_admin']);
+    // READ is open to any admin — the users screen and the CSV importer need the facility list to
+    // show names. CHANGING the estate (creating, renaming, deleting a facility) is a super-admin
+    // act: a facility administrator has no business creating the facility next door.
     if($m==='GET'){ out(db()->query("SELECT id,name,facility_type,kebele,woreda,zone,region,dhis2_org_unit FROM facilities ORDER BY id")->fetchAll()); }
+    if($m!=='GET') require_role(['super_admin']);
     if($m==='POST'){ $b=body(); $rows=isset($b[0])?$b:[$b]; $created=[]; $errors=[];  // single object OR array (CSV bulk)
       foreach($rows as $i=>$row){ if(empty($row['name'])){ $errors[]=['row'=>$i,'error'=>'facility name is required']; continue; }
         $ft=in_array($row['facility_type']??'',['primary_hospital','health_center','general_hospital','other'])?$row['facility_type']:'health_center';
@@ -631,6 +669,17 @@ try {
         $st->execute([$u['facility_id'],(int)($_GET['mother']??0)]); out($st->fetchAll()); }
       if($tbl==='pmtct_followup'){ $st=db()->prepare("SELECT f.* FROM pmtct_followup f JOIN pmtct_mothers p ON p.id=f.mother_id WHERE p.facility_id=? AND f.mother_id=? ORDER BY f.subject, f.infant_id, f.month_no");
         $st->execute([$u['facility_id'],(int)($_GET['mother']??0)]); out($st->fetchAll()); }
+      // FETCH ONE CLIENT BY ID. The family-planning and immunisation client screens used to pull the
+      // LIMIT-300 list and .find() their client in the browser — the same silent failure the clinical
+      // screens had: once a facility passes 300 clients, an older woman is not in the list, the find()
+      // returns undefined, and the screen renders an EMPTY record. Her method, her visits and her
+      // dose history simply disappear, with no error.
+      if(!empty($_GET['id'])){
+        $one=db()->prepare("SELECT * FROM `$tbl` WHERE id=? AND facility_id=?");
+        $one->execute([(int)$_GET['id'], $u['facility_id']]);
+        $row=$one->fetch(); if(!$row) err('not found',404);
+        out([$row]);
+      }
       $q='%'.($_GET['q']??'').'%';
       $extra = ($tbl==='immunization_clients' && !empty($_GET['programme'])) ? " AND programme=".db()->quote($_GET['programme']) : '';
       // the immunization list needs the dose count to show completion at a glance

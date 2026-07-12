@@ -42,7 +42,22 @@ function out($d, $code=200){
 function err($m,$code=400){ out(['error'=>$m], $code); }
 function user(){ return $_SESSION['user'] ?? null; }
 function require_auth(){ $u=user(); if(!$u) err('auth required',401); return $u; }
-function require_role($roles){ $u=require_auth(); if(!in_array($u['role'],(array)$roles)) err('forbidden',403); return $u; }
+// A super_admin satisfies every gate an admin satisfies. Without this, promoting the system owner
+// to super_admin would lock them out of every route that says require_role(['provider','admin']).
+// It does NOT work the other way round: an admin never satisfies a super_admin gate.
+function is_super($u=null){ $u=$u??user(); return ($u['role']??'')==='super_admin'; }
+function require_role($roles){
+  $u=require_auth(); $roles=(array)$roles;
+  if(in_array($u['role'],$roles,true)) return $u;
+  if($u['role']==='super_admin' && in_array('admin',$roles,true)) return $u;
+  err('forbidden',403);
+}
+// The facility a caller is allowed to administer. A super_admin may name any facility; anyone else
+// gets their own, whatever they asked for. This is the single choke point for the users route.
+function admin_facility_scope($u, $requested=null){
+  if(is_super($u)) return $requested!==null && $requested!=='' ? (int)$requested : (int)$u['facility_id'];
+  return (int)$u['facility_id'];
+}
 function audit($action,$entity=null,$entity_id=null,$detail=null){
   $u=user(); $st=db()->prepare("INSERT INTO audit_log(user_id,action,entity,entity_id,detail_json,ip_address) VALUES(?,?,?,?,?,?)");
   $st->execute([$u['id']??null,$action,$entity,$entity_id,$detail?json_encode($detail):null,$_SERVER['REMOTE_ADDR']??null]);
