@@ -583,24 +583,35 @@ async function register(){
 
 // ---- Why is she high risk? ---------------------------------------------------
 // A flag with no reason is a dead end — the provider had to open her record and guess.
-// Each code carries BOTH the reason and the next intervention.
+// Each code carries the reason, the action, AND WHERE THE ACTION COMES FROM.
+//
+// PROVENANCE IS NOT DECORATION. Every one of these conditions is listed as high-risk in the
+// National ANC Guideline (MoH, Feb 2022) Table 4 — that part is sourced. But the guideline is
+// about ANTENATAL care: for several conditions it names the risk and says nothing about how to
+// manage the labour. Earlier versions of this file filled that gap with general obstetric
+// practice and presented it in the same voice as the sourced advice. That is not acceptable in
+// a tool a provider acts on, so the unsourced instructions have been REMOVED rather than
+// dressed up as national protocol. Where the guideline is silent, the tool now says so.
+// (See ADHERE+ audit, July 2026.)
+const NO_SRC='The National ANC Guideline lists this as a high-risk condition (Table 4) but does not specify how the birth should be managed. Follow your facility&rsquo;s obstetric protocol and senior clinician.';
+const G='National ANC Guideline (MoH, Feb 2022)';
 const RISK_INFO={
- AGE_LT19:['Age under 19 — teenage/adolescent pregnancy','Specialised ANC. Screen for pre-eclampsia, anaemia and obstructed labour. Plan facility delivery; expect a longer labour.'],
- AGE_GT35:['Age over 35 — advanced maternal age','Specialised ANC and closer monitoring. Screen for hypertension and gestational diabetes.'],
- UNPLANNED:['Unplanned or unwanted pregnancy','Counsel and assess support needs; screen mental health and IPV. Offer postpartum family planning.'],
- PRIOR_CS:['Previous caesarean section','Plan place of birth with a functioning theatre. Watch for scar rupture in labour. No prolonged augmentation.'],
- PRIOR_STILLBIRTH:['Previous stillbirth','Increased fetal surveillance. Serial growth and fetal movement counting. Plan facility birth.'],
- PRIOR_PPH:['Previous postpartum haemorrhage','High PPH risk. Active management of the third stage. Have uterotonics and IV access ready; cross-match if possible.'],
- PRIOR_PREECLAMPSIA:['Previous pre-eclampsia or eclampsia','Calcium supplementation. Check BP and urine protein at every contact. Low threshold for referral.'],
- PRIOR_OBSTRUCTED:['Previous obstructed or prolonged labour','Plan facility birth with caesarean capability. Use the partograph from admission.'],
- CHRONIC_HTN:['Chronic hypertension','BP at every contact. Calcium. Watch for superimposed pre-eclampsia. Specialist review.'],
- DIABETES:['Diabetes mellitus','Glycaemic control and specialist care. Expect macrosomia; plan the birth.'],
- CARDIAC_RENAL:['Cardiac or renal disease','Refer for specialist care. This may be a pregnancy that endangers her life — see Guideline Annex 2.'],
- RH_NEG:['Rh negative','Anti-D prophylaxis if indirect Coombs negative. Check the newborn’s Rh at birth.'],
- LATE_ANC:['Late ANC initiation (booked after 12 weeks)','Catch up on the missed ANC package: screening, IFA, calcium, Td, deworming.'],
- HIV_POS:['Known HIV positive','Continue ART; do not re-test. Check viral load. Ensure PMTCT linkage and plan infant ARV + DBS.'],
- ANAEMIA:['Anaemia on the last contact','Therapeutic iron. If severe (Hb <7), refer and consider transfusion.'],
- MUAC_LOW:['Acute malnutrition (MUAC <23 cm)','Treat per the national protocol and counsel on nutrition.'],
+ AGE_LT19:['Age under 19 — teenage/adolescent pregnancy',NO_SRC,G+', Table 4 (risk only)'],
+ AGE_GT35:['Age over 35 — advanced maternal age',NO_SRC,G+', Table 4 (risk only)'],
+ UNPLANNED:['Unplanned or unwanted pregnancy','Counsel and assess her support needs. Screen for mental health problems and intimate-partner violence. Offer postpartum family planning.',G+' — mental health, IPV and postpartum FP are all in the ANC package'],
+ PRIOR_CS:['Previous caesarean section',NO_SRC,G+', Table 4 (risk only)'],
+ PRIOR_STILLBIRTH:['Previous stillbirth',NO_SRC,G+', Table 4 (risk only)'],
+ PRIOR_PPH:['Previous postpartum haemorrhage',NO_SRC,G+', Table 4 (risk only)'],
+ PRIOR_PREECLAMPSIA:['Previous pre-eclampsia or eclampsia','Calcium supplementation. Check blood pressure and urine protein at every contact.',G+' — calcium supplementation and BP/urine protein at every contact'],
+ PRIOR_OBSTRUCTED:['Previous obstructed or prolonged labour',NO_SRC,G+', Table 4 (risk only)'],
+ CHRONIC_HTN:['Chronic hypertension','Blood pressure at every contact. Calcium supplementation. Watch for superimposed pre-eclampsia.',G+' — calcium supplementation and BP at every contact'],
+ DIABETES:['Diabetes mellitus',NO_SRC,G+', Table 4 (risk only)'],
+ CARDIAC_RENAL:['Cardiac or renal disease','Refer for specialist care. This may be a pregnancy that endangers her life.',G+', Annex 2'],
+ RH_NEG:['Rh negative','Anti-D immunoglobulin 300 micrograms for every Rh-negative, Coombs-negative woman at 28 weeks, and again soon after birth if the newborn is Rh positive. Screen the mother, the father and the baby for Rh antigen.',G+' — verbatim'],
+ LATE_ANC:['Late ANC initiation (booked after 12 weeks)','Catch up on the missed ANC package: screening, iron-folic acid, calcium, Td and deworming.',G+' — the ANC package'],
+ HIV_POS:['Known HIV positive','Continue ART — do not re-test her. Check the viral load. Ensure PMTCT linkage, and plan infant ARV prophylaxis and DNA/PCR.','MoH Integrated MNCH/PMTCT register (register 6) instructions'],
+ ANAEMIA:['Anaemia on the last contact','Therapeutic iron (60 mg elemental iron). If severe (Hb &lt;7 g/dl): refer to hospital for complete investigation and possible blood transfusion, and continue therapeutic iron.',G+', §5.2.2 anaemia table — verbatim'],
+ MUAC_LOW:['Acute malnutrition (MUAC <23 cm)','Treat as recommended by the national guideline for the management of acute malnutrition, and counsel on nutrition.',G+' — verbatim'],
 };
 function riskReasons(e){
   const codes=[];
@@ -616,9 +627,9 @@ function riskReasons(e){
   if(e.muac_low==1) codes.push('MUAC_LOW');
   const seen={}; const out=[];
   codes.forEach(c=>{ if(seen[c]) return; seen[c]=1;
-    if(RISK_INFO[c]) out.push({code:c,why:RISK_INFO[c][0],action:RISK_INFO[c][1]});
+    if(RISK_INFO[c]) out.push({code:c,why:RISK_INFO[c][0],action:RISK_INFO[c][1],src:RISK_INFO[c][2]||''});
     else if(c.startsWith('SCREEN:')){ const it=ANC_ITEMS.find(i=>i[0]===c.slice(7));
-      if(it) out.push({code:c,why:it[2],action:'Flagged on the ANC risk screening — review the care plan.'}); }
+      if(it) out.push({code:c,why:it[2],action:'Flagged on the ANC risk screening — review the care plan.',src:'National ANC Guideline (MoH, Feb 2022), Table 4'}); }
   });
   return out;
 }
@@ -636,7 +647,8 @@ function wireRisk(rows){
     const body=rs.length
       ? rs.map((r,i)=>`<div style="padding:8px 0;border-bottom:0.5px solid #eee">
            <div style="font-weight:600;color:#791f1f">${i+1}. ${esc(r.why)}</div>
-           <div style="font-size:13px;color:#334155;margin-top:2px"><b>Next:</b> ${esc(r.action)}</div></div>`).join('')
+           <div style="font-size:13px;color:#334155;margin-top:2px"><b>Next:</b> ${r.action}</div>
+           ${r.src?`<div style="font-size:11px;color:#8a9490;margin-top:3px">Source: ${esc(r.src)}</div>`:''}</div>`).join('')
       : '<div class="muted">Flagged, but no specific condition is recorded. Complete her ANC risk screening.</div>';
     const old=document.getElementById('mdl'); if(old) old.remove();
     const d=document.createElement('div'); d.id='mdl';
