@@ -330,7 +330,7 @@ try {
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
       $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
-      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob'])));
+      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','ruptured_datetime','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob'])));
       audit('create','episodes',$eid); out(['id'=>$eid],201); }
     if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body();
       // REFERRAL IS NOT A CLINICAL STATE. It used to overwrite status with 'referred', which
@@ -343,7 +343,11 @@ try {
         unset($b['status']);
         audit('refer','episodes',$id,['referred']);
       }
-      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','place_of_delivery','infant_dob','returned_at']));
+      // `ruptured_datetime` is admitted here deliberately. The partograph derives rom_hours from it
+      // and hands that to the scorer, but it was in NO allow-list — so the column was never written
+      // and the model's rom_hours was null for every woman. Prolonged rupture is the main driver of
+      // intrapartum sepsis; the feature existed in name only.
+      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','ruptured_datetime','place_of_delivery','infant_dob','returned_at']));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE episodes SET `$k`=? WHERE id=?")->execute([$v,$id]); }
       if($fields) audit('update','episodes',$id,$fields);
       out(['ok'=>true]); }

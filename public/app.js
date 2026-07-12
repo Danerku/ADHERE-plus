@@ -384,7 +384,25 @@ function ecSet(id,iso){ const D=$('#'+id+'_d'), M=$('#'+id+'_m'), Y=$('#'+id+'_y
   const e=Ethiopian.toEth(dt);
   if(![...Y.options].some(o=>+o.value===e.year)) Y.add(new Option(e.year,e.year));
   D.value=String(e.day); M.value=String(e.month); Y.value=String(e.year); }
-function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
+// ---- LOCAL WALL-CLOCK TIME ---------------------------------------------------
+// Ethiopia is UTC+3 and observes no DST. toISOString() emits UTC, so every timestamp
+// the tool wrote was three hours behind the clock on the wall:
+//   - the monitoring schedule was permanently ~3h "overdue" the moment an observation saved;
+//   - a birth between 00:00 and 03:00 was filed on the previous day (and, on the 1st, in the
+//     previous month's MoH report);
+//   - EDD came out a day early, because addDays() round-tripped through UTC.
+// The Ethiopian-calendar picker has always produced LOCAL dates, so the record held UTC
+// timestamps and local dates side by side. Everything below writes local wall-clock, and the
+// server (PHP + MySQL) is pinned to the same zone so NOW()/CURDATE() agree with it.
+const p2=n=>String(n).padStart(2,'0');
+function localDate(d){ d=d||new Date(); return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate()); }
+function localDateTime(d){ d=d||new Date(); return localDate(d)+' '+p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds()); }
+// Parse a stored 'YYYY-MM-DD HH:MM:SS' as LOCAL (no trailing Z) — the counterpart of localDateTime().
+function parseLocal(s){ if(!s) return null; const d=new Date(String(s).replace(' ','T')); return isNaN(d)?null:d; }
+// Hours since the membranes ruptured. Feeds the model's rom_hours feature.
+function romHrs(s){ const d=parseLocal(s); if(!d) return null;
+  return Math.max(0, Math.round(((Date.now()-d.getTime())/36e5)*10)/10); }
+function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return localDate(dt); }
 
 // ---- registration validation -------------------------------------------------
 // MRN length follows the facility's paper numbering: 5 digits at a health centre,
@@ -668,7 +686,7 @@ async function findWoman(arg){
 // so family planning, immunization and PMTCT had NO way in from the front desk — their clients
 // were typed in separately, under a second identity with no link back to the woman.
 async function routeNewClient(cat, wid, d){
-  const today=new Date().toISOString().slice(0,10);
+  const today=localDate();
   if(cat==='pregtest'){
     const res=d.result||'pending'; const pos=(res==='positive');
     const t=await api('POST','pregnancy_tests',{woman_id:wid,test_date:today,result:res,note:d.note,
@@ -696,7 +714,7 @@ async function routeNewClient(cat, wid, d){
   }
   // maternity: ANC, labour, PNC (PNC includes a birth at home or another facility)
   const ep=await api('POST','episodes',{woman_id:wid,service_category:cat,status:(cat==='labour'?'laboring':'active'),
-    provider_id:(ME.role==='provider'?ME.id:null),admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
+    provider_id:(ME.role==='provider'?ME.id:null),admission_datetime:localDateTime()});
   if(ep&&ep.id){ location.hash='#patient/'+ep.id; return; }
   location.hash='#'+(cat==='anc'?'antenatal':cat==='pnc'?'pnc':'labour');
 }
@@ -865,8 +883,8 @@ async function partograph(id){
              dsc:(dsc.value===''?null:+dsc.value),amn:(amn.value||null),uprot:(uprot.value||null)};
     const mld3=Math.max(0,Math.min(3,Math.round(o.mld)||0));
     // Save the observation FIRST — a failed save must never show a misleading chart/score.
-    const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,bp_diastolic:o.dbp,pulse:o.pls,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
-    OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id); obs.push({obs_datetime:new Date().toISOString().slice(0,19).replace('T',' ')}); renderMonSched(id,obs);
+    const obsRes=await api('POST','observations',{episode_id:+id,obs_datetime:localDateTime(),hours_since_active:o.hrs,cervix_cm:o.cvx,fetal_heart_rate:o.fhr,contractions_per10:o.ctx,moulding:['0','+1','+2','+3'][mld3],caput:(cap.value===''?null:['0','+1','+2','+3'][Math.max(0,Math.min(3,+cap.value||0))]),descent_head:o.dsc,amniotic_fluid:o.amn,bp_systolic:o.sbp,bp_diastolic:o.dbp,pulse:o.pls,temperature:o.tmp,urine_protein:(uprot.value||null),urine_acetone:(uacet.value||null)});
+    OB[id].push(o); OB[id].sort((a,b)=>a.hrs-b.hrs); drawPG(id); drawVitals(id); obs.push({obs_datetime:localDateTime()}); renderMonSched(id,obs);
     const mecon=(o.amn==='M')?1:0;
     // THE PRE-ECLAMPSIA CLUSTER NOW REACHES THE MODEL. The danger-signs screen has always
     // collected headache, blurred vision, epigastric pain, clonus and bleeding — and none of
@@ -891,9 +909,7 @@ async function partograph(id){
     // the same defect as prior_cs. Pulse is now measured (the database and API always accepted it;
     // only the form never asked). ROM hours is DERIVED from the rupture time already recorded on
     // the episode, rather than invented. Prolonged rupture is the main driver of intrapartum sepsis.
-    const romH=(W.ruptured_datetime)
-      ? Math.max(0, Math.round(((Date.now()-Date.parse(W.ruptured_datetime.replace(' ','T')))/36e5)*10)/10)
-      : null;
+    const romH=romHrs(W.ruptured_datetime);
     const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,
       ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:o.dbp,pulse:o.pls,temp:o.tmp,rom_hours:romH});
     Object.keys(feat).forEach(k=>{ if(feat[k]==null||Number.isNaN(feat[k])) delete feat[k]; });
@@ -1166,7 +1182,7 @@ function wireOverview(){
     push('Immunization',o.immunization);
     const csv=lines.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\n');
     const bl=new Blob([csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
-    a.href=URL.createObjectURL(bl); a.download='adhere_overview_'+(new Date().toISOString().slice(0,10))+'.csv'; a.click(); };
+    a.href=URL.createObjectURL(bl); a.download='adhere_overview_'+(localDate())+'.csv'; a.click(); };
 }
 
 async function dashboard(){
@@ -1304,7 +1320,7 @@ async function danger(id){
       modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this.</i>','risk');
       return; }
     window._dgAck=false; b.disabled=true;
-    try{ const r=await api('POST','danger_signs',{episode_id:+id,obs_datetime:new Date().toISOString().slice(0,19).replace('T',' '),headache:+ha.value,blurred_vision:+bv.value,epigastric_pain:+ep.value,dtr_grade:dtr.value,vaginal_bleeding:+vb.value,remark:rk.value});
+    try{ const r=await api('POST','danger_signs',{episode_id:+id,obs_datetime:localDateTime(),headache:+ha.value,blurred_vision:+bv.value,epigastric_pain:+ep.value,dtr_grade:dtr.value,vaginal_bleeding:+vb.value,remark:rk.value});
       $('#m').textContent=(r&&(r.ids||r.queued))?' saved — these findings will now be included in the next intrapartum risk score':' saved';
       if(!(r&&r.queued)) b.disabled=false;
     } catch(e){ b.disabled=false; toast(e.message||'error'); } };
@@ -1381,7 +1397,7 @@ async function delivery(id){
       // Newborn data goes ONLY to the babies table (created just below) — it is the single
       // source of truth and the only one that supports twins. delivery_summary no longer
       // carries a shadow copy of weight/sex/APGAR/outcome.
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:new Date().toISOString().slice(0,19).replace('T',' '),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null),
+      await api('POST','delivery',{episode_id:+id,delivery_datetime:localDateTime(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null),
         partograph_used:pUsed,episiotomy:tk('epis'),mode_other_text:(md.value==='other'?mot.value:null),
         maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
         comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
@@ -1532,14 +1548,14 @@ async function highriskList(){
 }
 
 async function transfer(womanId,cat,from){
-  const r=await api('POST','episodes',{woman_id:womanId,service_category:cat,status:cat==='labour'?'laboring':'active',admitted_from:from,provider_id:ME.role==='provider'?ME.id:null,admission_datetime:new Date().toISOString().slice(0,19).replace('T',' ')});
+  const r=await api('POST','episodes',{woman_id:womanId,service_category:cat,status:cat==='labour'?'laboring':'active',admitted_from:from,provider_id:ME.role==='provider'?ME.id:null,admission_datetime:localDateTime()});
   if(r&&r.id){ location.hash=cat==='labour'?'#labour':(cat==='highrisk'?'#highrisk':'#antenatal'); route(); }
   else alert('Could not admit: '+((r&&r.error)||'error'));
 }
 
 // ================= workflow-parity modules =================
-const nowStr=()=>new Date().toISOString().slice(0,19).replace('T',' ');
-const today=()=>new Date().toISOString().slice(0,10);
+const nowStr=()=>localDateTime();
+const today=()=>localDate();
 
 async function referralScreen(id){
   const past=await api('GET','referrals?episode='+id).catch(()=>[]);
@@ -1741,11 +1757,11 @@ async function ancVisits(id){
 
   // ---- laboratory requests & results ----
   $('#labadd').onclick=async()=>{ if(!labt.value) return;
-    const r=await api('POST','labs',{episode_id:+id,test_code:labt.value,requested:1,requested_date:ecGet('vd')||new Date().toISOString().slice(0,10)});
+    const r=await api('POST','labs',{episode_id:+id,test_code:labt.value,requested:1,requested_date:ecGet('vd')||localDate()});
     if(r&&(r.ids||r.queued)){ toast('Test requested','ok'); ancVisits(id); } };
   document.querySelectorAll('[data-labsave]').forEach(b=>{ b.onclick=async()=>{ const lid=b.dataset.labsave;
     const inp=document.querySelector('[data-lab="'+lid+'"]');
-    const r=await api('PATCH','labs/'+lid,{result:inp.value,result_date:new Date().toISOString().slice(0,10)});
+    const r=await api('PATCH','labs/'+lid,{result:inp.value,result_date:localDate()});
     if(r&&(r.ok||r.queued)) toast('Result saved','ok'); }; });
 
   // ---- MANDATORY fields (collaborator request; guideline requires these every contact) ----
@@ -2271,8 +2287,8 @@ function tickCell(k){ return r=>(r[k]==1?'✓':''); }   // renders a boolean as 
 
 async function registersScreen(){
   const t=window._regType||'anc';
-  const from=window._regFrom||new Date().toISOString().slice(0,8)+'01';
-  const to=window._regTo||new Date().toISOString().slice(0,10);
+  const from=window._regFrom||localDate().slice(0,8)+'01';
+  const to=window._regTo||localDate();
   const opt=(v,n)=>`<option value="${v}"${t===v?' selected':''}>${n}</option>`;
   app().innerHTML=nav()+`<div class="card">
    <h3>MoH register export</h3>
@@ -3025,7 +3041,7 @@ async function pmtctClient(id){
     const dob=m.delivery_date||(b.recorded_at||'').slice(0,10)||null;
     try{
       const r=await api('POST','pmtct_infants',{mother_id:+id,baby_id:+b.id,mrn:(b.mrn||null),
-        infant_dob:dob, hei_enrol_date:new Date().toISOString().slice(0,10),
+        infant_dob:dob, hei_enrol_date:localDate(),
         arv_start_date:((b.arv_prophylaxis&&b.arv_prophylaxis!=='not_given')?dob:null)});
       if(r&&(r.id||r.queued)){ toast('Infant enrolled in the HEI cohort','ok'); setTimeout(()=>pmtctClient(id),500); }
       else { btn.disabled=false; toast((r&&r.error)||'error'); }
@@ -3345,9 +3361,36 @@ async function patientHub(id){
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''}</p>
     ${e.late_anc_initiation==1?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">Late ANC initiation &mdash; first contact at ${esc(e.ga_first_contact)} weeks.</p>`:''}
-    ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select></p>`:''}
+    ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select>
+      <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
+      <span id="rmtshow" class="muted"></span></p>`:''}
     <div class="hubgrid">${tiles.join('')}</div>${fold}</div>`;
-  if(isLab&&!delivered){ const rs=$('#rmset'); if(rs){ rs.value=String(e.ruptured_membrane||0); rs.onchange=async()=>{ const r=await api('PATCH','episodes/'+id,{ruptured_membrane:+rs.value}); if(r&&(r.ok||r.queued)) toast('Membranes updated','ok'); }; } }
+  // Rupture TIME, not just the fact of rupture. The scorer derives rom_hours from this column and
+  // the model was trained on it; until now nothing could write it, so the feature was dead.
+  if(isLab&&!delivered){
+    const rs=$('#rmset'), wrap=$('#rmtwrap'), rmt=$('#rmt'), show=$('#rmtshow');
+    const paint=()=>{
+      const on=(rs.value==='1');
+      if(wrap) wrap.style.display=on?'':'none';
+      if(show) show.textContent=(on&&e.ruptured_datetime)?('— ruptured '+String(e.ruptured_datetime).slice(0,16).replace(' ','T').replace('T',' ')+' ('+romHrs(e.ruptured_datetime)+'h)'):'';
+      if(on&&rmt&&!rmt.value) rmt.value=(e.ruptured_datetime?String(e.ruptured_datetime).slice(0,16).replace(' ','T'):localDateTime().slice(0,16).replace(' ','T'));
+    };
+    if(rs){ rs.value=String(e.ruptured_membrane||0); paint();
+      rs.onchange=async()=>{ paint();
+        const body={ruptured_membrane:+rs.value};
+        if(rs.value!=='1') body.ruptured_datetime=null;                 // intact again: clear the clock
+        const r=await api('PATCH','episodes/'+id,body); if(r&&(r.ok||r.queued)) toast('Membranes updated','ok'); }; }
+    const sv=$('#rmtsave');
+    if(sv) sv.onclick=async()=>{
+      if(!rmt.value){ toast('Enter the time the membranes ruptured'); return; }
+      const when=rmt.value.replace('T',' ')+':00';
+      if(Date.parse(rmt.value)>Date.now()){ toast('That is in the future'); return; }
+      sv.disabled=true;
+      const r=await api('PATCH','episodes/'+id,{ruptured_membrane:1,ruptured_datetime:when});
+      sv.disabled=false;
+      if(r&&(r.ok||r.queued)){ e.ruptured_datetime=when; paint(); toast('Rupture time saved — the score now sees hours since ROM','ok'); }
+    };
+  }
 }
 
 async function supervisorDash(){

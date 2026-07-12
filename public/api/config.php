@@ -9,6 +9,12 @@ if ($__prod && ($__pass === false || $__pass === '')) {
   echo json_encode(['error' => 'server misconfigured']);
   exit;
 }
+// Clinic-local time. The browser writes local wall-clock (see localDateTime() in app.js) and
+// the Ethiopian-calendar picker has always produced local dates, so PHP's date() and MySQL's
+// NOW()/CURDATE() must resolve in the SAME zone or the record mixes two clocks: timestamps
+// three hours behind the dates beside them. Ethiopia observes no DST, so the offset is fixed.
+date_default_timezone_set(getenv('APP_TZ') ?: 'Africa/Addis_Ababa');
+
 return [
   'db_host' => getenv('DB_HOST') ?: 'db',
   'db_name' => getenv('DB_NAME') ?: 'adhere',
