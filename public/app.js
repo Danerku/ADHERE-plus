@@ -358,7 +358,9 @@ function carryForward(w,rhNeg){
 }
 
 // Ethiopian-calendar date entry: 3 selects (day/month/year E.C.) -> stores Gregorian YYYY-MM-DD
-function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date()):{year:2018,month:1,day:1}); }
+// "Today" is the clinic's today, not the device's — otherwise a tablet in another zone offers the
+// wrong default date across the midnight boundary. Noon avoids any edge in the EC conversion.
+function ecToday(){ return (window.Ethiopian?Ethiopian.toEth(new Date(localDate()+'T12:00:00')):{year:2018,month:1,day:1}); }
 // `def` = default to today. `iso` = pre-select an already-recorded Gregorian date, so that
 // re-saving a form that shows an existing date does not silently blank it.
 function ecPicker(id,label,def,iso){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
@@ -384,25 +386,76 @@ function ecSet(id,iso){ const D=$('#'+id+'_d'), M=$('#'+id+'_m'), Y=$('#'+id+'_y
   const e=Ethiopian.toEth(dt);
   if(![...Y.options].some(o=>+o.value===e.year)) Y.add(new Option(e.year,e.year));
   D.value=String(e.day); M.value=String(e.month); Y.value=String(e.year); }
-// ---- LOCAL WALL-CLOCK TIME ---------------------------------------------------
-// Ethiopia is UTC+3 and observes no DST. toISOString() emits UTC, so every timestamp
-// the tool wrote was three hours behind the clock on the wall:
+// ---- CLINIC WALL-CLOCK TIME --------------------------------------------------
+// toISOString() emits UTC. Ethiopia is UTC+3, so every timestamp the tool wrote used to be
+// three hours behind the clock on the wall:
 //   - the monitoring schedule was permanently ~3h "overdue" the moment an observation saved;
 //   - a birth between 00:00 and 03:00 was filed on the previous day (and, on the 1st, in the
 //     previous month's MoH report);
 //   - EDD came out a day early, because addDays() round-tripped through UTC.
-// The Ethiopian-calendar picker has always produced LOCAL dates, so the record held UTC
-// timestamps and local dates side by side. Everything below writes local wall-clock, and the
-// server (PHP + MySQL) is pinned to the same zone so NOW()/CURDATE() agree with it.
+// The Ethiopian-calendar picker has always produced local dates, so the record held UTC
+// timestamps and local dates side by side.
+//
+// These write the CLINIC's clock (window.ADHERE_TZ), NOT the device's. Using the device's own
+// zone would look identical in a correctly-configured facility and be quietly wrong everywhere
+// else: a tablet set to the wrong country writes wrong clinical times, and since we store a
+// wall-clock value rather than an offset, nothing downstream could ever detect it. Pinning the
+// zone means the browser, PHP (APP_TZ) and the MySQL session agree no matter what the hardware
+// thinks the time is. Ethiopia observes no DST, but Intl handles DST correctly anyway, so this
+// stays right if ADHERE+ is deployed somewhere that does.
 const p2=n=>String(n).padStart(2,'0');
-function localDate(d){ d=d||new Date(); return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate()); }
-function localDateTime(d){ d=d||new Date(); return localDate(d)+' '+p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds()); }
-// Parse a stored 'YYYY-MM-DD HH:MM:SS' as LOCAL (no trailing Z) — the counterpart of localDateTime().
-function parseLocal(s){ if(!s) return null; const d=new Date(String(s).replace(' ','T')); return isNaN(d)?null:d; }
+const TZ=()=> (window.ADHERE_TZ || 'Africa/Addis_Ababa');
+// Break an instant into the clinic zone's calendar fields.
+function tzParts(d){
+  d=d||new Date();
+  try{
+    const f=new Intl.DateTimeFormat('en-CA',{timeZone:TZ(),hour12:false,
+      year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const o={}; for(const p of f.formatToParts(d)) if(p.type!=='literal') o[p.type]=p.value;
+    if(o.hour==='24') o.hour='00';                       // some engines render midnight as 24
+    return o;
+  }catch(e){                                             // no Intl/zone data: fall back to the device
+    return {year:d.getFullYear(),month:p2(d.getMonth()+1),day:p2(d.getDate()),
+            hour:p2(d.getHours()),minute:p2(d.getMinutes()),second:p2(d.getSeconds())};
+  }
+}
+function localDate(d){ const o=tzParts(d); return o.year+'-'+o.month+'-'+o.day; }
+function localDateTime(d){ const o=tzParts(d); return o.year+'-'+o.month+'-'+o.day+' '+o.hour+':'+o.minute+':'+o.second; }
+// The clinic zone's offset from UTC at a given instant, e.g. '+03:00'.
+function tzOffset(d){
+  d=d||new Date();
+  const o=tzParts(d);
+  const asUTC=Date.UTC(+o.year,+o.month-1,+o.day,+o.hour,+o.minute,+o.second);
+  const mins=Math.round((asUTC-Math.floor(d.getTime()/1000)*1000)/60000);
+  const s=mins<0?'-':'+', a=Math.abs(mins);
+  return s+p2(Math.floor(a/60))+':'+p2(a%60);
+}
+// Parse a stored 'YYYY-MM-DD HH:MM:SS' — the counterpart of localDateTime(). The stored value is
+// clinic wall-clock, so it must be read back against the CLINIC's offset, not the device's, or a
+// tablet in another zone would compute the wrong age for an observation.
+function parseLocal(s){
+  if(!s) return null;
+  const t=String(s).trim().replace(' ','T');
+  const d0=new Date(t);                                  // provisional, to get the offset in force
+  if(isNaN(d0)) return null;
+  const d=new Date(t+tzOffset(d0));
+  return isNaN(d)?d0:d;
+}
 // Hours since the membranes ruptured. Feeds the model's rom_hours feature.
 function romHrs(s){ const d=parseLocal(s); if(!d) return null;
   return Math.max(0, Math.round(((Date.now()-d.getTime())/36e5)*10)/10); }
-function addDays(iso,n){ if(!iso)return null; const dt=new Date(iso+'T00:00:00'); dt.setDate(dt.getDate()+n); return localDate(dt); }
+// Pure calendar arithmetic on a Y-M-D string. Deliberately does NOT touch a time zone: an EDD is
+// "LNMP + 280 days" on the calendar, and routing it through any clock (device's or clinic's) is
+// what made it land a day early. Date.UTC has no DST and no local offset, so it cannot drift.
+function addDays(iso,n){
+  if(!iso) return null;
+  const m=String(iso).slice(0,10).split('-');
+  if(m.length!==3) return null;
+  const d=new Date(Date.UTC(+m[0], +m[1]-1, +m[2]));
+  if(isNaN(d)) return null;
+  d.setUTCDate(d.getUTCDate()+n);
+  return d.getUTCFullYear()+'-'+p2(d.getUTCMonth()+1)+'-'+p2(d.getUTCDate());
+}
 
 // ---- registration validation -------------------------------------------------
 // MRN length follows the facility's paper numbering: 5 digits at a health centre,
@@ -949,7 +1002,9 @@ async function partograph(id){
 }
 function renderMonSched(id,obs){ const el=$('#monsched'); if(!el) return;
   const last=(obs&&obs.length)?obs[obs.length-1]:null;
-  const lt=last?new Date(String(last.obs_datetime||last.recorded_at||'').replace(' ','T')):null;
+  // parseLocal, not new Date(): the stored value is CLINIC wall-clock. Parsing it against the
+  // device's zone is what made a just-saved observation read as hours old.
+  const lt=last?parseLocal(last.obs_datetime||last.recorded_at||''):null;
   if(!lt||isNaN(lt.getTime())){ el.innerHTML='<b class="muted">Monitoring schedule</b><div class="muted" style="font-size:12px">Record the first reading to start the schedule.</div>'; return; }
   const mins=Math.max(0,Math.round((Date.now()-lt.getTime())/60000));
   const sched=[['Fetal heart rate',30],['Contractions',30],['Pulse',30],['Temperature',120],['Blood pressure',240],['Cervix / descent',240]];
@@ -3384,7 +3439,10 @@ async function patientHub(id){
     if(sv) sv.onclick=async()=>{
       if(!rmt.value){ toast('Enter the time the membranes ruptured'); return; }
       const when=rmt.value.replace('T',' ')+':00';
-      if(Date.parse(rmt.value)>Date.now()){ toast('That is in the future'); return; }
+      // The provider types the CLINIC's clock, so validate it against the clinic's clock — on a
+      // device in another zone, Date.parse() would read it as the device's and reject a valid time.
+      const w=parseLocal(when);
+      if(w && w.getTime()>Date.now()+60000){ toast('That is in the future'); return; }
       sv.disabled=true;
       const r=await api('PATCH','episodes/'+id,{ruptured_membrane:1,ruptured_datetime:when});
       sv.disabled=false;
