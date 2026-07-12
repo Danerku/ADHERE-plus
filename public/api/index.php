@@ -1,5 +1,95 @@
 <?php
 require __DIR__.'/lib.php'; require __DIR__.'/db.php';
+
+// =====================================================================================
+// CONTINUUM LINKS
+//
+// A journey audit traced every path a woman can take through this tool and found that the
+// modules did not talk to each other. Facts learned in one room stayed in that room:
+//
+//   * Risk screening was keyed to an EPISODE. When she moved from her ANC episode to a
+//     labour episode, the high-risk rule and the AI model looked at the new episode, found
+//     no screening, and she arrived on the labour ward with no risk flag. Her previous
+//     caesarean was in the database the whole time, attached to a record nobody was reading.
+//   * A positive HIV test was written onto the VISIT. At her next contact the tool offered
+//     her an HIV test again, she never reached the high-risk worklist, and nothing ever
+//     suggested PMTCT.
+//   * A Td dose given in the ANC room never reached the Td register.
+//   * An HIV-exposed baby recorded in the delivery room never reached the HEI cohort.
+//
+// These four functions are the links. They are called on write, so a fact learned anywhere
+// lands on the person it belongs to and follows her.
+// =====================================================================================
+
+function woman_of_episode(int $eid): ?int {
+  $q=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $q->execute([$eid]);
+  $r=$q->fetch(); return $r ? (int)$r['woman_id'] : null;
+}
+
+// ANC screening -> women.prior_*  (so risk follows her out of the ANC room)
+function screening_to_woman(int $eid, array $rows): void {
+  $wid = woman_of_episode($eid); if(!$wid) return;
+  // Only the items that map to a person-level column. Everything else stays episode-scoped.
+  $map=['OBS_PREV_CS'=>'prior_cs','OBS_PREV_STILLBIRTH'=>'prior_stillbirth','OBS_PREV_PPH'=>'prior_pph',
+        'OBS_PREV_PREECLAMPSIA'=>'prior_preeclampsia','OBS_PREV_OBSTRUCTED'=>'prior_obstructed',
+        'MED_CHRONIC_HTN'=>'chronic_htn','MED_DIABETES'=>'diabetes','MED_CARDIAC_RENAL'=>'cardiac_renal'];
+  foreach($rows as $row){
+    $code=$row['item_code']??''; if(!isset($map[$code])) continue;
+    $resp=$row['response']??'';
+    // ONLY an explicit yes or no is written. A BLANK (unanswered) item must never clear a
+    // recorded "yes" — otherwise re-saving the screening form with an item left blank would
+    // silently erase her previous caesarean, which is precisely the data-blanking bug this
+    // release exists to eliminate. An explicit "no" is a retraction and does clear it.
+    if($resp!=='yes' && $resp!=='no') continue;
+    db()->prepare("UPDATE women SET `{$map[$code]}`=? WHERE id=?")->execute([$resp,$wid]);
+  }
+}
+
+// A positive HIV test anywhere -> the woman is known positive, and linked to PMTCT
+function mark_hiv_positive(int $eid): void {
+  $wid = woman_of_episode($eid); if(!$wid) return;
+  db()->prepare("UPDATE women SET hiv_known_positive=1 WHERE id=? AND (hiv_known_positive IS NULL OR hiv_known_positive=0)")->execute([$wid]);
+}
+
+// Td given at an ANC contact -> the Td immunization register
+function td_to_register(int $eid, int $dose, ?string $when, array $u): void {
+  $wid = woman_of_episode($eid); if(!$wid || $dose<1 || $dose>5) return;
+  $c=db()->prepare("SELECT id FROM immunization_clients WHERE woman_id=? AND programme='Td' AND facility_id=?");
+  $c->execute([$wid,$u['facility_id']]); $row=$c->fetch();
+  if($row){ $cid=(int)$row['id']; }
+  else {
+    $w=db()->prepare("SELECT mrn,first_name,father_name,age,woreda,kebele FROM women WHERE id=?"); $w->execute([$wid]); $wr=$w->fetch();
+    $cid=insert('immunization_clients',['facility_id'=>$u['facility_id'],'woman_id'=>$wid,'programme'=>'Td',
+      'mrn'=>($wr['mrn']??null),'name'=>trim(($wr['first_name']??'').' '.($wr['father_name']??'')),
+      'age'=>($wr['age']??null),'pregnant'=>1,'woreda'=>($wr['woreda']??null),'kebele'=>($wr['kebele']??null),
+      'reg_date'=>($when?:date('Y-m-d')),'recorded_by'=>$u['id']]);
+  }
+  db()->prepare("DELETE FROM immunization_doses WHERE client_id=? AND dose_no=?")->execute([$cid,$dose]);
+  insert('immunization_doses',['client_id'=>$cid,'dose_no'=>$dose,'dose_date'=>($when?:date('Y-m-d')),'recorded_by'=>$u['id']]);
+}
+
+// An HIV-exposed newborn -> she is an HIV-exposed infant, and belongs in the HEI cohort.
+// If her mother is enrolled in PMTCT we enrol the infant automatically, carrying across what
+// the delivery room already recorded. If the mother is NOT enrolled, we flag her as positive
+// so the ANC/PMTCT prompt fires — an exposed baby with nobody enrolled is how infants are lost.
+function sync_hiv_from_baby(int $babyId): void {
+  $q=db()->prepare("SELECT b.*, e.woman_id, e.facility_id FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE b.id=?");
+  $q->execute([$babyId]); $b=$q->fetch();
+  if(!$b || (int)($b['hiv_exposed']??0)!==1) return;
+  $wid=(int)$b['woman_id'];
+  db()->prepare("UPDATE women SET hiv_known_positive=1 WHERE id=? AND (hiv_known_positive IS NULL OR hiv_known_positive=0)")->execute([$wid]);
+  $m=db()->prepare("SELECT id, delivery_date FROM pmtct_mothers WHERE woman_id=? AND facility_id=? ORDER BY id DESC LIMIT 1");
+  $m->execute([$wid,$b['facility_id']]); $mo=$m->fetch();
+  if(!$mo) return;                                   // no PMTCT record yet — the UI prompts for enrolment
+  $x=db()->prepare("SELECT id FROM pmtct_infants WHERE mother_id=? AND baby_id=?");
+  $x->execute([$mo['id'],$babyId]); if($x->fetch()) return;
+  $dob=$mo['delivery_date'] ?: substr((string)$b['recorded_at'],0,10);
+  insert('pmtct_infants',['mother_id'=>(int)$mo['id'],'baby_id'=>$babyId,'mrn'=>($b['mrn']??null),
+    'infant_dob'=>$dob,'hei_enrol_date'=>date('Y-m-d'),
+    'arv_start_date'=>((!empty($b['arv_prophylaxis']) && $b['arv_prophylaxis']!=='not_given') ? $dob : null),
+    'recorded_by'=>(int)($b['recorded_by']??0) ?: null]);
+}
+
 $m = $_SERVER['REQUEST_METHOD'];
 $path = trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/');
 $path = preg_replace('#^.*api/#','',$path);           // normalise to route after /api/
@@ -126,7 +216,22 @@ try {
       // Unplanned/unwanted pregnancy is also a Table 4 high-risk condition.
       // Late ANC initiation is deliberately NOT included: it is so common here that flagging it
       // would mark most women and cause alarm fatigue. It stays visible on the chart instead.
-      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1 OR EXISTS(SELECT 1 FROM anc_visits av WHERE av.episode_id=e.id AND (av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1)) OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+      // RESOLVED BY WOMAN, NOT BY EPISODE. Risk screening and ANC results used to be looked up
+      // against THIS episode — so when a woman moved from her ANC episode to a labour episode,
+      // the rule was evaluated against the new episode, which has no screening rows, and she
+      // arrived on the labour ward with no risk flag at all. Her previous caesarean was in the
+      // database the whole time, attached to an episode nobody was reading any more. Risk belongs
+      // to the woman and must follow her.
+      $ancW="(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.id=av.episode_id WHERE e2.woman_id=w.id";
+      $scrW="(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.id=a.episode_id WHERE e3.woman_id=w.id";
+      // Severe hypertension recorded at ANC (guideline: >=160/110 is severe, and it is an
+      // emergency). This was absent entirely: a BP of 170/115 at an ANC contact flagged nothing.
+      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes'"
+        ." OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1"
+        ." OR EXISTS($ancW AND (av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1))"
+        ." OR EXISTS($ancW AND (av.bp_systolic>=160 OR av.bp_diastolic>=110))"
+        ." OR EXISTS($ancW AND av.urine_protein LIKE '%++%')"   // ++ or +++ — significant proteinuria
+        ." OR EXISTS($scrW AND a.response='yes'))";
       // "For client X, what conditions make her high risk?" — a flag with no reason is a dead end.
       // Return the ACTUAL reasons as codes so the worklist can explain itself and state the
       // next intervention, without the provider having to open her record to guess.
@@ -146,13 +251,18 @@ try {
              CASE WHEN w.late_anc_initiation=1 THEN 'LATE_ANC' END,
              CASE WHEN w.hiv_known_positive=1 THEN 'HIV_POS' END
            )";
-      $sc="(SELECT GROUP_CONCAT(a.item_code) FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes')";
-      $an="(SELECT av.anaemia_grade FROM anc_visits av WHERE av.episode_id=e.id AND av.anaemia_grade IS NOT NULL AND av.anaemia_grade<>'normal' ORDER BY av.id DESC LIMIT 1)";
-      $mf="(SELECT av.muac_flag FROM anc_visits av WHERE av.episode_id=e.id AND av.muac_flag=1 ORDER BY av.id DESC LIMIT 1)";
+      // Screening and ANC results resolve by WOMAN, so they follow her from ANC into labour.
+      $sc="(SELECT GROUP_CONCAT(DISTINCT a.item_code) FROM anc_risk_screening a JOIN episodes e4 ON e4.id=a.episode_id WHERE e4.woman_id=w.id AND a.response='yes')";
+      $an="(SELECT av.anaemia_grade FROM anc_visits av JOIN episodes e5 ON e5.id=av.episode_id WHERE e5.woman_id=w.id AND av.anaemia_grade IS NOT NULL AND av.anaemia_grade<>'normal' ORDER BY av.id DESC LIMIT 1)";
+      $mf="(SELECT av.muac_flag FROM anc_visits av JOIN episodes e6 ON e6.id=av.episode_id WHERE e6.woman_id=w.id AND av.muac_flag=1 ORDER BY av.id DESC LIMIT 1)";
       // Person-level items are carried forward here so Delivery and PNC can SHOW what ANC
       // already established (blood group, Rh, HIV, target population) instead of re-asking.
+      // The prior_* columns are here because THE RISK MODEL CONSUMES THEM. They were absent, so
+      // motherFeats() read undefined and every woman was scored as having no previous caesarean —
+      // the single most important intrapartum feature, pinned at zero for every patient.
       $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.height_cm,w.lnmp,w.edd, w.ga_first_contact,w.late_anc_initiation,
               w.blood_group,w.rh_factor,w.pregnancy_planned,w.target_pop_code,w.hiv_known_positive,w.hiv_linked_art,w.art_regimen,
+              w.prior_cs,w.prior_stillbirth,w.prior_pph,w.prior_preeclampsia,w.prior_obstructed,w.chronic_htn,w.diabetes,w.cardiac_renal,
               pu.full_name AS provider_name, $hr AS high_risk,
               $rc AS risk_codes, $sc AS screen_codes, $an AS anaemia, $mf AS muac_low
             FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
@@ -161,15 +271,31 @@ try {
       // and filter in the browser — so once a facility passed 200 episodes her own record fell
       // off the end and the PMTCT delivery-room link silently stopped finding her newborn.
       if($wom){ $sql.=" AND e.woman_id=?"; $args[]=$wom; }
-      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
+      // A high-risk woman who has DELIVERED is still high risk — postpartum haemorrhage and
+      // eclampsia both happen after the birth. Excluding 'delivered' dropped exactly the women
+      // the postnatal period is dangerous for.
+      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active','delivered')"; } $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
       $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob'])));
       audit('create','episodes',$eid); out(['id'=>$eid],201); }
-    if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body(); $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','place_of_delivery','infant_dob']));
-      foreach($fields as $k=>$v){ db()->prepare("UPDATE episodes SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','episodes',$id,$fields); out(['ok'=>true]); }
+    if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body();
+      // REFERRAL IS NOT A CLINICAL STATE. It used to overwrite status with 'referred', which
+      // erased 'delivered' — so a woman referred for postpartum haemorrhage vanished from the
+      // postnatal list AND the high-risk list, her hub lost its postnatal tiles, and nothing in
+      // the application could ever put her back. She is still delivered. She is still postpartum.
+      // She is still at risk. Referral is a fact ABOUT her, recorded alongside her state.
+      if(($b['status']??'')==='referred'){
+        db()->prepare("UPDATE episodes SET referred=1, referred_at=NOW() WHERE id=?")->execute([$id]);
+        unset($b['status']);
+        audit('refer','episodes',$id,['referred']);
+      }
+      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','place_of_delivery','infant_dob','returned_at']));
+      foreach($fields as $k=>$v){ db()->prepare("UPDATE episodes SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      if($fields) audit('update','episodes',$id,$fields);
+      out(['ok'=>true]); }
   }
 
   // ---- partograph observations ----
@@ -243,13 +369,47 @@ try {
       $f=array_intersect_key($b,array_flip(['result','result_date','note']));
       foreach($f as $k=>$v){ db()->prepare("UPDATE lab_orders SET `$k`=? WHERE id=?")->execute([$v,$id]); }
       audit('result','lab_orders',$id,array_keys($f)); out(['ok'=>true]); }
-    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers','lab_orders']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
+    // PATCH a clinical row to CORRECT it. Newborn DBS results, delivery details and pregnancy
+    // results all come back after the fact; without this the only way to record them was to
+    // insert a second row — a phantom twin, a duplicate delivery.
+    if($m==='PATCH' && in_array($tbl,['babies','delivery_summary','pnc_visits','anc_visits']) && $id){
+      $u=require_role(['provider','admin']); $b=body();
+      $q=db()->prepare("SELECT episode_id FROM `$tbl` WHERE id=?"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      require_ep($row['episode_id']);
+      $f=array_intersect_key($b,array_flip($allow));
+      unset($f['episode_id'],$f['recorded_by']);         // never re-parent a row, never forge authorship
+      foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      if($tbl==='babies') sync_hiv_from_baby((int)$id);
+      audit('update',$tbl,$id,array_keys($f)); out(['ok'=>true]); }
+
+    if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers','lab_orders','messages']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
       foreach($rows as $row){ require_ep($row['episode_id']??0); }
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id'];
         if($tbl==='handovers') $row['from_provider_id']=$u['id'];   // sender identity from the session, never caller-supplied
         if($tbl==='messages')  $row['from_user_id']=$u['id'];
+        // Screening must be RETRACTABLE. It used to be append-only, so a mis-clicked "yes" flagged
+        // her high risk for ever while the screen in front of the provider said "no". The latest
+        // answer is the answer.
+        if($tbl==='anc_risk_screening' && !empty($row['item_code'])){
+          db()->prepare("DELETE FROM anc_risk_screening WHERE episode_id=? AND item_code=?")
+              ->execute([$row['episode_id'],$row['item_code']]); }
         $ids[]=insert($tbl,array_intersect_key($row,array_flip($allow))); }
+
+      // ---- write person-level facts back onto the WOMAN, so they follow her ----
+      if($tbl==='anc_risk_screening') screening_to_woman((int)($rows[0]['episode_id']??0),$rows);
+      // A positive HIV test anywhere in the continuum is a fact about HER, not about the visit.
+      // Until now it was written only onto the visit row, so at her next contact the tool offered
+      // her an HIV test again, and she never reached the high-risk worklist or PMTCT.
+      if(in_array($tbl,['anc_visits','pnc_visits','delivery_summary'])){
+        foreach($rows as $row){ if(($row['hiv_test_result']??'')==='P') mark_hiv_positive((int)$row['episode_id']); }
+      }
+      // A Td dose given in the ANC room belongs in the Td register too, or the register is a lie.
+      if($tbl==='anc_visits'){ foreach($rows as $row){ if(!empty($row['td_dose_no'])) td_to_register((int)$row['episode_id'],(int)$row['td_dose_no'],$row['visit_date']??null,$u); } }
+      // An HIV-exposed newborn belongs in the HEI cohort, not only on the delivery record.
+      if($tbl==='babies'){ foreach($ids as $bid) sync_hiv_from_baby((int)$bid); }
+
       audit('create',$tbl,$ids[0]??null); out(['ids'=>$ids],201); }
   }
 
@@ -381,12 +541,22 @@ try {
         // Month 0 is the shared cohort event for BOTH the maternal and the HEI cohort.
         if(empty($row['cohort_month0'])) $row['cohort_month0']=substr(($row['booking_date']??date('Y-m-d')),0,7);
       }
+      // (the woman-record write-back happens after the insert, below — it needs the new id)
       if($tbl==='pmtct_followup'){
         // One cell per subject per month — re-recording a month corrects it, never duplicates it.
         db()->prepare("DELETE FROM pmtct_followup WHERE mother_id=? AND subject=? AND month_no=? AND (infant_id <=> ?)")
             ->execute([$row['mother_id'],$row['subject']??'mother',$row['month_no']??0,$row['infant_id']??null]);
       }
-      $id2=insert($tbl,$row); audit('create',$tbl,$id2); out(['id'=>$id2],201); }
+      $id2=insert($tbl,$row);
+      // PMTCT ENROLMENT MUST REACH HER MATERNITY RECORD. Until now it did not: she was enrolled
+      // in PMTCT and her `women` row still said nothing about HIV — so at her next ANC contact
+      // the tool offered a woman on ART an HIV test, she never appeared on the high-risk
+      // worklist, and her delivery and PNC screens printed "HIV: —".
+      if($tbl==='pmtct_mothers' && !empty($row['woman_id'])){
+        db()->prepare("UPDATE women SET hiv_known_positive=1, hiv_linked_pmtct=1, art_regimen=COALESCE(NULLIF(?,''),art_regimen) WHERE id=? AND facility_id=?")
+            ->execute([$row['art_regimen']??'', (int)$row['woman_id'], $u['facility_id']]);
+      }
+      audit('create',$tbl,$id2); out(['id'=>$id2],201); }
     if($m==='PATCH' && $id){ $u=require_role($writeRoles); $b=body();
       if($hasFac){ $c=db()->prepare("SELECT id FROM `$tbl` WHERE id=? AND facility_id=?"); $c->execute([$id,$u['facility_id']]); if(!$c->fetch()) err('not in your facility',404); }
       if($pmtctChild){ $c=db()->prepare("SELECT p.id FROM `$tbl` x JOIN pmtct_mothers p ON p.id=x.mother_id WHERE x.id=? AND p.facility_id=?");
