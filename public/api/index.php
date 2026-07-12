@@ -222,16 +222,20 @@ try {
       // arrived on the labour ward with no risk flag at all. Her previous caesarean was in the
       // database the whole time, attached to an episode nobody was reading any more. Risk belongs
       // to the woman and must follow her.
-      $ancW="(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.id=av.episode_id WHERE e2.woman_id=w.id";
-      $scrW="(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.id=a.episode_id WHERE e3.woman_id=w.id";
+      // Build FULLY CLOSED EXISTS clauses. (An earlier version of this left the parentheses
+      // unbalanced, which made /api/episodes throw a SQL error and every worklist came back
+      // empty — the app looked like it had lost every patient.)
+      $ancEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.id=av.episode_id WHERE e2.woman_id=w.id AND ($cond))"; };
+      $scrEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.id=a.episode_id WHERE e3.woman_id=w.id AND ($cond))"; };
       // Severe hypertension recorded at ANC (guideline: >=160/110 is severe, and it is an
       // emergency). This was absent entirely: a BP of 170/115 at an ANC contact flagged nothing.
       $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes'"
         ." OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1"
-        ." OR EXISTS($ancW AND (av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1))"
-        ." OR EXISTS($ancW AND (av.bp_systolic>=160 OR av.bp_diastolic>=110))"
-        ." OR EXISTS($ancW AND av.urine_protein LIKE '%++%')"   // ++ or +++ — significant proteinuria
-        ." OR EXISTS($scrW AND a.response='yes'))";
+        ." OR ".$ancEx("av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1")
+        ." OR ".$ancEx("av.bp_systolic>=160 OR av.bp_diastolic>=110")
+        ." OR ".$ancEx("av.urine_protein LIKE '%++%'")           // ++ or +++ — significant proteinuria
+        ." OR ".$scrEx("a.response='yes'")
+        .")";
       // "For client X, what conditions make her high risk?" — a flag with no reason is a dead end.
       // Return the ACTUAL reasons as codes so the worklist can explain itself and state the
       // next intervention, without the provider having to open her record to guess.
