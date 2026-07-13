@@ -14,18 +14,43 @@ function clinicalFlags(o){ let band='green'; const R=[]; const up=b=>{band=escal
   if(o.sbp>=160||(o.dbp&&o.dbp>=110)){up('red');R.push('severe hypertension');} else if(o.sbp>=140){up('amber');R.push('raised BP');}
   if(o.fhr<100||o.fhr>180){up('red');R.push('severe fetal HR');} else if(o.fhr<110||o.fhr>160){up('amber');R.push('abnormal fetal HR');}
   if(o.mld>=3){up('red');R.push('severe moulding');} else if(o.mld>=2){up('amber');R.push('moulding');}
-  if(o.tmp>=38){up('amber');R.push('fever');}
+  if(o.tmp>=38.5){up('red');R.push('high fever');} else if(o.tmp>=38){up('amber');R.push('fever');}
   if(o.hrs>=6&&(o.cvx-4)/o.hrs<0.25){up('red');R.push('arrested labour');} else if(o.hrs>=4&&(o.cvx-4)/o.hrs<0.5){up('amber');R.push('protracted labour');}
   return {band,reasons:R};
 }
 // clinically-neutral defaults for features the partograph UI does not collect
-const FEAT_DEFAULTS={age:25,parity:1,ga:39,prior_cs:0,rom_hours:2,meconium:0,urine_prot:0,bleeding:0,headache:0,blurred:0,epigastric:0,clonus:0};
+// A NUMBER OR NULL — but ZERO IS A NUMBER. `+x||null` silently turns 0 into null, so a recorded
+// APGAR of 0 (a flat, white, asphyxiated newborn) or an estimated blood loss of 0 became
+// indistinguishable from "not assessed". Empty stays null; a real 0 is kept.
+function numOrNull(v){ if(v===''||v===null||v===undefined) return null; const n=+v; return Number.isNaN(n)?null:n; }
+// The model's field-missingness defaults. NOTE: age, parity, ga and prior_cs are NOT here — the
+// model was trained to impute them itself, and supplying a fixed guess (age 25, GA 39) as if it were
+// measured both defeats that and, for GA, scored every woman as term. Those come from her record or
+// are omitted so the model's own default applies.
+const FEAT_DEFAULTS={rom_hours:2,meconium:0,urine_prot:0,bleeding:0,headache:0,blurred:0,epigastric:0,clonus:0};
 // Derive real maternal features from the woman's record (falls back to neutral defaults).
 function motherFeats(W){ W=W||{};
   const out={};
   if(W.age!=null&&W.age!=='') out.age=+W.age;
   if(W.para!=null&&W.para!=='') out.parity=+W.para;
-  if(W.lnmp){ const d=(Date.now()-new Date(W.lnmp+'T00:00:00').getTime())/864e5; if(d>0&&d<310) out.ga=Math.max(24,Math.min(43,Math.round(d/7))); }
+  // GESTATIONAL AGE — from whatever the record actually holds, in priority order. It used to come
+  // ONLY from women.lnmp, which registration never captures, so out.ga was unset and the scorer fell
+  // back to a default of 39: EVERY woman was scored as term, including a 32-week preterm labour whose
+  // GA was sitting in her ANC contacts the whole time. GA is the newborn model's dominant feature.
+  //   1. LNMP if recorded (most precise);
+  //   2. the latest ANC-contact GA, advanced to today;
+  //   3. the booking GA (ga_first_contact), advanced from the first-contact date.
+  // If none exist, ga is LEFT UNSET so the model applies its own trained default rather than a term
+  // assumption dressed up as a measurement.
+  let ga=null;
+  if(W.lnmp){ const d=(Date.now()-new Date(W.lnmp+'T00:00:00').getTime())/864e5; if(d>0&&d<310) ga=d/7; }
+  if(ga==null && W.ga_now!=null && W.ga_now!=='') ga=+W.ga_now;            // latest ANC contact, pre-advanced by the caller
+  if(ga==null && W.ga_first_contact){
+    let wk=+W.ga_first_contact;
+    if(W.first_contact_date){ const wd=(Date.now()-new Date(W.first_contact_date+'T00:00:00').getTime())/864e5; if(wd>0&&wd<310) wk+=wd/7; }
+    if(wk>0) ga=wk;
+  }
+  if(ga!=null) out.ga=Math.max(24,Math.min(43,Math.round(ga)));
   if(W.prior_cs==='yes') out.prior_cs=1;
   return out;
 }
@@ -1317,7 +1342,16 @@ async function labour(){
 
 const OB={}; // per-episode in-memory observations for the chart
 async function partograph(id){
-  const [obs,W]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),epOne(id)]);
+  const [obs,W,ancv]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),epOne(id),api('GET','anc_visits?episode='+id).catch(()=>[])]);
+  // Feed motherFeats the latest ANC-contact GA (and its date), so a preterm labour is scored preterm
+  // rather than at the term default. Without this the model only ever saw women.lnmp, which is not
+  // captured at registration.
+  const lastAnc=(ancv||[]).filter(v=>v.ga_weeks!=null&&v.ga_weeks!=='').slice(-1)[0];
+  if(lastAnc){
+    let g=+lastAnc.ga_weeks;
+    if(lastAnc.visit_date){ const d=(Date.now()-new Date(lastAnc.visit_date+'T00:00:00').getTime())/864e5; if(d>0&&d<310) g+=d/7; }  // advance to today
+    W.ga_now=g;
+  }
   const MF=motherFeats(W);
   // A delivered — or closed — episode is a finished record. Read-only.
   const st=String(W.status||'').toLowerCase();
@@ -1406,7 +1440,12 @@ async function partograph(id){
     // only the form never asked). ROM hours is DERIVED from the rupture time already recorded on
     // the episode, rather than invented. Prolonged rupture is the main driver of intrapartum sepsis.
     const romH=romHrs(W.ruptured_datetime);
-    const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:o.hrs,cvx:o.cvx,cvx_rate:o.hrs>0?(o.cvx-4)/o.hrs:1,fhr:o.fhr,
+    // cvx_rate is cervical dilatation PROGRESS — it needs at least one prior point to exist. On the
+    // FIRST observation (hrs===0) nothing whatever is known about progress, so it was handed the
+    // model a fabricated 1.0 cm/h (reassuring, above-normal). cvx_rate is the model's #2 feature.
+    // Leave it UNSET at admission so the model applies its trained default rather than a made-up rate.
+    const cvxRate = o.hrs>0 ? (o.cvx-4)/o.hrs : null;
+    const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:o.hrs,cvx:o.cvx,cvx_rate:cvxRate,fhr:o.fhr,
       ctx:o.ctx,mld:mld3,meconium:mecon,sbp:o.sbp,dbp:o.dbp,pulse:o.pls,temp:o.tmp,rom_hours:romH});
     Object.keys(feat).forEach(k=>{ if(feat[k]==null||Number.isNaN(feat[k])) delete feat[k]; });
     const r=RM?RM.predict(feat):{probability:0,band:'green'};
@@ -1435,7 +1474,11 @@ async function partograph(id){
     }catch(scoreErr){ scored=false; }
     // Module 2 — adherence for this labour encounter
     renderAdh(id,{encounter:'labour',cervix_cm:o.cvx,fhr:o.fhr,bp:o.sbp,contractions:o.ctx,partograph_started:true,past_action_line:(o.hrs>4&&o.cvx<o.hrs)});
-    $('#hitl').textContent=''; $('#hrs').value=(o.hrs+1);
+    // Clear the hours box after a save — do NOT pre-fill previous+1. The monitoring schedule this
+    // screen renders demands readings every 30 min, so previous+1 records the next reading an hour
+    // ahead of reality, corrupting both hrs and the derived cvx_rate. The provider enters the actual
+    // hours in active labour each time.
+    $('#hitl').textContent=''; $('#hrs').value='';
     toast(scored?('Observation recorded'+(obsRes&&obsRes.queued?' (offline — will sync when online)':'')):'Observation saved. (The AI risk score could not be stored, but the reading is recorded.)', scored?'ok':'');
     }catch(err){ toast('Could not record the observation — '+(err.message||'error')+'. Nothing was saved.'); }
     finally{ $('#rec').disabled=false; }
@@ -1791,6 +1834,7 @@ async function checklist(id){
 }
 
 async function danger(id){
+  window._dgAck=false;                     // acknowledgement is per-open, never inherited from a prior patient
   app().innerHTML=nav()+`<div class="card"><h3>Warning-sign sheet — episode ${esc(id)}</h3>
    <p class="muted">Headache, visual disturbance, epigastric pain and brisk reflexes together are the warning that eclampsia is imminent. They are recorded here <b>and</b> passed to the intrapartum risk score.</p>
    <div class="grid">
@@ -1834,6 +1878,7 @@ async function danger(id){
 }
 
 async function delivery(id){
+  window._pphAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
   // MoH item 7 (Partograph used) is derived, not asked: Y only if maternal condition,
   // fetal condition AND progress of labour were all monitored.
   const obs=await api('GET','observations?episode='+id).catch(()=>[]);
@@ -1867,8 +1912,9 @@ async function delivery(id){
    <label>Uterine tone<select id="utn"><option value="">Not assessed</option><option value="firm">Firm</option><option value="atonic">Atonic</option></select></label>
    <label>Massage if atony<select id="umsg"><option value="">-</option><option value="done">Done</option><option value="not_needed">Not needed</option><option value="not">Not done</option></select></label>
    <label>Placenta<select id="plc"><option value="">-</option><option value="complete">Complete</option><option value="incomplete">Incomplete</option><option value="retained">Retained</option></select></label>
-   <label>Est. blood loss (ml)<input id="ebl" type="number" placeholder="ml"></label>
+   <label>Est. blood loss (ml)<input id="ebl" type="number" min="0" placeholder="ml"></label>
    </div>
+   <div id="pphwarn"></div>
    <div class="ticks" style="margin-top:8px">${tick('epis','Episiotomy performed')}</div>
 
    <details class="moh" open><summary>Obstetric complications <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
@@ -1897,13 +1943,38 @@ async function delivery(id){
    <button class="act" id="s" style="margin-top:10px">Save &amp; record the newborn</button><span class="muted" id="m"></span></div>`;
   const syncDeath=()=>{ $('#mdcw').style.display=(mo.value==='death')?'':'none'; };
   mo.addEventListener('change',syncDeath); syncDeath();
+
+  // POSTPARTUM HAEMORRHAGE — the leading cause of maternal death, and until now the one emergency
+  // the tool could not see. Blood loss >=500 ml (>=1000 for caesarean) OR an atonic uterus is PPH.
+  // It fires a red banner, ticks the MoH complication automatically, and — like the ANC, PNC and
+  // danger-sign screens — the record cannot be saved until the alert has been acknowledged once.
+  const pphCheck=()=>{
+    const ebl=numOrNull(ebl_el.value), atonic=(utn.value==='atonic');
+    const thresh=(md.value==='caesarean')?1000:500;
+    const heavy=(ebl!=null && ebl>=thresh);
+    const pph=heavy||atonic;
+    const box=$('#pphwarn');
+    if(pph){
+      box.innerHTML='<div style="background:#fcebeb;border:1px solid #d13b3b;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>POSTPARTUM HAEMORRHAGE</b> &mdash; '
+        +(heavy?('blood loss '+ebl+' ml (&ge;'+thresh+')'):'')+(heavy&&atonic?' and ':'')+(atonic?'uterus atonic':'')
+        +'. Call for help, uterotonic + uterine massage, IV access and fluids, weigh losses, and prepare to refer. This is an emergency.</div>';
+      if(!tk('cpp')){ const c=document.getElementById('cpp'); if(c) c.checked=true; }   // auto-tick the MoH PPH complication
+    } else box.innerHTML='';
+    return pph;
+  };
+  const ebl_el=$('#ebl');
+  [ebl_el, utn, md].forEach(el=>{ if(el){ el.addEventListener('input',pphCheck); el.addEventListener('change',pphCheck); } });
+
   const MOH_STATUS={well:'stable',near_miss:'stable',referred:'unstable_referred',death:'died'};
-  $('#s').onclick=async()=>{ const btn=$('#s'); btn.disabled=true;
+  $('#s').onclick=async()=>{
+    // A red PPH alert must be SEEN before the delivery can be filed.
+    if(pphCheck() && !window._pphAck){ window._pphAck=true; modal('Postpartum haemorrhage','This delivery meets the PPH criteria (blood loss threshold or atonic uterus). Manage the haemorrhage first. Press Save again to confirm you have seen this and to record it.','risk'); return; }
+    const btn=$('#s'); btn.disabled=true;
     try{
       // Newborn data goes ONLY to the babies table (created just below) — it is the single
       // source of truth and the only one that supports twins. delivery_summary no longer
       // carries a shadow copy of weight/sex/APGAR/outcome.
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:localDateTime(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:(+ebl.value||null),
+      await api('POST','delivery',{episode_id:+id,delivery_datetime:localDateTime(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:numOrNull(ebl.value),
         partograph_used:pUsed,episiotomy:tk('epis'),mode_other_text:(md.value==='other'?mot.value:null),
         maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
         comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
@@ -1914,6 +1985,7 @@ async function delivery(id){
       // weight/sex/APGAR — fields it could never complete (there is no babies PATCH), and if the
       // provider then used the Newborn screen it created a PHANTOM TWIN that inflated birth counts
       // and the MoH register. One place records a newborn: the Newborn screen, fully validated.
+      window._pphAck=false;
       $('#m').textContent=' saved'; toast('Delivery recorded — now record the newborn','ok');
       setTimeout(()=>location.hash='#baby/'+id,700);
     }catch(e){ toast('Could not save delivery — '+(e.message||'error')+'. Not saved.'); }
@@ -2147,6 +2219,7 @@ function hivCell(p){
 }
 
 async function ancVisits(id){
+  window._ancAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
   const [past,e,labs]=await Promise.all([
     api('GET','anc_visits?episode='+id).catch(()=>[]),
     epOne(id),
@@ -2299,7 +2372,10 @@ async function ancVisits(id){
   const ancAlerts=()=>{
     const A=[];
     const s=+bps.value||null, d=+bpd.value||null, up=(upEl?upEl.value:'')||'';
-    const proteinuria = /\+\+/.test(up);                      // ++ or +++
+    // ANY dipstick positive (+, ++, +++) is proteinuria. Diagnostic pre-eclampsia is BP >=140/90
+    // WITH proteinuria >=1+. The old test (/\+\+/) required ++, so a woman at 148/96 with a single +
+    // showed only "raised BP" and never reached the high-risk worklist — pre-eclampsia missed.
+    const proteinuria = up==='+' || up==='++' || up==='+++';
     const sev = (s&&s>=160) || (d&&d>=110);
     const raised = (s&&s>=140) || (d&&d>=90);
     if(sev && proteinuria) A.push(['red','SEVERE PRE-ECLAMPSIA','BP '+(s||'?')+'/'+(d||'?')+' with '+esc(up)+' proteinuria. This is an obstetric emergency. Give magnesium sulphate and an antihypertensive per protocol, and refer to a facility that can deliver her — <b>today</b>.']);
@@ -2382,6 +2458,7 @@ async function ancVisits(id){
 }
 
 async function pncVisits(id){
+  window._pncAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
   const [past,delv,bbs,WP]=await Promise.all([api('GET','pnc_visits?episode='+id).catch(()=>[]),api('GET','delivery?episode='+id).catch(()=>[]),api('GET','babies?episode='+id).catch(()=>[]),epOne(id)]);
   const dv=(delv&&delv[0])||null;
   app().innerHTML=nav()+`<div class="card"><h3>PNC follow-up visit — episode ${esc(id)}</h3>
@@ -2495,6 +2572,12 @@ async function pncVisits(id){
     else if(ms.band==='amber') A.push(['amber','MEOWS amber','Score '+ms.total+' ('+ms.parts.map(p=>esc(p.label)).join(', ')+'). Increase the frequency of observation and review her.']);
     const s=+V('bps')||null, d=+V('bpd')||null;
     if((s&&s>=160)||(d&&d>=110)) A.push(['red','Severe postpartum hypertension','BP '+(s||'?')+'/'+(d||'?')+'. Eclampsia can occur AFTER delivery. Treat and refer.']);
+    // MATERNAL FEVER / PUERPERAL SEPSIS — a standalone alert, because MEOWS alone cannot reach a band
+    // on temperature: a genuine 39°C fever scores only 2 (green) unless the pulse is also up. Puerperal
+    // sepsis is a top-three cause of maternal death and this is the screen it presents on.
+    const mt=+V('mt')||null;
+    if(mt && mt>=38.5) A.push(['red','Maternal fever — POSSIBLE PUERPERAL SEPSIS','Temperature '+mt+'°C. Look for the source (uterus, breast, wound, urine, chest), take cultures if you can, start antibiotics per protocol, and refer if she does not stabilise.']);
+    else if(mt && mt>=38) A.push(['amber','Maternal fever','Temperature '+mt+'°C. Reassess for a source of infection (endometritis, mastitis, wound, UTI) and monitor closely — a rising fever after delivery is puerperal sepsis until proven otherwise.']);
     if(V('bl')==='heavy') A.push(['red','Heavy lochia — possible secondary PPH','Assess the uterine tone, rub up a contraction, give a uterotonic and refer if bleeding continues.']);
     else if(V('bl')==='offensive') A.push(['amber','Offensive lochia — possible puerperal sepsis','Check her temperature, examine for tenderness, and treat or refer per protocol.']);
     if(V('ut')==='atonic') A.push(['red','Atonic uterus','A soft uterus after delivery is the commonest cause of postpartum haemorrhage. Rub up a contraction and give a uterotonic now.']);
@@ -2684,7 +2767,7 @@ async function babiesScreen(id){
     // and stillbirths and printed a duplicate line in the MoH delivery register.
     const editing = EDIT_BABY && EDIT_BABY.id;
     const r=await api(editing?'PATCH':'POST', editing?('babies/'+EDIT_BABY.id):'babies',
-    {episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:+wg.value||null,apgar_1min:+a1.value||null,apgar_5min:+a5.value||null,resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),
+    {episode_id:+id,birth_order:+bo.value||1,sex:sx.value,weight_g:numOrNull(wg.value),apgar_1min:numOrNull(a1.value),apgar_5min:numOrNull(a5.value),resuscitated:+rs.value,outcome:oc.value,enc_dried:(dr.value||null),enc_breathing:(brb.value||null),enc_eye_ointment:(eo.value||null),enc_cord_care:(cc.value||null),
     mrn:(nmrn.value||null),breastfeed_initiated:(+bfi.value||null),
     vitamin_k_time:(vkt.value||null),cord_care_other:(cc.value==='other'?(cco.value||null):null),
     apgar_flag:(a5.value!==''?((+a5.value<7)?'low':'normal'):null),

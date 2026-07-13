@@ -340,7 +340,7 @@ try {
         ." OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1"
         ." OR ".$ancEx("av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1")
         ." OR ".$ancEx("av.bp_systolic>=160 OR av.bp_diastolic>=110")
-        ." OR ".$ancEx("av.urine_protein LIKE '%++%'")           // ++ or +++ — significant proteinuria
+        ." OR ".$ancEx("av.urine_protein IN ('+','++','+++')")   // ANY dipstick positive is proteinuria (was '%++%', which missed 1+)
         ." OR ".$scrEx("a.response='yes'")
         .")";
       // "For client X, what conditions make her high risk?" — a flag with no reason is a dead end.
