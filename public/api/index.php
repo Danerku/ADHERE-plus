@@ -944,7 +944,13 @@ try {
   // captured record, so a facility no longer hand-writes them. Person-level items
   // (target population, HIV linkage, partner) are replayed from `women` onto every
   // row, exactly as the paper repeats them.
-  if ($r==='registers' && $m==='GET'){ $u=require_auth();
+  // THE REGISTER EXPORT IS A LINE LIST. It returns names, MRNs, HIV status, ART regimen and partner
+  // HIV result for the whole facility — the most sensitive data in the system, in one download. It
+  // was gated on require_auth() alone, so the read-only OBSERVER role could pull it, and so could a
+  // recorder whose job is registration. It is correctly scoped to the caller's own facility, so this
+  // was never a cross-facility leak — but "any account at this facility" is too wide a door for a
+  // facility-wide HIV line list.
+  if ($r==='registers' && $m==='GET'){ $u=require_role(['provider','supervisor','admin']);
     $type=$_GET['type']??'anc'; $fac=(int)$u['facility_id'];
     $from=$_GET['from']??date('Y-m-01'); $to=$_GET['to']??date('Y-m-d');
     if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$from)||!preg_match('/^\d{4}-\d{2}-\d{2}$/',$to)) err('bad date range');

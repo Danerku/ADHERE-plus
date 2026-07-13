@@ -2901,6 +2901,12 @@ const REG_COLS={
 function tickCell(k){ return r=>(r[k]==1?'✓':''); }   // renders a boolean as the paper's tick
 
 async function registersScreen(){
+  // The register export is a facility-wide line list carrying names, MRNs, HIV status and ART
+  // regimen. It is not for the read-only observer role, nor for a recorder doing registration.
+  if(!(ME.role==='provider'||ME.role==='supervisor'||ADMIN())){
+    app().innerHTML=nav()+'<div class="card"><h3>Registers</h3><p class="muted">The MoH register export carries HIV status and ART details for every woman at this facility. It is available to providers, supervisors and administrators.</p></div>';
+    return;
+  }
   const t=window._regType||'anc';
   const from=window._regFrom||localDate().slice(0,8)+'01';
   const to=window._regTo||localDate();
