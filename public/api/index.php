@@ -382,10 +382,22 @@ try {
       // The prior_* columns are here because THE RISK MODEL CONSUMES THEM. They were absent, so
       // motherFeats() read undefined and every woman was scored as having no previous caesarean —
       // the single most important intrapartum feature, pinned at zero for every patient.
-      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.height_cm,w.lnmp,w.edd, w.ga_first_contact,w.late_anc_initiation,
+      // GESTATIONAL AGE FOLLOWS THE WOMAN, NOT THE EPISODE.
+      // Her ANC contacts hang off her ANC episode. Labour is a SEPARATE episode (and the ANC one is
+      // closed when it opens), so the partograph asking for `anc_visits?episode=<labour id>` got an
+      // empty list and the GA fix never fired for the very women we hold the most data on: they fell
+      // back to the raw BOOKING GA, floored at 24 weeks, and a term labour was scored as if it were
+      // extremely preterm. Resolve her latest ANC-contact GA (and its date) BY WOMAN, right here on the
+      // episode row, so every screen gets it — and carry first_contact_date so it can be advanced.
+      $gaw = "(SELECT av.ga_weeks FROM anc_visits av JOIN episodes ex ON ex.id=av.episode_id
+                WHERE ex.woman_id=w.id AND av.ga_weeks IS NOT NULL ORDER BY av.visit_date DESC, av.id DESC LIMIT 1)";
+      $gad = "(SELECT av.visit_date FROM anc_visits av JOIN episodes ex ON ex.id=av.episode_id
+                WHERE ex.woman_id=w.id AND av.ga_weeks IS NOT NULL ORDER BY av.visit_date DESC, av.id DESC LIMIT 1)";
+      $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.height_cm,w.lnmp,w.edd, w.ga_first_contact,w.first_contact_date,w.late_anc_initiation,
               w.blood_group,w.rh_factor,w.pregnancy_planned,w.target_pop_code,w.hiv_known_positive,w.hiv_linked_art,w.art_regimen,
               w.prior_cs,w.prior_stillbirth,w.prior_pph,w.prior_preeclampsia,w.prior_obstructed,w.chronic_htn,w.diabetes,w.cardiac_renal,
               pu.full_name AS provider_name, $hr AS high_risk,
+              $gaw AS anc_ga_weeks, $gad AS anc_ga_date,
               $rc AS risk_codes, $sc AS screen_codes, $an AS anaemia, $mf AS muac_low
             FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
@@ -997,21 +1009,27 @@ try {
           d.comp_preeclampsia, d.comp_eclampsia, d.comp_aph, d.comp_pph, d.comp_other, d.referred,
           d.hiv_test_accepted, d.hiv_retest_accepted, d.hiv_test_result, d.cnsl_feeding_options,
           d.ippfp_acceptor, d.ippfp_method, d.remark AS delivery_remark";
+      // `b.*` carries the NEWBORN's mrn and $W carries the MOTHER's, so the result set holds TWO columns
+      // named `mrn`. PHP's assoc fetch resolves that (last wins = the mother's, which is what the
+      // register wants), but `ORDER BY mrn` could not: MySQL raised 1052 "column 'mrn' in order clause
+      // is ambiguous" and the WHOLE delivery register returned a 500 — the facility could not print it
+      // at all. Order by an alias that exists exactly once instead. `b.*` is kept, because the register
+      // renderer reads newborn columns (vitamin_k_time, enc_*, kmc…) straight off it.
       $st=db()->prepare(
-        "SELECT b.*, b.mrn AS mrn_baby, $DCOLS, $W
+        "SELECT b.*, b.mrn AS mrn_baby, w.mrn AS mrn_mother, $DCOLS, $W
            FROM delivery_summary d
            JOIN episodes e ON e.id=d.episode_id
            JOIN women   w ON w.id=e.woman_id
            LEFT JOIN babies b ON b.episode_id=d.episode_id
           WHERE e.facility_id=? AND DATE(d.delivery_datetime) BETWEEN ? AND ?
          UNION ALL
-         SELECT b.*, b.mrn AS mrn_baby, $DCOLS, $W
+         SELECT b.*, b.mrn AS mrn_baby, w.mrn AS mrn_mother, $DCOLS, $W
            FROM babies b
            JOIN episodes e ON e.id=b.episode_id
            JOIN women   w ON w.id=e.woman_id
            LEFT JOIN delivery_summary d ON d.episode_id=b.episode_id
           WHERE e.facility_id=? AND d.id IS NULL AND DATE(b.recorded_at) BETWEEN ? AND ?
-         ORDER BY delivery_datetime, mrn, birth_order");
+         ORDER BY delivery_datetime, mrn_mother, birth_order");
     } elseif($type==='pnc'){
       $st=db()->prepare("SELECT p.*, e.place_of_delivery, e.infant_dob, $W FROM pnc_visits p
         JOIN episodes e ON e.id=p.episode_id JOIN women w ON w.id=e.woman_id
