@@ -42,9 +42,8 @@ function motherFeats(W){ W=W||{};
   //   3. the booking GA (ga_first_contact), advanced from the first-contact date.
   // If none exist, ga is LEFT UNSET so the model applies its own trained default rather than a term
   // assumption dressed up as a measurement.
-  // Advance a GA that was measured on some earlier DATE forward to today. A GA is only ever true as of
-  // the day it was taken; using it raw is how a woman booked at 10 weeks got scored as a 10-week
-  // (clamped to 24) labour.
+  // Advance a GA measured on an earlier DATE forward to today. A GA is only true as of the day it was
+  // taken; using it raw is how a woman booked at 10 weeks got scored as a 10-week (clamped to 24) labour.
   const advance=(weeks, fromDate)=>{
     let wk=+weeks; if(!(wk>0)) return null;
     if(fromDate){ const d=(Date.now()-new Date(String(fromDate).slice(0,10)+'T00:00:00').getTime())/864e5;
@@ -53,12 +52,12 @@ function motherFeats(W){ W=W||{};
   };
   let ga=null;
   if(W.lnmp){ const d=(Date.now()-new Date(W.lnmp+'T00:00:00').getTime())/864e5; if(d>0&&d<310) ga=d/7; }
-  if(ga==null && W.anc_ga_weeks!=null && W.anc_ga_weeks!=='') ga=advance(W.anc_ga_weeks, W.anc_ga_date);   // latest ANC contact, BY WOMAN (from the server)
-  if(ga==null && W.ga_now!=null && W.ga_now!=='')             ga=+W.ga_now;                                 // a caller that already advanced it
+  if(ga==null && W.anc_ga_weeks!=null && W.anc_ga_weeks!=='') ga=advance(W.anc_ga_weeks, W.anc_ga_date);  // latest ANC contact, BY WOMAN
+  if(ga==null && W.ga_now!=null && W.ga_now!=='')             ga=+W.ga_now;
   if(ga==null && W.ga_first_contact)                          ga=advance(W.ga_first_contact, W.first_contact_date);
-  // A GA outside 24-43 is not a measurement we can trust — usually a stale booking GA that was never
-  // advanced. Leave it UNSET rather than clamping it to 24, which told the model "extremely preterm"
-  // about a woman who was simply booked early. An omitted feature gets the model's trained default.
+  // A GA outside 24-43 is not a measurement we can trust - usually a stale booking GA that was never
+  // advanced. Leave it UNSET rather than CLAMPING it to 24, which told the model "extremely preterm"
+  // about a woman who was merely booked early. An omitted feature gets the model's trained default.
   if(ga!=null){ const r=Math.round(ga); if(r>=24 && r<=43) out.ga=r; }
   if(W.prior_cs==='yes') out.prior_cs=1;
   return out;
@@ -127,7 +126,7 @@ function qRead(){
     if(!Array.isArray(a)) return [];
     // SELF-HEAL. Devices in the field may already hold queued `login` attempts from the build that
     // wrongly treated authentication as a deferrable write. Such an entry can never do anything useful
-    // — it just sits there reporting "pending" for ever, and replaying an old password is not something
+    // - it just sits there reporting "pending" for ever, and replaying an old password is not something
     // we would ever want to do. Drop them on sight; every clinical record is untouched.
     const clean=a.filter(x=>!isAuthPath(x&&x.path));
     if(clean.length!==a.length){ try{ localStorage.qq=JSON.stringify(clean); }catch(e){} }
@@ -337,9 +336,9 @@ function queueWrite(method,path,bodyObj,cid){
     // produced duplicates. Store ONE local record per element instead.
     const coll=CREATES[seg[0]];
     if(Array.isArray(bodyObj)){
-      // Mint a local id per row, but QUEUE FIRST — if the outbox cannot be persisted (quota) queue()
-      // throws and we must not be left holding N local rows with no way to ever send them, which the
-      // UI would still show as recorded. Same order as the single-object path below.
+      // Mint a local id per row, but QUEUE FIRST - if the outbox cannot be persisted (quota) queue()
+      // throws, and we must not be left holding N local rows with no way to ever send them while the UI
+      // still shows them as recorded. Same order as the single-object path below.
       const ids=bodyObj.map(()=>newLocalId());
       queue({method,path,bodyObj,cid,tmp:ids[0],tmps:ids});   // tmps: ALL of them, so ALL get reconciled
       bodyObj.forEach((row,i)=>locAdd(Object.assign({}, row||{}, {id:ids[i], _coll:coll, _local:1, _at:localDateTime()})));
@@ -387,23 +386,15 @@ function unresolvedRefs(v,m,acc){
 // Is this local-id parent still coming? True if some queued item will CREATE it (its tmp), so a
 // child that references it can wait. If nothing in the queue will ever produce it, the child is an
 // orphan and must be surfaced rather than looped on forever.
-// ...but only if the CURRENT user can actually send it. flush() skips items queued by another user
+// ...but only a parent the CURRENT user can actually send. flush() skips items queued by another user
 // (they replay when that user signs back in). If the parent belongs to user A and the child to user B,
-// B's flush would see A's parent still sitting in the queue, conclude "not an orphan", and wait — for
-// ever. B's clinical record was never sent, never failed, never shown. On a shared tablet (the normal
-// case in these facilities) that is silent, permanent loss. A parent B cannot send is, from B's point
-// of view, not coming.
+// B's flush saw A's parent still in the queue, concluded "not an orphan", and waited - for ever. B's
+// clinical record was never sent, never failed, never shown. On a shared tablet (the normal case here)
+// that is silent, permanent loss. A parent B cannot send is, from B's point of view, not coming.
 function parentStillComing(tmpId, cur){
   return qRead().some(it=>String(it.tmp)===String(tmpId) && !(it.by && it.by!==cur));
 }
 
-// AUTHENTICATION IS NOT A CLINICAL RECORD AND MUST NEVER BE QUEUED.
-// `write = method!=='GET'` meant a LOGIN — a POST — was treated like a patient record: if it was slow
-// or blipped, api() "helpfully" queued it for later and returned {queued:true}. That reply carries no
-// user, so the app never actually signed anyone in; it just said the session had expired, and the next
-// attempt was queued too. The provider was locked out of the tool entirely, with a badge cheerfully
-// reporting "3 pending". Replaying a stale password later is also plainly wrong. Auth calls go to the
-// network or they FAIL LOUDLY — they are never deferred.
 // A hoisted declaration, not a const arrow: qRead() is defined far earlier in the file and calls this
 // to self-heal a poisoned queue, so it must exist regardless of evaluation order.
 function isAuthPath(p){
@@ -411,10 +402,16 @@ function isAuthPath(p){
   return base==='login' || base==='logout' || base==='change_password';
 }
 
+// AUTHENTICATION IS NOT A CLINICAL RECORD AND MUST NEVER BE QUEUED.
+// `write = method!=='GET'` meant a LOGIN - a POST - was treated like a patient record: if it was slow
+// or blipped, api() "helpfully" queued it and returned {queued:true}. That reply carries no user, so the
+// app never actually signed anyone in; it just said the session had expired, and the next attempt was
+// queued too. The provider was locked out of the tool entirely while the badge reported "3 pending".
+// Replaying a stale password later is also plainly wrong. Auth reaches the network or FAILS LOUDLY.
 async function api(method, path, bodyObj){
   const auth=isAuthPath(path);
   const write=method!=='GET';
-  const queueable=write && !auth;                                 // auth is NEVER deferred
+  const queueable=write && !auth;                       // auth is NEVER deferred
   const cid=queueable?newCid():null;   // stable key: a replay cannot double-commit
 
   // A record that has not synced yet lives only on this device. Never ask the server about it — it
@@ -428,7 +425,7 @@ async function api(method, path, bodyObj){
     const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
     res=await tfetch(API_BASE+'api/'+path,{method,headers,
       credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined},
-      auth?25000:undefined);        // signing in is worth waiting longer for than a worklist refresh
+      auth?25000:undefined);      // signing in is worth waiting longer for than a worklist refresh
   }catch(e){
     // No HTTP response at all: airplane mode, DNS failure, connection refused, mobile data with
     // no route. Nothing reached the server, so the entry is safe to queue and replay.
@@ -446,8 +443,8 @@ async function api(method, path, bodyObj){
   // queued when it had NOT resolved — so a 502, a captive portal and an expired session each threw
   // the observation away while telling the provider her entries were "still queued". They were not.
   if(res.status===401){
-    // On a LOGIN, 401 means "wrong username or password" — not "your session expired". Signing the
-    // user out here (and queueing the attempt) is what created the lock-out loop.
+    // On a LOGIN, 401 means "wrong username or password" - NOT "your session expired". Signing the user
+    // out here (and queueing the attempt) is what created the lock-out loop.
     if(auth){ const d=await res.json().catch(()=>({})); throw new Error((d&&d.error)||'Incorrect username or password.'); }
     if(queueable){ const r=queueWrite(method,path,bodyObj,cid); sessionLost(); return r; }
     sessionLost(); throw new Error('Your session has expired — please sign in again.');
@@ -557,12 +554,12 @@ async function flush(){
           // against the server's list by id, so she shows exactly once, continuously; and locPrune()
           // retires the local copy the moment a fresh server response actually contains her.
           if(real){ idmapPut(it.tmp, real); locReconcile(it.tmp, real); }
-          // An ARRAY create (the ANC risk screening, the checklist, BEmONC) makes one local row PER
-          // ITEM. Only ids[0] used to be reconciled, so the other thirty rows kept `_local:1` for ever:
-          // locPrune (which only retires _synced rows) never touched them, mergeLocal kept appending
-          // them to every later GET, and because they land LAST they OVERWROTE the server's current
-          // answer — so a screening item corrected by anyone still showed the stale offline answer on
-          // this device, and re-saving pushed the stale answer back to the server. Reconcile them all.
+          // An ARRAY create (ANC risk screening, checklist, BEmONC) makes one local row PER ITEM. Only
+          // ids[0] used to be reconciled, so the other thirty kept `_local:1` for ever: locPrune (which
+          // only retires _synced rows) never touched them, mergeLocal kept appending them to every later
+          // GET, and because they land LAST they OVERWROTE the server's current answer - so an item
+          // corrected by anyone still showed the stale offline answer here, and re-saving pushed the
+          // stale answer back to the server. Reconcile them all.
           if(Array.isArray(it.tmps) && Array.isArray(d && d.ids)){
             it.tmps.forEach((t,i)=>{ const rid=d.ids[i];
               if(rid!==undefined && rid!==null){ idmapPut(t, rid); locReconcile(t, rid); } });
@@ -1157,11 +1154,11 @@ function muacFlag(m){ return (+m>0 && +m<23); }
 function bmiCalc(kg,cm){ kg=+kg; cm=+cm; if(!kg||!cm) return null; return Math.round((kg/Math.pow(cm/100,2))*10)/10; }
 function bmiFlag(b){ if(!b) return ''; if(b<18.5) return 'underweight'; if(b>25) return 'overweight'; return 'normal'; }
 // A modal the user must acknowledge — a toast is too easy to miss for a risk flag.
-// The safety modals — IMMINENT ECLAMPSIA, newborn danger signs, PPH — are the most important dialogs
-// in the app, and every one of them passes formatting (<b>, <br>) in its body. modal() ran esc() over
-// the whole thing, so the provider was shown the literal characters "<b>IMMINENT ECLAMPSIA</b><br>She
-// has: ..." instead of a legible warning. Escape EVERYTHING (so a patient's name can never inject
-// markup), then re-enable only the handful of harmless formatting tags the callers actually use.
+// The safety modals - IMMINENT ECLAMPSIA, newborn danger signs, PPH - are the most important dialogs in
+// the app, and every one passes formatting (<b>, <br>) in its body. modal() ran esc() over the whole
+// thing, so the provider was shown the literal characters "<b>IMMINENT ECLAMPSIA</b><br>She has: ..."
+// instead of a legible warning. Escape EVERYTHING (a patient's name can never inject markup), then
+// re-enable only the handful of harmless formatting tags the callers actually use.
 function safeHtml(s){
   return esc(String(s==null?'':s))
     .replace(/&lt;(\/?)(b|i|em|strong|br|ul|ol|li|p)\s*\/?&gt;/gi, (m,slash,tag)=>'<'+slash+tag.toLowerCase()+'>');
@@ -1547,8 +1544,8 @@ const OB={}; // per-episode in-memory observations for the chart
 async function partograph(id){
   const [obs,W]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),epOne(id)]);
   // GA now arrives ON the episode row (anc_ga_weeks / anc_ga_date), resolved BY WOMAN by the server.
-  // It used to be fetched with `anc_visits?episode=<this episode>` — but her ANC contacts belong to her
-  // ANC episode, and labour is a different episode, so that always came back EMPTY and the GA fix never
+  // It used to be fetched with `anc_visits?episode=<this episode>` - but her ANC contacts belong to her
+  // ANC episode and labour is a DIFFERENT episode, so that always came back EMPTY and this fix never
   // actually fired for any woman who had booked ANC here. motherFeats() advances it to today.
   const MF=motherFeats(W);
   // A delivered — or closed — episode is a finished record. Read-only.
@@ -2157,8 +2154,8 @@ async function delivery(id){
         +(heavy?('blood loss '+ebl+' ml (&ge;'+thresh+')'):'')+(heavy&&atonic?' and ':'')+(atonic?'uterus atonic':'')
         +'. Call for help, uterotonic + uterine massage, IV access and fluids, weigh losses, and prepare to refer. This is an emergency.</div>';
     } else box.innerHTML='';
-    // Keep the MoH PPH complication IN STEP with the criteria, in both directions. It used to only ever
-    // be ticked ON: type 1500 ml, notice the typo, correct it to 150 — and comp_pph=1 was still filed,
+    // Keep the MoH PPH complication IN STEP with the criteria, in BOTH directions. It used to only ever
+    // be ticked ON: type 1500 ml, notice the typo, correct it to 150 - and comp_pph=1 was still filed,
     // inflating the facility's PPH rate with a haemorrhage that never happened.
     const c=document.getElementById('cpp'); if(c) c.checked=pph;
     return pph;
@@ -2585,10 +2582,10 @@ async function ancVisits(id){
     else if(raised) A.push(['amber','Raised blood pressure','BP '+(s||'?')+'/'+(d||'?')+'. Repeat after rest, check urine protein, and review at every contact. Calcium supplementation is indicated.']);
     else if(proteinuria) A.push(['amber','Proteinuria','Urine protein '+esc(up)+' with a normal BP. Recheck the BP, exclude urinary infection, and review at the next contact.']);
     // FHR 0 means NO FETAL HEART HEARD. `+fhr.value||null` turned that into "not assessed" and the
-    // `if(f && ...)` guard then skipped the alert entirely — the single most important thing this
-    // screen can find, and it was silent.
+    // `if(f && ...)` guard then skipped the alert entirely - the single most important thing this screen
+    // can find, and it was silent.
     const f=numOrNull(fhr.value);
-    if(f===0) A.push(['red','NO FETAL HEART HEARD','No fetal heart rate detected. Confirm with a second method now (Doppler/ultrasound if available). If the fetal heart is genuinely absent, this may be an intrauterine fetal death — refer urgently and do not send her home.']);
+    if(f===0) A.push(['red','NO FETAL HEART HEARD','No fetal heart rate detected. Confirm now with a second method (Doppler/ultrasound if available). If the fetal heart is genuinely absent this may be an intrauterine fetal death — refer urgently and do not send her home.']);
     else if(f && (f<110||f>160)) A.push([(f<100||f>180)?'red':'amber','Abnormal fetal heart rate',f+' bpm (normal 110–160). '+((f<100||f>180)?'This is severely abnormal — reassess immediately and refer.':'Reassess after rest and repeat. If it persists, refer.')]);
     const fmv=(fmEl?fmEl.value:'');
     if(fmv==='absent') A.push(['red','No fetal movement','She reports NO fetal movements. Confirm the fetal heart immediately. If absent, refer urgently.']);
@@ -3013,11 +3010,11 @@ async function vitalsScreen(id){
    <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th><th>MEOWS</th></tr>
     ${hist}
    </table></div>`;
-  // MEOWS ALONE CANNOT RAISE A BAND ON A SINGLE DERANGED VITAL. Temperature caps at 2 points and the
-  // amber threshold is 3, so a woman at 40.0 °C with everything else normal scored 2 = GREEN, on the
-  // one screen whose entire purpose is spotting maternal deterioration — and this screen showed no
-  // alerts at all, only the score. The same standalone red flags the ANC/PNC screens already carry now
-  // fire here too. Sepsis and severe hypertension are the two that kill quietly.
+  // MEOWS ALONE CANNOT RAISE A BAND ON ONE DERANGED VITAL. Temperature caps at 2 points and amber needs
+  // 3, so a woman at 40.0 C with everything else normal scored 2 = GREEN, on the one screen whose whole
+  // purpose is spotting maternal deterioration - and this screen showed no alerts at all, only a score.
+  // The same standalone red flags the ANC/PNC screens carry now fire here. Sepsis and severe
+  // hypertension are the two that kill quietly.
   const vitalAlerts=()=>{
     const A=[]; const s=+bps.value||null, d=+bpd.value||null, t=+tp.value||null, p=+pl.value||null, o=+sp.value||null;
     if((s&&s>=160)||(d&&d>=110)) A.push(['red','SEVERE HYPERTENSION','BP '+(s||'?')+'/'+(d||'?')+' — at or above 160/110. Treat and refer urgently. Check for proteinuria and for signs of imminent eclampsia.']);
@@ -3025,7 +3022,7 @@ async function vitalsScreen(id){
     if(t&&t>=38.5) A.push(['red','Maternal fever — POSSIBLE SEPSIS','Temperature '+t+'°C. Look for the source (uterus, breast, wound, urine, chest), start antibiotics per protocol, and refer if she does not stabilise.']);
     else if(t&&t>=38) A.push(['amber','Maternal fever','Temperature '+t+'°C. Reassess for a source of infection and monitor closely.']);
     else if(t&&t<36) A.push(['red','Hypothermia','Temperature '+t+'°C. In a sick woman this is an ominous sign — assess for sepsis and shock.']);
-    if(p&&p>=120) A.push(['red','Tachycardia','Pulse '+p+'. With a normal or falling BP this is compensated shock — look for bleeding and sepsis.']);
+    if(p&&p>=120) A.push(['red','Tachycardia','Pulse '+p+'. With a normal or falling BP this is compensated shock — look for bleeding and for sepsis.']);
     if(o&&o<95) A.push([(o<92?'red':'amber'),'Low oxygen saturation','SpO2 '+o+'%. Give oxygen and find the cause.']);
     return A;
   };
@@ -3634,4 +3631,783 @@ function alertBox(tone,title,text){
 
 async function pmtctScreen(){
   const rows=await api('GET','pmtct').catch(()=>[]);
-  const need=
+  const need=(rows||[]).filter(pmtctNeedsAction).length;
+  app().innerHTML=nav()+`<div class="card"><h3>PMTCT</h3>
+   <p class="muted">Preventing mother-to-child transmission. Every HIV-positive mother and her exposed infant are followed as a cohort from enrolment until the infant&rsquo;s HIV status is finally known.</p>
+   ${need?alertBox('amber',need+' mother'+(need>1?'s':'')+' need action',
+      'Something is outstanding in their cascade &mdash; not on ART, a detectable viral load, an infant not yet tested, or lost to follow-up. Open each one to see what.'):''}
+   <button class="act" id="pnew">Enrol a mother</button>
+   <table style="margin-top:10px"><tr><th></th><th>ART no.</th><th>Name</th><th>Age</th><th>Enrolled</th><th>On ART</th><th>Viral load</th><th>Infants</th><th>EID</th><th>Status</th><th></th></tr>
+    ${(rows||[]).map(m=>{
+      const vl=m.last_vl||'';
+      const vlPill = vl==='undetectable' ? '<span class="pill green">Undetectable</span>'
+                   : vl==='detectable'   ? '<span class="pill red">Detectable</span>'
+                   : '<span class="pill amber">Not done</span>';
+      const nI=+m.infant_count||0, nP=+m.pcr_done||0, nPos=+m.pcr_pos||0;
+      // A POSITIVE infant is never "green — tested". It is the worst outcome in the module.
+      const eid = nPos ? '<span class="pill red">'+nPos+' HIV POSITIVE</span>'
+                : !nI ? '<span class="muted">—</span>'
+                : nP>=nI ? '<span class="pill green">'+nP+'/'+nI+' tested</span>'
+                : '<span class="pill amber">'+nP+'/'+nI+' tested</span>';
+      return `<tr><td>${pmtctNeedsAction(m)?'<span title="Something is outstanding — open her">&#9888;&#65039;</span>':''}</td>
+       <td>${esc(m.art_number||'—')}</td><td>${esc(m.name||'')}</td><td>${esc(m.age||'')}</td>
+       <td>${esc(m.booking_date||'')}</td>
+       <td>${onArt(m)?'<span class="pill green">Yes</span>':'<span class="pill red">No</span>'}</td>
+       <td>${vlPill}</td><td>${nI||'<span class="muted">—</span>'}</td><td>${eid}</td>
+       <td>${m.last_status==='ltf'?'<span class="pill red">LTF</span>':(m.last_status==='died'?'<span class="pill red">Died</span>':(m.last_status==='transferred_out'?'<span class="pill">TO</span>':'<span class="pill green">Active</span>'))}</td>
+       <td><a class="nav" href="#pmtctclient/${m.id}">Open</a></td></tr>`;}).join('')
+      ||'<tr><td colspan=11 class=muted>No mothers enrolled in PMTCT yet.</td></tr>'}
+   </table></div>
+   <div id="pmform"></div>`;
+  $('#pnew').onclick=()=>pmtctNewForm();
+}
+
+function pmtctNewForm(){
+  $('#pmform').innerHTML=`<div class="card"><h3>Enrol a mother in PMTCT</h3>
+   <p class="muted">If she is already registered for maternity care, link her record &mdash; her delivery and her newborn then flow into the PMTCT cohort automatically instead of being typed twice.</p>
+   <div class="grid">
+    <label>Link her maternity record (MRN or name)<input id="pmq" placeholder="type to search — optional"></label>
+    <label>&nbsp;<select id="pmw"><option value="">— not linked / not registered —</option></select></label>
+   </div>
+   <div class="grid">
+    <label>Mother&rsquo;s name<input id="pmnm"></label>
+    <label>MRN<input id="pmmrn"></label>
+    <label>Age<input id="pmage" type="number" min="10" max="60"></label>
+    <label>ART unique ID number<input id="pmart" placeholder="e.g. 03/09/001/00001"></label>
+    ${ecPicker('pmbk','Booking date',true)}
+   </div>
+   <p class="muted" style="font-size:12px;margin:-2px 0 8px">ART number is region / facility type / facility / patient. Facility type: 08 = hospital, 09 = health centre.</p>
+
+   <h4 style="margin:12px 0 4px">How did she enter PMTCT?</h4>
+   <p class="muted" style="font-size:12px;margin:0 0 6px">She is either newly diagnosed here, or she came in already knowing she is positive. It cannot be both.</p>
+   <div class="grid">
+    <label>Newly diagnosed &amp; started on ART<select id="pmnd"><option value="">— not newly diagnosed —</option>${selOpts(PM_ENTRY).replace(/^<option value="">.*?<\/option>/,'')}</select></label>
+    <label>Known HIV positive<select id="pmkp"><option value="">— not previously known —</option>${selOpts(PM_KNOWN).replace(/^<option value="">.*?<\/option>/,'')}</select></label>
+   </div>
+   <div id="pmentrywarn"></div>
+
+   <h4 style="margin:12px 0 4px">Antenatal</h4>
+   <div class="grid">
+    ${ecPicker('pmlnmp','LNMP')}
+    ${ecPicker('pmedd','EDD')}
+    <label>Gestational age (weeks)<input id="pmga" type="number" min="0" max="45"></label>
+    <label>Ferrous sulfate / folic acid given<select id="pmifa">${selOpts([['Y','Yes'],['N','No']])}</select></label>
+    <label>Syphilis test result<select id="pmsyph">${selOpts([['R','Reactive'],['NR','Non-reactive'],['ND','Not done']])}</select></label>
+    <label>Selected infant feeding option<select id="pmfeed">${selOpts(PM_FEED)}</select></label>
+   </div>
+   <div id="pmfeedwarn"></div>
+
+   <h4 style="margin:12px 0 4px">HIV care</h4>
+   <div class="grid">
+    <label>Initial CD4 count<input id="pmcd4" placeholder="value, or ND"></label>
+    <label>WHO clinical stage<select id="pmwho">${selOpts([[1,'Stage 1'],[2,'Stage 2'],[3,'Stage 3'],[4,'Stage 4']])}</select></label>
+    <label>Cotrimoxazole (CPT) started<select id="pmcpt">${selOpts([['Y','Yes'],['N','No']])}</select></label>
+    ${ecPicker('pmarts','Date ART initiated')}
+    <label>Initial ART regimen<input id="pmreg" placeholder="e.g. TDF/3TC/DTG"></label>
+   </div>
+
+   <h4 style="margin:12px 0 4px">TB screening</h4>
+   <div class="grid">
+    <label>TB symptom screening<select id="pmtb">${selOpts(PM_PN)}</select></label>
+    ${ecPicker('pminh','Date INH prophylaxis started')}
+    ${ecPicker('pmtbrx','Date TB treatment started')}
+    <label>Unit TB number<input id="pmtbn"></label>
+   </div>
+
+   <h4 style="margin:12px 0 4px">Partner</h4>
+   <div class="grid">
+    <label>Partner HIV result<select id="pmpr">${selOpts(PM_PN)}</select></label>
+    ${tpSel('pmptp','Partner target population category')}
+   </div>
+   <div class="ticks">${tick('pmpa','Partner accepted HIV testing')}${tick('pmpl','HIV-positive partner linked to ART')}</div>
+
+   <div class="ticks" style="margin-top:8px">${tick('pmccd','Counselled on care for child development')}${tick('pmnut','Counselled on nutrition')}</div>
+   <label>Remark<input id="pmrmk"></label>
+   <button class="act" id="pmsave" style="margin-top:10px">Enrol mother</button> <span class="muted" id="pmm"></span></div>`;
+
+  // Linking her maternity record fills in what we already know, rather than asking twice.
+  let wfound=[];
+  $('#pmq').addEventListener('input',async()=>{ const q=pmq.value.trim(); if(q.length<2) return;
+    wfound=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
+    pmw.innerHTML='<option value="">— not linked / not registered —</option>'+(wfound||[]).map(w=>
+      `<option value="${w.id}">${esc(w.mrn||'')} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
+  $('#pmw').addEventListener('change',()=>{ const w=(wfound||[]).find(x=>x.id==pmw.value); if(!w) return;
+    pmnm.value=((w.first_name||'')+' '+(w.father_name||'')).trim(); pmmrn.value=w.mrn||''; pmage.value=w.age||'';
+    if(w.lnmp) ecSet('pmlnmp',w.lnmp); if(w.edd) ecSet('pmedd',w.edd);
+    if(w.art_regimen) pmreg.value=w.art_regimen;
+    // She is in the maternity record as a known HIV-positive woman: that IS her entry point.
+    if(String(w.hiv_known_positive)==='1' && !$('#pmnd').value && !$('#pmkp').value){ $('#pmkp').value= w.art_regimen?'1':'2'; entryChk(); }
+  });
+
+  const entryChk=()=>{ const nd=$('#pmnd').value, kp=$('#pmkp').value;
+    $('#pmentrywarn').innerHTML = (nd&&kp)
+      ? alertBox('red','These two cannot both be true','She is either newly diagnosed at this visit, or she came in already knowing she is HIV positive. Choose one and clear the other.')
+      : (!nd&&!kp) ? alertBox('amber','Entry point not recorded','Record how she entered PMTCT — it is what the whole cohort is counted by.') : ''; };
+  $('#pmnd').addEventListener('change',entryChk); $('#pmkp').addEventListener('change',entryChk);
+  const feedChk=()=>{ $('#pmfeedwarn').innerHTML=($('#pmfeed').value==='MF')
+    ? alertBox('red','Mixed feeding carries the highest transmission risk','Of the three options, mixed feeding is the most dangerous for the infant. Counsel her towards exclusive breastfeeding or exclusive replacement feeding.') : ''; };
+  $('#pmfeed').addEventListener('change',feedChk);
+
+  $('#pmsave').onclick=async()=>{ const b=$('#pmsave'); if(b.disabled) return; b.disabled=true;
+    try{
+      if(!pmnm.value.trim()){ modal('Name required','Enter the mother&rsquo;s name.'); return; }
+      const nd=$('#pmnd').value, kp=$('#pmkp').value;
+      if(nd&&kp){ modal('Entry point conflicts','She cannot be both newly diagnosed and previously known positive. Choose one.'); return; }
+      if(!nd&&!kp){ modal('Entry point required','Record whether she was newly diagnosed here (and where), or came in already known to be HIV positive. The whole PMTCT cohort is counted by this.'); return; }
+      if(pmart.value && !/^\d{2}\/\d{2}\/\d{3}\/\d{4,6}$/.test(pmart.value.trim())){
+        modal('Check the ART number','It should look like <b>03/09/001/00001</b> — region / facility type / facility / patient. Correct it, or clear it and add it later.'); return; }
+      const r=await api('POST','pmtct',{woman_id:(+pmw.value||null),name:pmnm.value,mrn:(pmmrn.value||null),age:(+pmage.value||null),
+        art_number:(pmart.value.trim()||null),booking_date:ecGet('pmbk'),
+        newly_diagnosed:(nd?+nd:null),known_positive:(kp?+kp:null),
+        lnmp:ecGet('pmlnmp'),edd:ecGet('pmedd'),ga_weeks:(+pmga.value||null),
+        ifa_provided:(pmifa.value||null),syphilis_result:(pmsyph.value||null),feeding_option:(pmfeed.value||null),
+        cd4_count:(pmcd4.value||null),who_stage:(+pmwho.value||null),cpt_started:(pmcpt.value||null),
+        art_start_date:ecGet('pmarts'),art_regimen:(pmreg.value||null),
+        tb_screening:(pmtb.value||null),inh_start_date:ecGet('pminh'),tb_rx_date:ecGet('pmtbrx'),tb_unit_number:(pmtbn.value||null),
+        partner_accepted:tk('pmpa'),partner_result:(pmpr.value||null),partner_target_pop:(pmptp.value||null),partner_linked_art:tk('pmpl'),
+        cnsl_ccd:(tk('pmccd')?'Y':'N'),cnsl_nutrition:(tk('pmnut')?'Y':'N'),remark:(pmrmk.value||null)});
+      if(r&&r.id){ toast('Enrolled in PMTCT','ok'); location.hash='#pmtctclient/'+r.id; return; }  // leave disabled: we are navigating away
+      $('#pmm').textContent=' '+((r&&r.error)||'error'); b.disabled=false;
+    }catch(e){ b.disabled=false; modal('Could not enrol her',esc(e.message||'error')); } };
+}
+
+async function pmtctClient(id){
+  // Fetch HER record by id. This used to pick her out of the LIMIT-300 list, so past 300
+  // mothers she came back as {} — a blank chart showing a false "not on ART" alert, whose
+  // Save button then wrote nine NULLs over her real delivery record.
+  let m=null;
+  try{ m=await api('GET','pmtct/'+id); }catch(e){ m=null; }
+  if(!m || !m.id){
+    app().innerHTML=nav()+`<div class="card"><h3>PMTCT record not found</h3>
+      <p class="muted">This record could not be loaded — it may belong to another facility, or it may have been removed. Nothing has been changed.</p>
+      <a class="nav" href="#pmtct">&lsaquo; Back to PMTCT</a></div>`;
+    return;
+  }
+  const [infants,fu]=await Promise.all([
+    api('GET','pmtct_infants?mother='+id).catch(()=>[]),
+    api('GET','pmtct_fu?mother='+id).catch(()=>[])]);
+
+  // If she is linked to her maternity record, pull the newborns that were actually delivered
+  // here. An exposed baby recorded in the delivery room must not have to be typed again to
+  // exist in the PMTCT cohort — that gap is exactly how exposed infants get lost.
+  let borne=[];
+  if(m.woman_id){
+    try{
+      const hers=(await api('GET','episodes?woman='+m.woman_id)||[]).filter(e=>e.service_category==='labour');
+      const sets=await Promise.all(hers.map(e=>api('GET','babies?episode='+e.id).catch(()=>[])));
+      borne=[].concat(...sets.map(s=>s||[]));
+    }catch(e){}
+  }
+  const enrolled=new Set((infants||[]).map(i=>+i.baby_id).filter(Boolean));
+  const unlinked=borne.filter(b=>!enrolled.has(+b.id) && b.outcome==='live_birth');
+
+  const alerts=pmtctAlerts(m,infants);
+  const mfu=(fu||[]).filter(f=>f.subject==='mother').sort((a,b)=>a.month_no-b.month_no);
+  const nextMonth=(mfu.length?Math.max(...mfu.map(f=>+f.month_no))+1:0);
+  const fuSub=window._pmFuSub||'mother';
+  const entry = String(m.known_positive)==='1' ? 'Known positive — on ART at entry'
+              : String(m.known_positive)==='2' ? 'Known positive — not on ART at entry'
+              : (PM_ENTRY.find(x=>x[0]===String(m.newly_diagnosed))||[,'—'])[1];
+
+  app().innerHTML=nav()+`<div class="card">
+   <h3>${esc(m.name||'PMTCT client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(m.art_number||m.mrn||'')}</span></h3>
+   <p class="muted">${esc(m.age||'?')} yrs · enrolled ${esc(m.booking_date||'—')} · ${entry.replace(/&amp;/g,'&')}
+     ${m.art_regimen?' · '+esc(m.art_regimen):''} ${m.feeding_option?' · feeding: '+esc(m.feeding_option):''}</p>
+   <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+     <span class="pill ${onArt(m)?'green':'red'}">${onArt(m)?'On ART':'Not on ART'}</span>
+     <span class="pill ${m.last_vl==='undetectable'?'green':(m.last_vl==='detectable'?'red':'amber')}">Viral load: ${esc(m.last_vl||'not done')}</span>
+     <span class="pill">${(infants||[]).length} exposed infant(s)</span>
+     ${m.tb_screening?`<span class="pill ${m.tb_screening==='P'?'red':''}">TB screen: ${esc(m.tb_screening)}</span>`:''}
+   </div>
+   <a class="nav" href="#pmtct">&lsaquo; Back to PMTCT</a></div>
+
+   ${alerts.length?`<div class="card"><h3>What needs to happen next</h3>
+     ${alerts.map(a=>alertBox(a[0],a[1],a[2])).join('')}</div>`:
+     `<div class="card"><h3>What needs to happen next</h3>
+       <div style="background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;font-size:13px">Nothing outstanding. She is on ART, her viral load is recorded, and every enrolled infant has been tested.</div></div>`}
+
+   <div class="card"><h3>HIV care</h3>
+    <p class="muted">Everything here can change after enrolment &mdash; she starts ART, she switches feeding option, her TB treatment begins. Record it as it happens.</p>
+    <div class="grid">
+     ${ecPicker('cart','Date ART initiated',false,m.art_start_date)}
+     <label>ART regimen<input id="creg" value="${esc(m.art_regimen||'')}" placeholder="e.g. TDF/3TC/DTG"></label>
+     <label>Infant feeding option<select id="cfeed">${selOpts(PM_FEED,m.feeding_option)}</select></label>
+     <label>Cotrimoxazole (CPT) started<select id="ccpt">${selOpts([['Y','Yes'],['N','No']],m.cpt_started)}</select></label>
+     <label>Initial CD4 count<input id="ccd4" value="${esc(m.cd4_count||'')}" placeholder="value, or ND"></label>
+     <label>WHO clinical stage<select id="cwho">${selOpts([[1,'Stage 1'],[2,'Stage 2'],[3,'Stage 3'],[4,'Stage 4']],m.who_stage)}</select></label>
+     <label>TB symptom screening<select id="ctb">${selOpts(PM_PN,m.tb_screening)}</select></label>
+     ${ecPicker('cinh','Date INH prophylaxis started',false,m.inh_start_date)}
+     ${ecPicker('ctbrx','Date TB treatment started',false,m.tb_rx_date)}
+     <label>Unit TB number<input id="ctbn" value="${esc(m.tb_unit_number||'')}"></label>
+    </div>
+    <div id="cfeedwarn"></div>
+    <button class="act" id="csave" style="margin-top:10px">Save HIV care</button> <span class="muted" id="cm"></span>
+   </div>
+
+   <div class="card"><h3>Delivery &amp; postpartum</h3>
+    <div class="grid">
+     ${ecPicker('pdd','Date of delivery',false,m.delivery_date)}
+     <label>Sex of infant<select id="psx">${selOpts([['M','Male'],['F','Female']],m.infant_sex)}</select></label>
+     <label>Place of delivery<select id="ppl">${selOpts(PM_PLACE,m.place_of_delivery)}</select></label>
+     <label>Delivery outcome<select id="pout">${selOpts([['LB','Live birth'],['SB','Stillbirth']],m.delivery_outcome)}</select></label>
+     <label>ART taken during labour<select id="pal">${selOpts([['Y','Yes'],['N','No']],m.art_during_labour)}</select></label>
+     <label>Infant received ARV prophylaxis<select id="pip">${selOpts([['Y','Yes'],['N','No']],m.infant_arv_prophylaxis)}</select></label>
+    </div>
+    <p class="muted" style="font-size:12px;margin:2px 0 8px">Infant prophylaxis is AZT + NVP for the first 6 weeks, then NVP alone for the next 6 weeks &mdash; 12 weeks in total.</p>
+    <h4 style="margin:10px 0 4px">Family planning</h4>
+    <div class="grid">
+     <label>FP counselled<select id="pfc">${selOpts([['Y','Yes'],['N','No']],m.fp_counselled)}</select></label>
+     <label>Acceptor<select id="pfa">${selOpts(ACCEPTOR,m.fp_acceptor)}</select></label>
+     <label>Contraceptive provided<select id="pfm">${selOpts(FP_METHODS,m.fp_method)}</select></label>
+    </div>
+    <button class="act" id="pdsave" style="margin-top:10px">Save</button> <span class="muted" id="pdm"></span>
+   </div>
+
+   ${unlinked.length?`<div class="card"><h3>Newborns from her delivery record</h3>
+    <p class="muted">These babies were recorded in the delivery room. Every one of them is HIV-exposed and belongs in the HEI cohort &mdash; enrol them here rather than typing them in again.</p>
+    <table><tr><th>Baby MRN</th><th>Sex</th><th>Weight</th><th>Born</th><th>Already recorded in delivery</th><th></th></tr>
+     ${unlinked.map(b=>`<tr><td>${esc(b.mrn||'—')}</td><td>${esc(b.sex||'')}</td><td>${esc(b.weight_g?b.weight_g+' g':'')}</td>
+       <td>${esc((b.recorded_at||'').slice(0,10))}</td>
+       <td class="muted" style="font-size:12px">${[b.arv_prophylaxis?'ARV: '+esc(b.arv_prophylaxis):'',b.dbs_sample?'DBS: '+esc(b.dbs_sample):''].filter(Boolean).join(' · ')||'—'}</td>
+       <td><button class="sec" data-enrol="${b.id}">Enrol in HEI cohort</button></td></tr>`).join('')}
+    </table></div>`:''}
+
+   <div class="card"><h3>HIV-exposed infants</h3>
+    <p class="muted">Each exposed infant is followed until her HIV status is finally known. The DNA/PCR is due at about 6 weeks of age; the antibody test confirms at 18 months.</p>
+    <table><tr><th>Infant MRN</th><th>Enrolled</th><th>ARV started</th><th>Feeding</th><th>CPT (wks)</th><th>DNA/PCR (wks)</th><th>PCR</th><th>Antibody</th><th>Outcome</th></tr>
+     ${(infants||[]).map(i=>`<tr>
+       <td>${esc(i.mrn||'')}</td><td>${esc(i.hei_enrol_date||'')}</td><td>${esc(i.arv_start_date||'')}</td>
+       <td>${esc(i.feeding_6m||'')}</td><td>${esc(i.cpt_age_weeks??'')}</td>
+       <td>${esc(i.pcr_age_weeks??'')}${(i.pcr_age_weeks>8)?' <span class="pill amber">late</span>':''}</td>
+       <td>${i.pcr_result==='P'?'<span class="pill red">Positive</span>':(i.pcr_result==='N'?'<span class="pill green">Negative</span>':'<span class="muted">—</span>')}</td>
+       <td>${i.rapid_ab_result==='P'?'<span class="pill red">Positive</span>':(i.rapid_ab_result==='N'?'<span class="pill green">Negative</span>':'<span class="muted">—</span>')}</td>
+       <td>${esc((PM_IOUT.find(x=>x[0]===i.outcome)||[,''])[1])}</td></tr>`).join('')
+       ||'<tr><td colspan=9 class=muted>No exposed infant enrolled yet.</td></tr>'}
+    </table>
+    <button class="sec" id="pinew" style="margin-top:10px">Add / update an infant</button>
+    <div id="piform"></div>
+   </div>
+
+   <div class="card"><h3>Cohort follow-up</h3>
+    <p class="muted">Month 0 is the month she was enrolled &mdash; the shared event for both the maternal and the infant cohort. Viral load is due 3 months after ART starts, then every 6 months. Below 1,000 copies/ml is undetectable.</p>
+    <nav class="navbar" style="margin:0 0 10px">
+      <a class="nav${fuSub==='mother'?' on':''}" href="#pmtctclient/${id}" data-fusub="mother">Mother</a>
+      <a class="nav${fuSub==='infant'?' on':''}" href="#pmtctclient/${id}" data-fusub="infant">Infant</a>
+    </nav>
+
+    ${fuSub==='mother'?`
+    <table><tr><th>Month</th><th>Date seen</th><th>Status</th><th>Viral load</th><th>Copies/ml</th><th>Note</th></tr>
+     ${mfu.map(f=>`<tr><td><b>${esc(f.month_no)}</b></td><td>${esc(f.visit_date||'')}</td>
+       <td>${esc((PM_MSTATUS.find(x=>x[0]===f.status)||[,f.status||''])[1])}</td>
+       <td>${f.viral_load==='undetectable'?'<span class="pill green">Undetectable</span>':(f.viral_load==='detectable'?'<span class="pill red">Detectable</span>':'')}</td>
+       <td>${esc(f.vl_value??'')}</td><td>${esc(f.note||'')}</td></tr>`).join('')
+       ||'<tr><td colspan=6 class=muted>No follow-up recorded yet.</td></tr>'}
+    </table>
+    <div class="grid" style="margin-top:12px">
+     <label>Month<input id="fmn" type="number" min="0" max="60" value="${nextMonth}"></label>
+     ${ecPicker('fdt','Date seen',true)}
+     <label>Status this month<select id="fst">${selOpts(PM_MSTATUS)}</select></label>
+     <label>Viral load<select id="fvl">${selOpts([['undetectable','Undetectable (&lt;1,000)'],['detectable','Detectable (&gt;1,000)']])}</select></label>
+     <label>Copies/ml (if known)<input id="fvv" type="number" min="0"></label>
+    </div>
+    <label>Note<input id="fnt"></label>
+    <div id="fedit" class="muted" style="font-size:12px"></div>
+    <div id="fvlwarn"></div>
+    <button class="act" id="fsav" style="margin-top:10px">Save this month</button> <span class="muted" id="fm2"></span>`
+    :`
+    ${(infants||[]).length?`
+    <label>Which infant<select id="ifsel">${(infants||[]).map((i,n)=>`<option value="${i.id}">${esc(infName(i,n))}</option>`).join('')}</select></label>
+    <table style="margin-top:10px"><tr><th>Month</th><th>Date seen</th><th>Status</th><th>Note</th></tr>
+     <tbody id="ifrows"></tbody>
+    </table>
+    <div class="grid" style="margin-top:12px">
+     <label>Month<input id="ifmn" type="number" min="0" max="60" value="0"></label>
+     ${ecPicker('ifdt','Date seen',true)}
+     <label>Status this month<select id="ifst">${selOpts(PM_ISTATUS)}</select></label>
+    </div>
+    <label>Note<input id="ifnt"></label>
+    <div id="ifedit" class="muted" style="font-size:12px"></div>
+    <button class="act" id="ifsav" style="margin-top:10px">Save this month</button> <span class="muted" id="ifm"></span>`
+    :`<p class="muted">No exposed infant is enrolled yet, so there is nothing to follow up. Enrol her above first.</p>`}`}
+   </div>`;
+
+  // A save that succeeded must NOT re-enable its button — the screen is about to re-render, and
+  // re-enabling leaves a live button on a stale form, which is how double-click duplicates happen.
+  const guard=(sel,fn)=>{ const b=$(sel); if(!b) return; b.onclick=async()=>{ if(b.disabled) return; b.disabled=true;
+    try{ const ok=await fn(); if(!ok) b.disabled=false; }catch(e){ b.disabled=false; toast(e.message||'error'); } }; };
+
+  // ---- HIV care ----
+  const cfeedChk=()=>{ $('#cfeedwarn').innerHTML=($('#cfeed').value==='MF')
+    ? alertBox('red','Mixed feeding carries the highest transmission risk','Of the three options this is the most dangerous for the infant. Counsel her towards exclusive breastfeeding or exclusive replacement feeding.') : ''; };
+  $('#cfeed').addEventListener('change',cfeedChk);
+  guard('#csave',async()=>{
+    const r=await api('PATCH','pmtct/'+id,{art_start_date:ecGet('cart'),art_regimen:(creg.value||null),
+      feeding_option:(cfeed.value||null),cpt_started:(ccpt.value||null),cd4_count:(ccd4.value||null),
+      who_stage:(+cwho.value||null),tb_screening:(ctb.value||null),inh_start_date:ecGet('cinh'),
+      tb_rx_date:ecGet('ctbrx'),tb_unit_number:(ctbn.value||null)});
+    if(r&&(r.ok||r.queued)){ toast('Saved','ok'); setTimeout(()=>pmtctClient(id),500); return true; }
+    $('#cm').textContent=' '+((r&&r.error)||'error'); return false; });
+
+  // ---- delivery / FP ----
+  guard('#pdsave',async()=>{
+    const r=await api('PATCH','pmtct/'+id,{delivery_date:ecGet('pdd'),infant_sex:(psx.value||null),
+      place_of_delivery:(+ppl.value||null),delivery_outcome:(pout.value||null),art_during_labour:(pal.value||null),
+      infant_arv_prophylaxis:(pip.value||null),fp_counselled:(pfc.value||null),fp_acceptor:(pfa.value||null),fp_method:(pfm.value||null)});
+    if(r&&(r.ok||r.queued)){ toast('Saved','ok'); setTimeout(()=>pmtctClient(id),500); return true; }
+    $('#pdm').textContent=' '+((r&&r.error)||'error'); return false; });
+
+  $('#pinew').onclick=()=>pmtctInfantForm(id,infants,m);
+  document.querySelectorAll('[data-fusub]').forEach(a=>a.onclick=(e)=>{ e.preventDefault(); window._pmFuSub=a.dataset.fusub; pmtctClient(id); });
+
+  // Carry the delivery-room newborn straight into the HEI cohort, bringing what is already
+  // known with her: her MRN, her date of birth, and the date her ARV prophylaxis was started.
+  document.querySelectorAll('[data-enrol]').forEach(btn=>btn.onclick=async()=>{
+    if(btn.disabled) return; btn.disabled=true;
+    const b=borne.find(x=>x.id==btn.dataset.enrol)||{};
+    const dob=m.delivery_date||(b.recorded_at||'').slice(0,10)||null;
+    try{
+      const r=await api('POST','pmtct_infants',{mother_id:+id,baby_id:+b.id,mrn:(b.mrn||null),
+        infant_dob:dob, hei_enrol_date:localDate(),
+        arv_start_date:((b.arv_prophylaxis&&b.arv_prophylaxis!=='not_given')?dob:null)});
+      if(r&&(r.id||r.queued)){ toast('Infant enrolled in the HEI cohort','ok'); setTimeout(()=>pmtctClient(id),500); }
+      else { btn.disabled=false; toast((r&&r.error)||'error'); }
+    }catch(e){ btn.disabled=false; toast(e.message||'error'); }
+  });
+
+  // ---- cohort follow-up: MOTHER ----
+  if(fuSub==='mother' && $('#fsav')){
+    // NB declare vlChk BEFORE loadMonth, which calls it. Declaring it after would work only by
+    // luck of invocation order — and a `const` referenced before initialisation is precisely the
+    // temporal-dead-zone trap that once silently killed every safety dialog in this app.
+    // the number and the band must agree — a typed 45,000 marked "undetectable" is a lie
+    const vlChk=()=>{ const v=+fvv.value, band=fvl.value; let w='';
+      if(fvv.value!==''){
+        if(v>=1000 && band==='undetectable') w=alertBox('red','These disagree',v.toLocaleString()+' copies/ml is <b>detectable</b> — 1,000 or more. Change the band, or correct the number.');
+        if(v<1000 && band==='detectable')   w=alertBox('red','These disagree',v.toLocaleString()+' copies/ml is <b>undetectable</b> — below 1,000. Change the band, or correct the number.');
+      }
+      $('#fvlwarn').innerHTML=w; };
+
+    // Typing a month that already exists must LOAD it. The server replaces the row on save, so
+    // without this a provider adding a note to month 3 would silently wipe the detectable viral
+    // load recorded there — the single most safety-critical field in the module.
+    const loadMonth=()=>{ const f=mfu.find(x=>+x.month_no===+fmn.value);
+      if(f){ fst.value=f.status||''; fvl.value=f.viral_load||''; fvv.value=(f.vl_value??''); fnt.value=f.note||'';
+             ecSet('fdt',f.visit_date);
+             $('#fedit').innerHTML='Editing month '+f.month_no+' &mdash; the values already recorded are shown. Saving replaces them.'; }
+      else { fst.value=''; fvl.value=''; fvv.value=''; fnt.value=''; $('#fedit').textContent=''; }
+      vlChk(); };
+
+    fvv.addEventListener('input',vlChk); fvl.addEventListener('change',vlChk);
+    fmn.addEventListener('change',loadMonth); fmn.addEventListener('input',loadMonth); loadMonth();
+
+    guard('#fsav',async()=>{
+      const v=fvv.value===''?null:+fvv.value;
+      // A number with no band selected used to be stored as "not done" — so a frankly
+      // detectable 45,000 raised nothing at all. Derive the band from the number.
+      const band=fvl.value || (v==null ? null : (v>=1000 ? 'detectable' : 'undetectable'));
+      if(v!=null && fvl.value && ((v>=1000&&fvl.value==='undetectable')||(v<1000&&fvl.value==='detectable'))){
+        modal('Viral load disagrees with itself','You have entered <b>'+v.toLocaleString()+' copies/ml</b> but marked it <b>'+fvl.value+'</b>. Below 1,000 is undetectable; 1,000 or more is detectable. Correct one of them.'); return false; }
+      if(!fst.value){ modal('Status required','Record how she is this month — alive and on ART, lost to follow-up, transferred, or died. Leaving it blank would silently overwrite whatever was recorded before.'); return false; }
+      const r=await api('POST','pmtct_fu',{mother_id:+id,subject:'mother',month_no:(+fmn.value||0),visit_date:ecGet('fdt'),
+        status:fst.value,viral_load:band,vl_value:v,note:(fnt.value||null)});
+      if(r&&(r.id||r.queued)){ toast('Month recorded','ok'); setTimeout(()=>pmtctClient(id),500); return true; }
+      $('#fm2').textContent=' '+((r&&r.error)||'error'); return false; });
+  }
+
+  // ---- cohort follow-up: INFANT ----
+  // The infant half of the grid answers the question the whole module exists for: did she
+  // end up negative? It was defined in the schema but had no way in.
+  if(fuSub==='infant' && $('#ifsav')){
+    const rowsFor=(iid)=>(fu||[]).filter(f=>f.subject==='infant' && +f.infant_id===+iid).sort((a,b)=>a.month_no-b.month_no);
+    const paint=()=>{ const rs=rowsFor(ifsel.value);
+      $('#ifrows').innerHTML = rs.map(f=>`<tr><td><b>${esc(f.month_no)}</b></td><td>${esc(f.visit_date||'')}</td>
+        <td>${esc((PM_ISTATUS.find(x=>x[0]===f.status)||[,f.status||''])[1])}</td><td>${esc(f.note||'')}</td></tr>`).join('')
+        || '<tr><td colspan=4 class=muted>No follow-up recorded for this infant yet.</td></tr>';
+      ifmn.value = rs.length ? (Math.max(...rs.map(f=>+f.month_no))+1) : 0;
+      loadIMonth(); };
+    const loadIMonth=()=>{ const f=rowsFor(ifsel.value).find(x=>+x.month_no===+ifmn.value);
+      if(f){ ifst.value=f.status||''; ifnt.value=f.note||''; ecSet('ifdt',f.visit_date);
+             $('#ifedit').innerHTML='Editing month '+f.month_no+' &mdash; saving replaces what is recorded there.'; }
+      else { ifst.value=''; ifnt.value=''; $('#ifedit').textContent=''; } };
+    ifsel.addEventListener('change',paint);
+    ifmn.addEventListener('change',loadIMonth);
+    paint();
+
+    guard('#ifsav',async()=>{
+      if(!ifst.value){ modal('Status required','Record how the infant is this month — still exposed and breastfeeding, discharged negative, HIV positive, lost, transferred, or died.'); return false; }
+      const r=await api('POST','pmtct_fu',{mother_id:+id,subject:'infant',infant_id:+ifsel.value,
+        month_no:(+ifmn.value||0),visit_date:ecGet('ifdt'),status:ifst.value,note:(ifnt.value||null)});
+      if(r&&(r.id||r.queued)){ toast('Month recorded','ok'); setTimeout(()=>pmtctClient(id),500); return true; }
+      $('#ifm').textContent=' '+((r&&r.error)||'error'); return false; });
+  }
+}
+
+function pmtctInfantForm(mid,infants,m){
+  const opts=[['','— new infant —']].concat((infants||[]).map((i,n)=>[i.id,'Infant '+(n+1)+(i.mrn?' ('+i.mrn+')':'')]));
+  $('#piform').innerHTML=`<div style="margin-top:12px;border-top:1px solid #e6eae8;padding-top:12px">
+   <div class="grid">
+    <label>Record<select id="pisel">${opts.map(o=>`<option value="${o[0]}">${esc(o[1])}</option>`).join('')}</select></label>
+    <label>Infant MRN<input id="pimrn"></label>
+    ${ecPicker('pidob','Infant date of birth')}
+    ${ecPicker('piehd','Date of HEI enrolment',true)}
+    ${ecPicker('piarv','Date infant started ARV prophylaxis')}
+    <label>Feeding practice (first 6 months)<select id="pifd">${selOpts(PM_FEED)}</select></label>
+    <label>Age in weeks CPT started<input id="picpt" type="number" min="0" max="120"></label>
+    <label>Age in weeks DNA/PCR done<input id="pipw" type="number" min="0" max="120"></label>
+    <label>DNA/PCR result<select id="pipr">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+    <label>Rapid HIV antibody result (18 months)<select id="piab">${selOpts([['P','Positive'],['N','Negative']])}</select></label>
+    <label>Final outcome<select id="pio">${selOpts(PM_IOUT)}</select></label>
+   </div>
+   <div id="piwarn"></div>
+   <button class="act" id="pisave" style="margin-top:10px">Save infant</button> <span class="muted" id="pim"></span></div>`;
+
+  // Editing an existing infant must LOAD her values first — otherwise saving would blank
+  // every field the provider did not retype, including the dates.
+  const fill=()=>{ const i=(infants||[]).find(x=>x.id==pisel.value);
+    pimrn.value=i?(i.mrn||''):''; picpt.value=i?(i.cpt_age_weeks??''):''; pipw.value=i?(i.pcr_age_weeks??''):'';
+    pipr.value=i?(i.pcr_result||''):''; piab.value=i?(i.rapid_ab_result||''):''; pio.value=i?(i.outcome||''):'';
+    pifd.value=i?(i.feeding_6m||''):'';
+    ecSet('pidob', i?i.infant_dob:null); ecSet('piehd', i?i.hei_enrol_date:null); ecSet('piarv', i?i.arv_start_date:null);
+    chk(); };
+  const chk=()=>{ let w='';
+    if(pipr.value==='P') w+=alertBox('red','DNA/PCR positive','The infant is HIV infected. Link to the ART clinic <b>today</b> and start treatment. Set the outcome to &ldquo;HIV positive — on ART&rdquo; once she is linked.');
+    if(pipw.value!=='' && +pipw.value>8) w+=alertBox('amber','Test done late','The DNA/PCR is due at about 6 weeks of age. This one was at '+pipw.value+' weeks. Every week of delay is a week an infected infant spends untreated.');
+    if(pipr.value==='N' && pio.value==='discharged_negative' && piab.value!=='N')
+      w+=alertBox('amber','Discharge needs the antibody test','A negative DNA/PCR is not the final answer while she is still breastfeeding. The infant is discharged HIV-negative only after the rapid antibody test at 18 months, at least 6 weeks after breastfeeding stopped.');
+    $('#piwarn').innerHTML=w; };
+  pisel.addEventListener('change',fill);
+  [pipr,pipw,piab,pio].forEach(el=>el.addEventListener('change',chk));
+  pipw.addEventListener('input',chk);
+
+  // Do NOT re-enable the button after a successful save — the screen is about to re-render, and
+  // a live button on a stale form is how you get two infants where there is one.
+  $('#pisave').onclick=async()=>{ const b=$('#pisave'); if(b.disabled) return; b.disabled=true;
+    try{
+      const payload={mrn:(pimrn.value||null),infant_dob:ecGet('pidob'),hei_enrol_date:ecGet('piehd'),arv_start_date:ecGet('piarv'),
+        feeding_6m:(pifd.value||null),cpt_age_weeks:(picpt.value===''?null:+picpt.value),
+        pcr_age_weeks:(pipw.value===''?null:+pipw.value),pcr_result:(pipr.value||null),
+        rapid_ab_result:(piab.value||null),outcome:(pio.value||null)};
+      const r = pisel.value
+        ? await api('PATCH','pmtct_infants/'+pisel.value,payload)
+        : await api('POST','pmtct_infants',Object.assign({mother_id:+mid},payload));
+      if(r&&(r.id||r.ok||r.queued)){ toast('Infant saved','ok'); setTimeout(()=>pmtctClient(mid),500); }
+      else { $('#pim').textContent=' '+((r&&r.error)||'error'); b.disabled=false; }
+    }catch(e){ b.disabled=false; toast(e.message||'error'); } };
+}
+
+// ---- Pregnancy test (OPD) -> ANC room --------------------------------------
+// "If a mother's pregnancy test became positive from OPD, how can we link her to the
+//  ANC room?" — a positive test opens her ANC episode here, so the handoff is recorded
+//  instead of depending on her finding the ANC room herself.
+async function pregTest(){
+  const past=await api('GET','pregnancy_tests').catch(()=>[]);
+  const pending=(past||[]).filter(p=>p.result==='pending');
+  app().innerHTML=nav()+`
+   ${pending.length?`<div class="card"><h3>Awaiting a result <span class="pill amber">${pending.length}</span></h3>
+    <p class="muted">These women were registered for a pregnancy test and the result has not come back. Record it here and she is routed straight away &mdash; positive opens her ANC episode, negative opens her family-planning record.</p>
+    <table><tr><th>Registered</th><th>MRN</th><th>Name</th><th>Result</th><th></th></tr>
+    ${pending.map(p=>`<tr>
+      <td>${esc(p.test_date||'')}</td><td>${esc(p.mrn||'')}</td>
+      <td>${esc(((p.first_name||'')+' '+(p.father_name||'')).trim())}</td>
+      <td><select data-res="${p.id}" style="min-width:130px"><option value="">— select —</option><option value="negative">Negative</option><option value="positive">Positive</option></select></td>
+      <td><button class="sec" data-save="${p.id}">Record</button></td></tr>`).join('')}
+    </table>
+    <div class="ticks" style="margin-top:8px">${tick('ptfpall','If negative, open her family-planning record')}</div>
+    <p class="muted" style="font-size:12px">A negative test is the highest-yield moment there is to offer contraception &mdash; she is in the building, thinking about her fertility, with a provider in front of her.</p>
+    </div>`:''}
+
+   <div class="card"><h3>Pregnancy test <span class="muted" style="font-size:13px;font-weight:400">— for a woman already registered</span></h3>
+   <p class="muted">To register a NEW woman for a test, use <a class="nav" href="#register" style="padding:0">Register</a> and choose &ldquo;Pregnancy test&rdquo;.</p>
+   <div class="grid">
+    <label>Find the woman (MRN or name)<input id="ptq" placeholder="type to search"></label>
+    <label>&nbsp;<select id="ptw"><option value="">— search first —</option></select></label>
+    ${ecPicker('ptd','Test date',true)}
+    <label>Result<select id="ptr"><option value="pending">Not back yet</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
+   </div>
+   <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+     <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
+     <div style="margin-top:4px">A positive test means she needs ANC. Ticking this registers her for antenatal care and she will appear on the ANC worklist immediately.</div>
+   </div>
+   <div id="ptneg" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+     <div class="ticks">${tick('ptfp','Offer family planning now (open her as an FP client)')}</div>
+     <div style="margin-top:4px">She is not pregnant &mdash; and she is in the building, thinking about her fertility, with a provider in front of her. This is the highest-yield moment to offer contraception. Ticking this opens her family-planning record so she does not leave with nothing.</div>
+   </div>
+   <label>Note<input id="ptn" placeholder="optional"></label>
+   <button class="act" id="ptsave" style="margin-top:10px">Save test</button> <span class="muted" id="ptm"></span></div>
+
+   <div class="card"><h3>Recent tests</h3><table><tr><th>Date</th><th>MRN</th><th>Name</th><th>Result</th><th>Linked to ANC</th></tr>
+    ${(past||[]).map(p=>`<tr><td>${esc(p.test_date||'')}</td><td>${esc(p.mrn||'')}</td><td>${esc((p.first_name||'')+' '+(p.father_name||''))}</td>
+      <td>${p.result==='positive'?'<span class="pill amber">Positive</span>':esc(p.result||'')}</td>
+      <td>${p.linked_episode_id?('<a class="nav" href="#patient/'+p.linked_episode_id+'">ANC episode '+p.linked_episode_id+'</a>'):(p.result==='positive'?'<span class="muted">not linked</span>':'—')}</td></tr>`).join('')
+      ||'<tr><td colspan=5 class=muted>No tests recorded yet.</td></tr>'}
+   </table></div>`;
+
+  let found=[];
+  ptq.addEventListener('input',async()=>{ const q=ptq.value.trim(); if(q.length<2) return;
+    found=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
+    ptw.innerHTML='<option value="">— select the woman —</option>'+(found||[]).map(w=>`<option value="${w.id}">${esc(w.mrn)} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
+  ptr.addEventListener('change',()=>{
+    $('#ptpos').style.display=(ptr.value==='positive')?'':'none';
+    $('#ptneg').style.display=(ptr.value==='negative')?'':'none';
+  });
+
+  // Record a result that has come back from the lab. THIS is where she gets routed.
+  document.querySelectorAll('[data-save]').forEach(btn=>btn.onclick=async()=>{
+    if(btn.disabled) return;
+    const pid=btn.dataset.save;
+    const sel=document.querySelector('[data-res="'+pid+'"]');
+    if(!sel.value){ modal('Select the result','Record whether her test was positive or negative.'); return; }
+    btn.disabled=true;
+    try{
+      const neg=(sel.value==='negative');
+      const r=await api('PATCH','pregnancy_tests/'+pid,{result:sel.value,
+        link_to_anc:(sel.value==='positive')?1:0,
+        link_to_fp:(neg&&tk('ptfpall'))?1:0, fp_offered:(neg&&tk('ptfpall'))?1:0});
+      if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); location.hash='#patient/'+r.episode_id; return; }
+      if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); location.hash='#fpclient/'+r.fp_client_id; return; }
+      toast('Result recorded','ok'); setTimeout(pregTest,500);
+    }catch(e){ btn.disabled=false; toast(e.message||'error'); }
+  });
+
+  $('#ptsave').onclick=async()=>{
+    const b=$('#ptsave'); if(b.disabled) return;
+    if(!ptw.value){ modal('Select the woman','Search for her by MRN or name and select her from the list. If she is not registered yet, register her first.'); return; }
+    b.disabled=true;
+    try{
+      const r=await api('POST','pregnancy_tests',{woman_id:+ptw.value,test_date:ecGet('ptd'),result:ptr.value,
+        note:(ptn.value||null),
+        link_to_anc:(ptr.value==='positive'&&tk('ptlink'))?1:0,
+        link_to_fp:(ptr.value==='negative'&&tk('ptfp'))?1:0,
+        fp_offered:(ptr.value==='negative'&&tk('ptfp'))?1:0});
+      if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+r.episode_id,700); }
+      else if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); setTimeout(()=>location.hash='#fpclient/'+r.fp_client_id,700); }
+      else if(r&&(r.id||r.queued)){ $('#ptm').textContent=' saved'; setTimeout(()=>pregTest(),600); }
+      else $('#ptm').textContent=' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; }
+  };
+}
+
+async function reportScreen(id){
+  const [e,obs,chk,deliv,babies,anc,pnc,refs]=await Promise.all([
+    epOne(id), api('GET','observations?episode='+id).catch(()=>[]),
+    api('GET','checklist?episode='+id).catch(()=>[]), api('GET','delivery?episode='+id).catch(()=>[]),
+    api('GET','babies?episode='+id).catch(()=>[]), api('GET','anc_screening?episode='+id).catch(()=>[]),
+    api('GET','pnc_visits?episode='+id).catch(()=>[]), api('GET','referrals?episode='+id).catch(()=>[])]);
+  const d=(deliv||[])[0]||{}; const last=obs[obs.length-1]||{};
+  const ancYes=(anc||[]).filter(a=>a.response==='yes').length;
+  app().innerHTML=nav()+`<div class="card"><h3>Care summary — episode ${esc(id)}</h3>
+   <p><b>${esc((e.first_name||'')+' '+(e.father_name||''))}</b> · MRN ${esc(e.mrn||'')} · G${esc(e.gravida||'?')}/P${esc(e.para||'?')} · ${esc(e.service_category||'')} · status ${esc(e.status||'')}</p>
+   <p class="muted">Admitted ${esc((e.admission_datetime||'').slice(0,16))}${e.admitted_from&&e.admitted_from!=='new'?(' ('+esc(e.admitted_from)+')'):''}</p>
+   <h4>Partograph</h4><p class="muted">${obs.length} observation(s). Last: cervix ${esc(last.cervix_cm||'—')} cm, FHR ${esc(last.fetal_heart_rate||'—')}, hrs ${esc(last.hours_since_active||'—')}.</p>
+   <h4>ANC screening</h4><p class="muted">${anc.length?(ancYes?(ancYes+' risk factor(s) → specialised care'):'no risk factors → basic ANC'):'not screened'}</p>
+   <h4>Safe-birth checklist</h4><p class="muted">${chk.length} item(s) recorded.</p>
+   <h4>Delivery</h4><p class="muted">${d.delivery_datetime?('Mode '+esc(d.mode||'')+', partograph '+esc(d.partograph_used||'?')+', mother '+esc(d.maternal_status||d.maternal_outcome||'')):'not delivered'}</p>
+   <h4>Newborn(s)</h4><p class="muted">${babies.length?babies.map(b=>'#'+esc(b.birth_order)+' '+esc(b.sex||'')+' '+esc(b.weight_g||'?')+'g APGAR '+esc(b.apgar_1min||'?')+'/'+esc(b.apgar_5min||'?')+' '+esc(b.outcome||'')).join('; '):'none recorded'}</p>
+   <h4>PNC follow-up</h4><p class="muted">${pnc.length} visit(s).</p>
+   <h4>Referral</h4><p class="muted">${refs.length?refs.map(r=>'to '+esc(r.referred_to||'')+' ('+esc(r.urgency||'')+') — '+esc(r.reason||'')).join('; '):'none'}</p>
+   <button class="sec" onclick="window.print()" style="margin-top:10px">Print</button></div>`;
+}
+
+const BEMONC=[
+ ['BEM_ANTIBIOTICS','Parenteral antibiotics'],
+ ['BEM_UTEROTONIC','Uterotonic for PPH (oxytocin / misoprostol)'],
+ ['BEM_MGSO4','Anticonvulsant — magnesium sulfate'],
+ ['BEM_MANUAL_PLACENTA','Manual removal of placenta'],
+ ['BEM_RETAINED_PRODUCTS','Removal of retained products'],
+ ['BEM_ASSISTED_DELIVERY','Assisted vaginal delivery (vacuum)'],
+ ['BEM_NEWBORN_RESUS','Newborn resuscitation']
+];
+async function bemoncScreen(id){
+  const existing=await api('GET','bemonc?episode='+id).catch(()=>[]);
+  const prev={}; existing.forEach(r=>prev[r.item_code]=r.response);
+  app().innerHTML=nav()+`<div class="card"><h3>Basic Emergency Obstetric &amp; Newborn Care (BEmONC) — episode ${esc(id)}</h3>
+   <p class="muted">Record the emergency obstetric &amp; newborn signal functions. "Referred" = indicated but not available here (needs hospital / CEmONC).</p>
+   ${BEMONC.map(it=>{const v=prev[it[0]]||'not_needed'; return `<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px">${esc(it[1])}
+     <select data-code="${it[0]}" style="width:170px"><option value="not_needed"${v==='not_needed'?' selected':''}>Not needed</option><option value="given"${v==='given'?' selected':''}>Given</option><option value="referred"${v==='referred'?' selected':''}>Referred (unavailable)</option></select></label></div>`;}).join('')}
+   <button class="act" id="bsave" style="margin-top:12px">Save</button> <span class="muted" id="bm"></span></div>`;
+  $('#bsave').onclick=async()=>{ const b=$('#bsave'); if(b.disabled) return; b.disabled=true;
+    try{ const rows=[...document.querySelectorAll('#app select[data-code]')].map(s=>({episode_id:+id,item_code:s.dataset.code,response:s.value}));
+      const r=await api('POST','bemonc',rows); $('#bm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error');
+    } finally{ b.disabled=false; } };
+}
+
+async function facilityEdit(id){
+  if(!SUPER()){ app().innerHTML=nav()+'<div class="card">Facilities are managed centrally &mdash; a super-admin action.</div>'; return; }
+  const list=await api('GET','facilities').catch(()=>[]); const f=(list||[]).find(x=>x.id==id)||{};
+  const types=['health_center','primary_hospital','general_hospital','other'];
+  app().innerHTML=nav()+`<div class="card"><h3>Edit facility</h3>
+    <div class="grid">
+     <label>Name<input id="fnm" value="${esc(f.name||'')}"></label>
+     <label>Type<select id="fty">${types.map(t=>`<option value="${t}"${f.facility_type===t?' selected':''}>${t.replace('_',' ')}</option>`).join('')}</select></label>
+     <label>Kebele<input id="fke" value="${esc(f.kebele||'')}"></label><label>Woreda<input id="fwo" value="${esc(f.woreda||'')}"></label>
+     <label>Zone<input id="fzo" value="${esc(f.zone||'')}"></label><label>Region<input id="fre" value="${esc(f.region||'')}"></label>
+     <label>DHIS2 org-unit code<input id="fdh" value="${esc(f.dhis2_org_unit||'')}"></label>
+    </div><button class="act" id="fsave" style="margin-top:10px">Save changes</button> <a class="nav" href="#facilities">Cancel</a> <span class="muted" id="fm"></span></div>`;
+  $('#fsave').onclick=async()=>{ const r=await api('PATCH','facilities/'+id,{name:fnm.value,facility_type:fty.value,kebele:fke.value,woreda:fwo.value,zone:fzo.value,region:fre.value,dhis2_org_unit:fdh.value});
+    if(r&&(r.ok||r.queued)){ $('#fm').textContent=' saved'; setTimeout(()=>location.hash='#facilities',600); } else $('#fm').textContent=' '+((r&&r.error)||'error'); };
+}
+
+async function patientHub(id){
+  // Fetch HER episode by id. Reading it out of the LIMIT-200 list meant that past 200 episodes
+  // she resolved to {} — and the failure was silent and clinical: the Rh-negative banner
+  // vanished, a woman on ART was offered an HIV test, and the hub rendered labour tiles for an
+  // ANC patient.
+  let e=null;
+  try{ const one=await api('GET','episodes?ep='+id); e=(Array.isArray(one)?one[0]:one)||null; }catch(err){ e=null; }
+  if(!e){
+    app().innerHTML=nav()+`<div class="card"><h3>Record could not be loaded</h3>
+      <p class="muted">This episode could not be found &mdash; it may belong to another facility, or the connection failed. <b>Nothing has been changed.</b> Do not enter data against a record you cannot see.</p>
+      <a class="nav" href="#home">&lsaquo; Home</a></div>`;
+    return;
+  }
+  const cat=e.service_category;
+  const delivered=(String(e.status||'')==='delivered'); const isLab=(cat==='labour'||cat==='highrisk'); const postnatal=(cat==='pnc'||(isLab&&delivered));
+  const tile=(href,txt)=>`<a class="hubx" href="${href}">${txt}</a>`;
+  // Is she in the PMTCT cohort? Her PMTCT chart used to be invisible from her maternity chart.
+  let pmRec=null;
+  if(e.woman_id){ try{ const pms=await api('GET','pmtct'); pmRec=(pms||[]).find(p=>p.woman_id==e.woman_id)||null; }catch(err){} }
+  const pmTile = pmRec ? tile('#pmtctclient/'+pmRec.id,'PMTCT &amp; exposed infant') : '';
+  // RISK SCREENING BELONGS ON EVERY EPISODE. It used to appear only for ANC — so a woman
+  // admitted straight into labour, unbooked (high risk by definition), had no way anywhere in
+  // the application to record a previous caesarean. The model then scored her prior_cs = 0.
+  const scrTile = tile('#anc/'+id,'Risk screening');
+  let tiles, fold='';
+  if(ME.role==='observer') tiles=[tile('#report/'+id,'Care summary')];   // read-only role: view the summary, no data-entry screens
+  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
+  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+    if(isLab&&delivered){ const lab=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
+      fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  tiles=tiles.filter(Boolean);
+  const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
+  const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
+  let _ga=''; if(e.edd){ const _d=(new Date(e.edd+'T00:00:00')-new Date())/86400000; const _w=Math.round((280-_d)/7); if(_w>0&&_w<=45) _ga=_w+' wga'; }
+  const _book=e.ga_first_contact?('booked '+e.ga_first_contact+'w'+(e.late_anc_initiation==1?' (late)':'')):'';
+  window.CTX={id:+id, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,_book,e.status].filter(Boolean).join(' · ')};
+  app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
+    <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''} ${syncPill(e)}</p>
+    ${isLocalId(e.id)?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">
+       This chart exists only on <b>this device</b> so far. Everything you record on it is safe and will be sent to the server automatically when there is a connection. Do not wipe or hand over the tablet before the sync pill reads <b>online</b>.</p>`:''}
+    ${(e.referred==1 && !e.returned_at)?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">
+       <b>Referred out</b>${e.referred_at?(' on '+esc(String(e.referred_at).slice(0,16))):''} &mdash; she has not been recorded as back.
+       <button id="epreturn" class="sm" style="margin-left:6px">She has come back</button></p>`:''}
+    ${(e.referred==1 && e.returned_at)?`<p class="muted" style="font-size:12px;margin:4px 0">Referred out${e.referred_at?(' on '+esc(String(e.referred_at).slice(0,16))):''} &middot; came back on ${esc(String(e.returned_at).slice(0,16))}.</p>`:''}
+    ${e.late_anc_initiation==1?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">Late ANC initiation &mdash; first contact at ${esc(e.ga_first_contact)} weeks.</p>`:''}
+    ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select>
+      <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
+      <span id="rmtshow" class="muted"></span></p>`:''}
+    <div class="hubgrid">${tiles.join('')}</div>${fold}
+    ${(ME.role==='provider'||ADMIN())?`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+      ${String(e.status||'')==='closed'
+        ? `<span class="pill" style="background:#eef1f0;color:#4a5754">This episode of care is closed${e.closed_datetime?(' &middot; '+esc(String(e.closed_datetime).slice(0,16))):''}</span>
+           <button id="epreopen" class="sm" style="margin-left:8px">She has come back &mdash; reopen</button>`
+        : `<button id="epclose" class="sm">Close this episode of care</button>
+           <span class="muted" style="font-size:12px">Takes her off the worklist. The record stays, and can be reopened.</span>`}
+     </div>`:''}</div>`;
+  // CLOSING AN EPISODE. Nothing in ADHERE+ ever ended one — the enum had 'closed', the schema had
+  // closed_datetime, and no code touched either. So every woman ever registered stayed on a
+  // worklist for ever, and a woman moved from ANC to labour sat on both at once.
+  const cbtn=$('#epclose');
+  if(cbtn) cbtn.onclick=async()=>{
+    if(!confirm('Close this episode of care?\n\nShe comes off the worklist. Nothing is deleted — the whole record stays readable, and you can reopen it if she comes back.')) return;
+    cbtn.disabled=true;
+    const r=await api('PATCH','episodes/'+id,{status:'closed'});
+    if(r&&(r.ok||r.closed)){ toast('Episode closed','ok'); patientHub(id); }
+    else { cbtn.disabled=false; toast((r&&r.error)||'Could not close'); }
+  };
+  // CLOSING THE REFERRAL LOOP. She came back. Record it, so the worklist stops saying she is away.
+  const retb=$('#epreturn');
+  if(retb) retb.onclick=async()=>{
+    retb.disabled=true;
+    const r=await api('PATCH','episodes/'+id,{returned_at:localDateTime()});
+    if(r&&(r.ok||r.queued)){ toast('Recorded — she is back from referral','ok'); patientHub(id); }
+    else { retb.disabled=false; toast((r&&r.error)||'Could not record'); }
+  };
+  const rbtn=$('#epreopen');
+  if(rbtn) rbtn.onclick=async()=>{
+    rbtn.disabled=true;
+    const r=await api('PATCH','episodes/'+id,{status:'reopen'});
+    if(r&&r.ok){ toast('Reopened as "'+(r.status||'active')+'"','ok'); patientHub(id); }
+    else { rbtn.disabled=false; toast((r&&r.error)||'Could not reopen'); }
+  };
+  // Rupture TIME, not just the fact of rupture. The scorer derives rom_hours from this column and
+  // the model was trained on it; until now nothing could write it, so the feature was dead.
+  if(isLab&&!delivered){
+    const rs=$('#rmset'), wrap=$('#rmtwrap'), rmt=$('#rmt'), show=$('#rmtshow');
+    const paint=()=>{
+      const on=(rs.value==='1');
+      if(wrap) wrap.style.display=on?'':'none';
+      if(show) show.textContent=(on&&e.ruptured_datetime)?('— ruptured '+String(e.ruptured_datetime).slice(0,16).replace(' ','T').replace('T',' ')+' ('+romHrs(e.ruptured_datetime)+'h)'):'';
+      if(on&&rmt&&!rmt.value) rmt.value=(e.ruptured_datetime?String(e.ruptured_datetime).slice(0,16).replace(' ','T'):localDateTime().slice(0,16).replace(' ','T'));
+    };
+    if(rs){ rs.value=String(e.ruptured_membrane||0); paint();
+      rs.onchange=async()=>{ paint();
+        const body={ruptured_membrane:+rs.value};
+        if(rs.value!=='1') body.ruptured_datetime=null;                 // intact again: clear the clock
+        const r=await api('PATCH','episodes/'+id,body); if(r&&(r.ok||r.queued)) toast('Membranes updated','ok'); }; }
+    const sv=$('#rmtsave');
+    if(sv) sv.onclick=async()=>{
+      if(!rmt.value){ toast('Enter the time the membranes ruptured'); return; }
+      const when=rmt.value.replace('T',' ')+':00';
+      // The provider types the CLINIC's clock, so validate it against the clinic's clock — on a
+      // device in another zone, Date.parse() would read it as the device's and reject a valid time.
+      const w=parseLocal(when);
+      if(w && w.getTime()>Date.now()+60000){ toast('That is in the future'); return; }
+      sv.disabled=true;
+      const r=await api('PATCH','episodes/'+id,{ruptured_membrane:1,ruptured_datetime:when});
+      sv.disabled=false;
+      if(r&&(r.ok||r.queued)){ e.ruptured_datetime=when; paint(); toast('Rupture time saved — the score now sees hours since ROM','ok'); }
+    };
+  }
+}
+
+async function supervisorDash(){
+  if(ME.role!=='supervisor'&&!ADMIN()){ app().innerHTML=nav()+'<div class="card">Supervisors only.</div>'; return; }
+  const days=window._supDays||0;
+  let d; try{ d=await api('GET','supervisor'+(days?('?days='+days):'')); }catch(e){ app().innerHTML=nav()+'<div class="card">Could not load dashboard: '+esc(e.message||'error')+'</div>'; return; }
+  const fac=d.facilities||[];
+  const tot=fac.reduce((a,f)=>({lab:a.lab+f.labour_episodes,ps:a.ps+f.partographs_started,del:a.del+f.deliveries,red:a.red+f.red_alerts,ref:a.ref+f.referrals}),{lab:0,ps:0,del:0,red:0,ref:0});
+  const band=v=>v>=80?'green':v>=50?'amber':'red';
+  const rows=fac.map(f=>`<tr><td>${esc(f.name)}</td><td class="muted">${esc(f.woreda||'')}</td><td>${f.labour_episodes}</td><td><span class="pill ${band(f.partograph_completion)}">${f.partograph_completion}%</span></td><td>${f.deliveries}</td><td>${f.red_alerts}</td><td>${f.referrals}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No facilities in your scope yet.</td></tr>';
+  const totPct=tot.lab?Math.round(100*tot.ps/tot.lab):0;
+  const card=(v,l)=>`<div class="hubx" style="cursor:default"><b style="font-size:20px">${v}</b><br>${l}</div>`;
+  app().innerHTML=nav()+`<div class="card"><h3>Supervisor dashboard <span class="pill">${esc(d.scope||'facility')} scope</span></h3>
+   <p class="muted">Period: <select id="supp" style="width:auto;display:inline-block"><option value="0"${days===0?' selected':''}>All time</option><option value="30"${days===30?' selected':''}>Last 30 days</option><option value="90"${days===90?' selected':''}>Last 90 days</option></select> &middot; ${fac.length} facilit${fac.length===1?'y':'ies'} in your ${esc(d.scope||'facility')}. "Partograph started" = share of labour episodes with ≥1 observation recorded.</p>
+   <div class="hubgrid" style="margin-bottom:10px">${card(tot.lab,'Labour episodes')}${card(totPct+'%','Partograph started')}${card(tot.del,'Deliveries')}${card(tot.red,'Red AI alerts')}${card(tot.ref,'Referrals')}</div>
+   <table><tr><th>Facility</th><th>Woreda</th><th>Labour</th><th>Partograph started</th><th>Deliveries</th><th>Red alerts</th><th>Referrals</th></tr>${rows}</table></div>`;
+  const ps=$('#supp'); if(ps) ps.onchange=()=>{ window._supDays=+ps.value; supervisorDash(); };
+}
+
+async function remindersScreen(){
+  if(ME.role!=='supervisor'&&!ADMIN()){ app().innerHTML=nav()+'<div class="card">Admins &amp; supervisors only.</div>'; return; }
+  const list=await api('GET','reminders').catch(()=>[]);
+  const pill=s=>s==='sent'?'green':s==='pending'?'amber':s==='failed'?'red':'';
+  const rowsHtml=(list||[]).map(r=>`<tr><td>${esc((r.created_at||'').slice(0,16))}</td><td>${esc(((r.first_name||'')+' '+(r.father_name||'')).trim())}</td><td>${esc(r.kind||'')}</td><td>${esc(r.due_date||'')}</td><td>${esc(r.phone||'')}</td><td><span class="pill ${pill(r.status)}">${esc(r.status||'')}</span>${r.provider_note?(' <span class="muted" style="font-size:11px">'+esc(r.provider_note)+'</span>'):''}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No reminders yet. Add ANC follow-up visits with a next-appointment date, capture SMS consent, then run the scheduler.</td></tr>';
+  app().innerHTML=nav()+`<div class="card"><h3>SMS reminders</h3>
+   <p class="muted">ANC follow-up reminders (Amharic) for women who gave SMS consent and have a phone on file. Sending runs on a schedule; you can also run it now. Actual delivery goes through the configured SMS gateway.</p>
+   ${ADMIN()?'<button class="act" id="rrun">Generate &amp; send due reminders</button> <span class="muted" id="rmsg"></span>':''}</div>
+   <div class="card"><h3>Recent reminders</h3><table><tr><th>Created</th><th>Woman</th><th>Type</th><th>Due</th><th>Phone</th><th>Status</th></tr>${rowsHtml}</table></div>`;
+  const b=$('#rrun'); if(b) b.onclick=async()=>{ $('#rmsg').textContent=' running…'; try{ const r=await api('POST','reminders/run'); $('#rmsg').textContent=' generated '+r.generated+', sent '+r.sent+', skipped '+r.skipped+(r.failed?(', failed '+r.failed):''); setTimeout(()=>remindersScreen(),1000); }catch(e){ $('#rmsg').textContent=' '+(e.message||'error'); } };
+}
+
+// ---- Service worker: make sure clients actually GET the new build -------------
+// Bug found in the v16 audit: phones were still running adhere-v29 four deploys later.
+// The browser HTTP-caches service-worker.js, so it never saw the new cache name and
+// kept serving the old app.js. Three things are needed:
+//   1. updateViaCache:'none'  — never take service-worker.js from the HTTP cache
+//   2. reg.update()           — actively check for a new worker on load and hourly
+//   3. skipWaiting + reload   — when a new worker takes over, reload once so the
+//                               user is on the new code immediately
+if('serviceWorker' in navigator){
+  let reloading=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(reloading) return; reloading=true;
+    location.reload();          // the new worker has taken control — run the new code
+  });
+  navigator.serviceWorker.register('./service-worker.js',{updateViaCache:'none'}).then(reg=>{
+    reg.update().catch(()=>{});
+    setInterval(()=>reg.update().catch(()=>{}), 60*60*1000);   // hourly
+    document.addEventListener('visibilitychange',()=>{ if(!document.hidden) reg.update().catch(()=>{}); });
+  }).catch(()=>{});
+}
+boot();

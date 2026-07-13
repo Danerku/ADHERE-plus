@@ -42,15 +42,23 @@ function motherFeats(W){ W=W||{};
   //   3. the booking GA (ga_first_contact), advanced from the first-contact date.
   // If none exist, ga is LEFT UNSET so the model applies its own trained default rather than a term
   // assumption dressed up as a measurement.
+  // Advance a GA measured on an earlier DATE forward to today. A GA is only true as of the day it was
+  // taken; using it raw is how a woman booked at 10 weeks got scored as a 10-week (clamped to 24) labour.
+  const advance=(weeks, fromDate)=>{
+    let wk=+weeks; if(!(wk>0)) return null;
+    if(fromDate){ const d=(Date.now()-new Date(String(fromDate).slice(0,10)+'T00:00:00').getTime())/864e5;
+                  if(d>0&&d<310) wk+=d/7; }
+    return wk;
+  };
   let ga=null;
   if(W.lnmp){ const d=(Date.now()-new Date(W.lnmp+'T00:00:00').getTime())/864e5; if(d>0&&d<310) ga=d/7; }
-  if(ga==null && W.ga_now!=null && W.ga_now!=='') ga=+W.ga_now;            // latest ANC contact, pre-advanced by the caller
-  if(ga==null && W.ga_first_contact){
-    let wk=+W.ga_first_contact;
-    if(W.first_contact_date){ const wd=(Date.now()-new Date(W.first_contact_date+'T00:00:00').getTime())/864e5; if(wd>0&&wd<310) wk+=wd/7; }
-    if(wk>0) ga=wk;
-  }
-  if(ga!=null) out.ga=Math.max(24,Math.min(43,Math.round(ga)));
+  if(ga==null && W.anc_ga_weeks!=null && W.anc_ga_weeks!=='') ga=advance(W.anc_ga_weeks, W.anc_ga_date);  // latest ANC contact, BY WOMAN
+  if(ga==null && W.ga_now!=null && W.ga_now!=='')             ga=+W.ga_now;
+  if(ga==null && W.ga_first_contact)                          ga=advance(W.ga_first_contact, W.first_contact_date);
+  // A GA outside 24-43 is not a measurement we can trust - usually a stale booking GA that was never
+  // advanced. Leave it UNSET rather than CLAMPING it to 24, which told the model "extremely preterm"
+  // about a woman who was merely booked early. An omitted feature gets the model's trained default.
+  if(ga!=null){ const r=Math.round(ga); if(r>=24 && r<=43) out.ga=r; }
   if(W.prior_cs==='yes') out.prior_cs=1;
   return out;
 }
@@ -112,7 +120,19 @@ function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.n
 // at the bottom; anything a provider saved DURING that flush was silently erased by the write-back,
 // and one auth failure erased the entire un-attempted tail of the queue.
 // ============================================================================================
-function qRead(){ try{ const a=JSON.parse(localStorage.qq||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function qRead(){
+  try{
+    const a=JSON.parse(localStorage.qq||'[]');
+    if(!Array.isArray(a)) return [];
+    // SELF-HEAL. Devices in the field may already hold queued `login` attempts from the build that
+    // wrongly treated authentication as a deferrable write. Such an entry can never do anything useful
+    // - it just sits there reporting "pending" for ever, and replaying an old password is not something
+    // we would ever want to do. Drop them on sight; every clinical record is untouched.
+    const clean=a.filter(x=>!isAuthPath(x&&x.path));
+    if(clean.length!==a.length){ try{ localStorage.qq=JSON.stringify(clean); }catch(e){} }
+    return clean;
+  }catch(e){ return []; }
+}
 // The QUEUE and the FAILED list are the durable copy of a patient's data. Write them through lsSet,
 // which — at quota — evicts the refetchable read CACHE first and only fails if there is genuinely no
 // room. And RETURN whether it succeeded, so a caller can tell the provider the truth. The old bare
@@ -316,13 +336,12 @@ function queueWrite(method,path,bodyObj,cid){
     // produced duplicates. Store ONE local record per element instead.
     const coll=CREATES[seg[0]];
     if(Array.isArray(bodyObj)){
-      const ids=bodyObj.map(row=>{
-        const t=newLocalId();
-        const r=Object.assign({}, row||{}, {id:t, _coll:coll, _local:1, _at:localDateTime()});
-        locAdd(r);
-        return t;
-      });
-      queue({method,path,bodyObj,cid,tmp:ids[0]});
+      // Mint a local id per row, but QUEUE FIRST - if the outbox cannot be persisted (quota) queue()
+      // throws, and we must not be left holding N local rows with no way to ever send them while the UI
+      // still shows them as recorded. Same order as the single-object path below.
+      const ids=bodyObj.map(()=>newLocalId());
+      queue({method,path,bodyObj,cid,tmp:ids[0],tmps:ids});   // tmps: ALL of them, so ALL get reconciled
+      bodyObj.forEach((row,i)=>locAdd(Object.assign({}, row||{}, {id:ids[i], _coll:coll, _local:1, _at:localDateTime()})));
       return {ids, id:ids[0], local:true, queued:true};
     }
     const tid=newLocalId();
@@ -367,12 +386,33 @@ function unresolvedRefs(v,m,acc){
 // Is this local-id parent still coming? True if some queued item will CREATE it (its tmp), so a
 // child that references it can wait. If nothing in the queue will ever produce it, the child is an
 // orphan and must be surfaced rather than looped on forever.
-function parentStillComing(tmpId){
-  return qRead().some(it=>String(it.tmp)===String(tmpId));
+// ...but only a parent the CURRENT user can actually send. flush() skips items queued by another user
+// (they replay when that user signs back in). If the parent belongs to user A and the child to user B,
+// B's flush saw A's parent still in the queue, concluded "not an orphan", and waited - for ever. B's
+// clinical record was never sent, never failed, never shown. On a shared tablet (the normal case here)
+// that is silent, permanent loss. A parent B cannot send is, from B's point of view, not coming.
+function parentStillComing(tmpId, cur){
+  return qRead().some(it=>String(it.tmp)===String(tmpId) && !(it.by && it.by!==cur));
 }
 
+// A hoisted declaration, not a const arrow: qRead() is defined far earlier in the file and calls this
+// to self-heal a poisoned queue, so it must exist regardless of evaluation order.
+function isAuthPath(p){
+  const base=String(p==null?'':p).split('?')[0].replace(/^\/+/,'');
+  return base==='login' || base==='logout' || base==='change_password';
+}
+
+// AUTHENTICATION IS NOT A CLINICAL RECORD AND MUST NEVER BE QUEUED.
+// `write = method!=='GET'` meant a LOGIN - a POST - was treated like a patient record: if it was slow
+// or blipped, api() "helpfully" queued it and returned {queued:true}. That reply carries no user, so the
+// app never actually signed anyone in; it just said the session had expired, and the next attempt was
+// queued too. The provider was locked out of the tool entirely while the badge reported "3 pending".
+// Replaying a stale password later is also plainly wrong. Auth reaches the network or FAILS LOUDLY.
 async function api(method, path, bodyObj){
-  const write=method!=='GET'; const cid=write?newCid():null;   // stable key: a replay cannot double-commit
+  const auth=isAuthPath(path);
+  const write=method!=='GET';
+  const queueable=write && !auth;                       // auth is NEVER deferred
+  const cid=queueable?newCid():null;   // stable key: a replay cannot double-commit
 
   // A record that has not synced yet lives only on this device. Never ask the server about it — it
   // has never heard of it, and the 404 would blank her chart.
@@ -384,11 +424,13 @@ async function api(method, path, bodyObj){
   try{
     const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
     res=await tfetch(API_BASE+'api/'+path,{method,headers,
-      credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined});
+      credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined},
+      auth?25000:undefined);      // signing in is worth waiting longer for than a worklist refresh
   }catch(e){
     // No HTTP response at all: airplane mode, DNS failure, connection refused, mobile data with
     // no route. Nothing reached the server, so the entry is safe to queue and replay.
-    if(write) return queueWrite(method,path,bodyObj,cid);
+    if(auth) throw new Error('Could not reach the server to sign you in. Check the connection and try again.');
+    if(queueable) return queueWrite(method,path,bodyObj,cid);
     // AND THE READ IS SERVED FROM THE DEVICE. This is what makes the tool usable in a facility with
     // no signal: the worklists, and every chart she has opened before, are still there.
     const cached=ocGet(path);
@@ -401,11 +443,15 @@ async function api(method, path, bodyObj){
   // queued when it had NOT resolved — so a 502, a captive portal and an expired session each threw
   // the observation away while telling the provider her entries were "still queued". They were not.
   if(res.status===401){
-    if(write){ const r=queueWrite(method,path,bodyObj,cid); sessionLost(); return r; }
+    // On a LOGIN, 401 means "wrong username or password" - NOT "your session expired". Signing the user
+    // out here (and queueing the attempt) is what created the lock-out loop.
+    if(auth){ const d=await res.json().catch(()=>({})); throw new Error((d&&d.error)||'Incorrect username or password.'); }
+    if(queueable){ const r=queueWrite(method,path,bodyObj,cid); sessionLost(); return r; }
     sessionLost(); throw new Error('Your session has expired — please sign in again.');
   }
   if(res.status>=500){                       // 500/502/503/504 — the server is unwell, not the data
-    if(write) return queueWrite(method,path,bodyObj,cid);
+    if(auth) throw new Error('The server is not responding (HTTP '+res.status+'). Please try again in a moment.');
+    if(queueable) return queueWrite(method,path,bodyObj,cid);
     const c1=ocGet(path); if(c1!==null&&c1!==undefined) return mergeLocal(path,c1);
     throw new Error('The server is not responding (HTTP '+res.status+'). Please try again.');
   }
@@ -413,7 +459,8 @@ async function api(method, path, bodyObj){
   try{ data=await res.json(); }
   catch(e){
     // A 200 that is not JSON is a wifi sign-in page, not a save.
-    if(write) return queueWrite(method,path,bodyObj,cid);
+    if(auth) throw new Error('No usable response from the server — you may be behind a wifi sign-in page.');
+    if(queueable) return queueWrite(method,path,bodyObj,cid);
     const c2=ocGet(path); if(c2!==null&&c2!==undefined) return mergeLocal(path,c2);
     throw new Error('No usable response from the server — you may be behind a wifi sign-in page.');
   }
@@ -475,7 +522,7 @@ async function flush(){
         // So: if any queued item will still create that parent, wait (it is ahead of us, FIFO). If
         // NOTHING in the queue will ever produce it, this row is an ORPHAN — surface it on the failed
         // screen where a human can act on it, and let the rest of the queue drain.
-        const orphan=pending.filter(t=>!parentStillComing(t));
+        const orphan=pending.filter(t=>!parentStillComing(t,cur));
         if(orphan.length){
           dlqAdd(it,0,'the record it belongs to could not be saved (see the entries above) — this one needs to be re-entered against the correct patient');
           if(it.tmp) locUpdate(it.tmp,{_failed:1,_why:'the parent record could not be saved'});
@@ -507,6 +554,16 @@ async function flush(){
           // against the server's list by id, so she shows exactly once, continuously; and locPrune()
           // retires the local copy the moment a fresh server response actually contains her.
           if(real){ idmapPut(it.tmp, real); locReconcile(it.tmp, real); }
+          // An ARRAY create (ANC risk screening, checklist, BEmONC) makes one local row PER ITEM. Only
+          // ids[0] used to be reconciled, so the other thirty kept `_local:1` for ever: locPrune (which
+          // only retires _synced rows) never touched them, mergeLocal kept appending them to every later
+          // GET, and because they land LAST they OVERWROTE the server's current answer - so an item
+          // corrected by anyone still showed the stale offline answer here, and re-saving pushed the
+          // stale answer back to the server. Reconcile them all.
+          if(Array.isArray(it.tmps) && Array.isArray(d && d.ids)){
+            it.tmps.forEach((t,i)=>{ const rid=d.ids[i];
+              if(rid!==undefined && rid!==null){ idmapPut(t, rid); locReconcile(t, rid); } });
+          }
         }
         qDrop(it.cid); continue;              // sent. Remove THIS item, by cid.
       }
@@ -1097,13 +1154,22 @@ function muacFlag(m){ return (+m>0 && +m<23); }
 function bmiCalc(kg,cm){ kg=+kg; cm=+cm; if(!kg||!cm) return null; return Math.round((kg/Math.pow(cm/100,2))*10)/10; }
 function bmiFlag(b){ if(!b) return ''; if(b<18.5) return 'underweight'; if(b>25) return 'overweight'; return 'normal'; }
 // A modal the user must acknowledge — a toast is too easy to miss for a risk flag.
+// The safety modals - IMMINENT ECLAMPSIA, newborn danger signs, PPH - are the most important dialogs in
+// the app, and every one passes formatting (<b>, <br>) in its body. modal() ran esc() over the whole
+// thing, so the provider was shown the literal characters "<b>IMMINENT ECLAMPSIA</b><br>She has: ..."
+// instead of a legible warning. Escape EVERYTHING (a patient's name can never inject markup), then
+// re-enable only the handful of harmless formatting tags the callers actually use.
+function safeHtml(s){
+  return esc(String(s==null?'':s))
+    .replace(/&lt;(\/?)(b|i|em|strong|br|ul|ol|li|p)\s*\/?&gt;/gi, (m,slash,tag)=>'<'+slash+tag.toLowerCase()+'>');
+}
 function modal(title,body,kind){ const old=document.getElementById('mdl'); if(old) old.remove();
   const c=(kind==='risk')?'#a32d2d':'#0f766e';
   const d=document.createElement('div'); d.id='mdl';
   d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
   d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25)">
     <h3 style="margin:0 0 8px;color:${c};font-size:16px">${esc(title)}</h3>
-    <p style="margin:0 0 14px;font-size:14px;line-height:1.5;color:#334155">${esc(body)}</p>
+    <p style="margin:0 0 14px;font-size:14px;line-height:1.5;color:#334155">${safeHtml(body)}</p>
     <button class="act" id="mdlok" style="width:100%">Understood</button></div>`;
   document.body.appendChild(d);
   // NB: do NOT name this handler `esc` — that shadows the global HTML escaper for the
@@ -1236,7 +1302,7 @@ async function register(){
     $('#m').textContent=' saving…';
     try{
       const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
-        gravida:(+gr.value||null),para:(+pa.value||null),children_alive:(+ca.value||null),prev_pregnancy_outcome:(ppo.value||null),
+        gravida:numOrNull(gr.value),para:numOrNull(pa.value),children_alive:numOrNull(ca.value),prev_pregnancy_outcome:(ppo.value||null),
         abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
         pregnancy_planned:(pp.value===''?null:+pp.value),
         blood_group:(bg.value||null),rh_factor:(rh.value||null),residence:(res.value||null),occupation:(occ.value||null),
@@ -1476,16 +1542,11 @@ async function labour(){
 
 const OB={}; // per-episode in-memory observations for the chart
 async function partograph(id){
-  const [obs,W,ancv]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),epOne(id),api('GET','anc_visits?episode='+id).catch(()=>[])]);
-  // Feed motherFeats the latest ANC-contact GA (and its date), so a preterm labour is scored preterm
-  // rather than at the term default. Without this the model only ever saw women.lnmp, which is not
-  // captured at registration.
-  const lastAnc=(ancv||[]).filter(v=>v.ga_weeks!=null&&v.ga_weeks!=='').slice(-1)[0];
-  if(lastAnc){
-    let g=+lastAnc.ga_weeks;
-    if(lastAnc.visit_date){ const d=(Date.now()-new Date(lastAnc.visit_date+'T00:00:00').getTime())/864e5; if(d>0&&d<310) g+=d/7; }  // advance to today
-    W.ga_now=g;
-  }
+  const [obs,W]=await Promise.all([api('GET','observations?episode='+id).catch(()=>[]),epOne(id)]);
+  // GA now arrives ON the episode row (anc_ga_weeks / anc_ga_date), resolved BY WOMAN by the server.
+  // It used to be fetched with `anc_visits?episode=<this episode>` - but her ANC contacts belong to her
+  // ANC episode and labour is a DIFFERENT episode, so that always came back EMPTY and this fix never
+  // actually fired for any woman who had booked ANC here. motherFeats() advances it to today.
   const MF=motherFeats(W);
   // A delivered — or closed — episode is a finished record. Read-only.
   const st=String(W.status||'').toLowerCase();
@@ -2092,8 +2153,11 @@ async function delivery(id){
       box.innerHTML='<div style="background:#fcebeb;border:1px solid #d13b3b;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"><b>POSTPARTUM HAEMORRHAGE</b> &mdash; '
         +(heavy?('blood loss '+ebl+' ml (&ge;'+thresh+')'):'')+(heavy&&atonic?' and ':'')+(atonic?'uterus atonic':'')
         +'. Call for help, uterotonic + uterine massage, IV access and fluids, weigh losses, and prepare to refer. This is an emergency.</div>';
-      if(!tk('cpp')){ const c=document.getElementById('cpp'); if(c) c.checked=true; }   // auto-tick the MoH PPH complication
     } else box.innerHTML='';
+    // Keep the MoH PPH complication IN STEP with the criteria, in BOTH directions. It used to only ever
+    // be ticked ON: type 1500 ml, notice the typo, correct it to 150 - and comp_pph=1 was still filed,
+    // inflating the facility's PPH rate with a haemorrhage that never happened.
+    const c=document.getElementById('cpp'); if(c) c.checked=pph;
     return pph;
   };
   const ebl_el=$('#ebl');
@@ -2517,8 +2581,12 @@ async function ancVisits(id){
     else if(raised && proteinuria) A.push(['red','PRE-ECLAMPSIA','BP '+(s||'?')+'/'+(d||'?')+' with '+esc(up)+' proteinuria. Refer for assessment and plan delivery. Monitor closely.']);
     else if(raised) A.push(['amber','Raised blood pressure','BP '+(s||'?')+'/'+(d||'?')+'. Repeat after rest, check urine protein, and review at every contact. Calcium supplementation is indicated.']);
     else if(proteinuria) A.push(['amber','Proteinuria','Urine protein '+esc(up)+' with a normal BP. Recheck the BP, exclude urinary infection, and review at the next contact.']);
-    const f=+fhr.value||null;
-    if(f && (f<110||f>160)) A.push([(f<100||f>180)?'red':'amber','Abnormal fetal heart rate',f+' bpm (normal 110–160). '+((f<100||f>180)?'This is severely abnormal — reassess immediately and refer.':'Reassess after rest and repeat. If it persists, refer.')]);
+    // FHR 0 means NO FETAL HEART HEARD. `+fhr.value||null` turned that into "not assessed" and the
+    // `if(f && ...)` guard then skipped the alert entirely - the single most important thing this screen
+    // can find, and it was silent.
+    const f=numOrNull(fhr.value);
+    if(f===0) A.push(['red','NO FETAL HEART HEARD','No fetal heart rate detected. Confirm now with a second method (Doppler/ultrasound if available). If the fetal heart is genuinely absent this may be an intrauterine fetal death — refer urgently and do not send her home.']);
+    else if(f && (f<110||f>160)) A.push([(f<100||f>180)?'red':'amber','Abnormal fetal heart rate',f+' bpm (normal 110–160). '+((f<100||f>180)?'This is severely abnormal — reassess immediately and refer.':'Reassess after rest and repeat. If it persists, refer.')]);
     const fmv=(fmEl?fmEl.value:'');
     if(fmv==='absent') A.push(['red','No fetal movement','She reports NO fetal movements. Confirm the fetal heart immediately. If absent, refer urgently.']);
     else if(fmv==='reduced') A.push(['amber','Reduced fetal movement','Reduced fetal movement — check the fetal heart rate and arrange further assessment. Do not send her home without a plan.']);
@@ -2571,13 +2639,13 @@ async function ancVisits(id){
     try{
       const su=['none','alcohol','tobacco','khat','caffeine','other'].filter(s=>tk('su_'+s)).join(',')||null;
       const hbv=+hb_.value||null, muv=+muac.value||null, wtv=+wt.value||null;
-      const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:wtv,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:+fhr.value||null,presentation:pres.value,urine_protein:up.value,hgb:hbv,muac:muv,fetal_movement:(fm.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
-    ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:(+ift.value||null),deworming:tk('dw'),
+      const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:wtv,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:numOrNull(fhr.value),presentation:pres.value,urine_protein:up.value,hgb:hbv,muac:muv,fetal_movement:(fm.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
+    ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:numOrNull(ift.value),deworming:tk('dw'),
     // A woman already on ART is not re-tested — that block is replaced by ART continuation.
     hiv_test_accepted:(onART?null:tk('hta')),hiv_test_result:(onART?null:(htr.value||null)),hiv_posttest_counselled:(onART?null:tk('hpc')),
     art_continued:(onART?tk('artc'):null),viral_load:(onART?(vl.value||null):null),viral_load_date:(onART?(ecGet('vld')||null):null),
     art_clinic_linked:((onART&&vl.value==='unsuppressed')?tk('artcl'):null),
-    calcium_given:tk('cal'),ifa_tabs_consumed:(+ifc2.value||null),anti_d_given:tk('and'),pallor:(pal.value||null),urine_gramstain:(ugs.value||null),ogtt_result:(ogt.value||null),
+    calcium_given:tk('cal'),ifa_tabs_consumed:numOrNull(ifc2.value),anti_d_given:tk('and'),pallor:(pal.value||null),urine_gramstain:(ugs.value||null),ogtt_result:(ogt.value||null),
     mental_health:(mh.value||null),ipv_screen:(ipv.value||null),substance_use:su,
     cnsl_danger_signs:tk('c1'),cnsl_nutrition:tk('c2'),cnsl_lifestyle:tk('cl'),cnsl_bpcr:tk('cb'),cnsl_ecd:tk('c3'),cnsl_infant_feeding:tk('c4'),cnsl_family_planning:tk('c5'),remark:rmk.value,
     bmi:bmiCalc(wtv,e.height_cm),anaemia_grade:(anaemiaGrade(hbv)||null),muac_flag:(muv?(muacFlag(muv)?1:0):null)});
@@ -2746,8 +2814,8 @@ async function pncVisits(id){
     visit_period:(vp.value||null),maternal_condition:(+mc.value||null),pph:tk('ppph'),other_obs_complication:(ooc.value||null),
     hiv_test_accepted:tk('phta'),hiv_retest_accepted:tk('phrt'),hiv_test_result:(phtr.value||null),
     cnsl_danger_signs:tk('pc1'),cnsl_breastfeeding:tk('pc2'),cnsl_newborn_care:tk('pc3'),cnsl_family_planning:tk('pc4'),cnsl_epi:tk('pc5'),cnsl_ecd:tk('pc6'),
-    nb_weight_g:(+nwt.value||null),nb_problems:csv('np',[1,2,3,4,5,6,7,8,9,10,11]),nb_problem_other:(npo.value||null),nb_treatment:csv('nt',[1,2,3,4,5,6]),
-    nb_treatment_outcome:(+nto.value||null),nb_death_age_days:(+ndd.value||null),nb_death_cause:(+ndc.value||null),
+    nb_weight_g:numOrNull(nwt.value),nb_problems:csv('np',[1,2,3,4,5,6,7,8,9,10,11]),nb_problem_other:(npo.value||null),nb_treatment:csv('nt',[1,2,3,4,5,6]),
+    nb_treatment_outcome:(+nto.value||null),nb_death_age_days:numOrNull(ndd.value),nb_death_cause:(+ndc.value||null),
     ippfp_acceptor:(pacc.value||null),ippfp_method:(pmth.value||null),remark:prmk.value});
     $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); } finally{ b.disabled=false; } };
 }
@@ -2916,7 +2984,7 @@ async function babiesScreen(id){
     prob_prematurity:tk('bpre'),prob_sepsis_vsd:tk('bsep'),prob_resp_distress:tk('brds'),prob_jaundice:tk('bjau'),prob_congenital:tk('bcon'),prob_other:tk('both'),prob_other_text:(bpot.value||null),
     prob_lbw:((+wg.value||0)>0&&(+wg.value)<2500)?1:0,   // MoH item 55 — derived, never asked
     resuscitated_survived:tk('brsv'),birth_notification:tk('bnot'),
-    death_age_days:(+bdd.value||null),death_age_hours:(+bdh.value||null),death_cause:(+bdc.value||null)});
+    death_age_days:numOrNull(bdd.value),death_age_hours:numOrNull(bdh.value),death_cause:(+bdc.value||null)});
     const ok = r && (r.ids || r.ok || r.queued);
     $('#bm').textContent = ok ? (editing?' correction saved':' added') : ' '+((r&&r.error)||'error');
     if(ok && !r.queued){ EDIT_BABY=null; setTimeout(()=>babiesScreen(id),400); }
@@ -2942,11 +3010,28 @@ async function vitalsScreen(id){
    <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th><th>MEOWS</th></tr>
     ${hist}
    </table></div>`;
+  // MEOWS ALONE CANNOT RAISE A BAND ON ONE DERANGED VITAL. Temperature caps at 2 points and amber needs
+  // 3, so a woman at 40.0 C with everything else normal scored 2 = GREEN, on the one screen whose whole
+  // purpose is spotting maternal deterioration - and this screen showed no alerts at all, only a score.
+  // The same standalone red flags the ANC/PNC screens carry now fire here. Sepsis and severe
+  // hypertension are the two that kill quietly.
+  const vitalAlerts=()=>{
+    const A=[]; const s=+bps.value||null, d=+bpd.value||null, t=+tp.value||null, p=+pl.value||null, o=+sp.value||null;
+    if((s&&s>=160)||(d&&d>=110)) A.push(['red','SEVERE HYPERTENSION','BP '+(s||'?')+'/'+(d||'?')+' — at or above 160/110. Treat and refer urgently. Check for proteinuria and for signs of imminent eclampsia.']);
+    else if((s&&s>=140)||(d&&d>=90)) A.push(['amber','Raised blood pressure','BP '+(s||'?')+'/'+(d||'?')+'. Repeat after rest and check urine protein.']);
+    if(t&&t>=38.5) A.push(['red','Maternal fever — POSSIBLE SEPSIS','Temperature '+t+'°C. Look for the source (uterus, breast, wound, urine, chest), start antibiotics per protocol, and refer if she does not stabilise.']);
+    else if(t&&t>=38) A.push(['amber','Maternal fever','Temperature '+t+'°C. Reassess for a source of infection and monitor closely.']);
+    else if(t&&t<36) A.push(['red','Hypothermia','Temperature '+t+'°C. In a sick woman this is an ominous sign — assess for sepsis and shock.']);
+    if(p&&p>=120) A.push(['red','Tachycardia','Pulse '+p+'. With a normal or falling BP this is compensated shock — look for bleeding and for sepsis.']);
+    if(o&&o<95) A.push([(o<92?'red':'amber'),'Low oxygen saturation','SpO2 '+o+'%. Give oxygen and find the cause.']);
+    return A;
+  };
   const showMeows=()=>{ const ms=meowsScore({sbp:bps.value,dbp:bpd.value,pulse:pl.value,temp:tp.value,rr:rr.value,spo2:sp.value});
     const act=ms.band==='red'?'urgent review — escalate now':(ms.band==='amber'?'increase monitoring, review':'continue routine monitoring');
-    $('#meows').innerHTML='<div style="border-top:0.5px solid #eee;padding-top:8px"><b class="muted">MEOWS early-warning</b> <span class="pill '+ms.band+'">score '+ms.total+'</span> <span class="muted">'+esc(act)+'</span>'+(ms.parts.length?('<div class="muted" style="font-size:12px;margin-top:3px">Triggers: '+ms.parts.map(x=>esc(x.label)+' (+'+x.pts+')').join(' &middot; ')+'</div>'):'')+'</div>'; };
+    $('#meows').innerHTML=vitalAlerts().map(a=>alertBox(a[0],a[1],a[2])).join('')
+      +'<div style="border-top:0.5px solid #eee;padding-top:8px"><b class="muted">MEOWS early-warning</b> <span class="pill '+ms.band+'">score '+ms.total+'</span> <span class="muted">'+esc(act)+'</span>'+(ms.parts.length?('<div class="muted" style="font-size:12px;margin-top:3px">Triggers: '+ms.parts.map(x=>esc(x.label)+' (+'+x.pts+')').join(' &middot; ')+'</div>'):'')+'</div>'; };
   ['bps','bpd','pl','tp','rr','sp'].forEach(x=>{ const e=$('#'+x); if(e) e.oninput=showMeows; }); showMeows();
-  $('#vsave').onclick=async()=>{ const b=$('#vsave'); b.disabled=true; try{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,pulse:+pl.value||null,temperature:+tp.value||null,resp_rate:+rr.value||null,spo2:+sp.value||null,note:ntt.value});
+  $('#vsave').onclick=async()=>{ const b=$('#vsave'); b.disabled=true; try{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:numOrNull(bps.value),bp_diastolic:numOrNull(bpd.value),pulse:numOrNull(pl.value),temperature:numOrNull(tp.value),resp_rate:numOrNull(rr.value),spo2:numOrNull(sp.value),note:ntt.value});
     $('#vm').textContent=(r&&(r.ids||r.queued))?' recorded':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>vitalsScreen(id),400); } finally{ b.disabled=false; } };
 }
 
@@ -3030,7 +3115,7 @@ async function editWoman(wid){
     // The picker is now pre-filled (above); belt and braces, never send an empty one over a
     // stored value.
     const _ln=ecGet('lnmp')||w.lnmp||null;
-    const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:+gr.value||null,para:+pa.value||null,height_cm:(+ht.value||null),lnmp:_ln,edd:(_ln?addDays(_ln,280):null),
+    const r=await api('PATCH','women/'+wid,{first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,phone:ph.value,kebele:kb.value,gravida:numOrNull(gr.value),para:numOrNull(pa.value),height_cm:(+ht.value||null),lnmp:_ln,edd:(_ln?addDays(_ln,280):null),
     woreda:(wo.value||null),ga_first_contact:(+gafc.value||null),late_anc_initiation:(gafc.value?(lateAnc(gafc.value)?1:0):null),
     blood_group:(bg.value||null),rh_factor:(rh.value||null),pregnancy_planned:(pp.value===''?null:+pp.value),
     abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
