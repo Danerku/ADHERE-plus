@@ -17,4 +17,19 @@ self.addEventListener('fetch', e=>{
     // completely dead link fell back to the cache, so "instant second load" never actually happened
     // in the facilities this is built for.
     //
-    // Now: serve the cached shell immediately if we have one, and refresh it in the backgroun
+    // Now: serve the cached shell immediately if we have one, and refresh it in the background so the
+    // next open gets the new deploy. If nothing is cached (first ever load) wait for the network.
+    // A deploy therefore lands one reload later, which is the right trade for a 2G clinic.
+    e.respondWith((async()=>{
+      const cache=await caches.open(CACHE);
+      const hit=await cache.match(e.request);
+      const net=fetch(new Request(url.href,{cache:'no-store'}))
+        .then(res=>{ if(res&&res.ok) cache.put(e.request,res.clone()); return res; })
+        .catch(()=>null);
+      if(hit){ e.waitUntil(net); return hit; }                 // instant, and quietly refreshed
+      return (await net) || (await cache.match('./index.html')) || Response.error();
+    })());
+  } else {                                                   // model/json/assets: cache-first
+    e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cp=res.clone();caches.open(CACHE).then(c=>c.put(e.request,cp));return res;})));
+  }
+});
