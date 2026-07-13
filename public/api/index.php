@@ -412,7 +412,15 @@ try {
       // A high-risk woman who has DELIVERED is still high risk — postpartum haemorrhage and
       // eclampsia both happen after the birth. Excluding 'delivered' dropped exactly the women
       // the postnatal period is dangerous for.
-      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status IN ('laboring','active','delivered')"; }
+      // A HIGH-RISK WOMAN WHO IS STILL WAITING TO BE SEEN IS THE WHOLE POINT OF THIS LIST.
+      // This was an ALLOW-list of ('laboring','active','delivered') — which silently dropped 'wait',
+      // the status EVERY newly registered or triaged woman starts in, plus 'referred' and 'discharged'.
+      // So a woman found to have pre-eclampsia at her ANC contact was correctly flagged high_risk=1 on
+      // her own row, and then did not appear on the high-risk worklist the providers actually work from
+      // — she sat in the waiting queue, invisible, until somebody happened to open her chart. Verified
+      // live: half the high-risk ANC episodes on the server were missing from this list.
+      // Exclude only what is genuinely FINISHED, and let everything still in her care show.
+      if($flag==='highrisk'){ $sql.=" AND $hr AND e.status NOT IN ('closed')"; }
       // CLOSED EPISODES LEAVE THE WORKLISTS. Nothing in ADHERE+ ever wrote 'closed' or
       // 'discharged' — the enum had them, closed_datetime existed, and no code touched either. So a
       // woman transferred from ANC into labour kept her ANC episode 'active' for ever: she appeared
