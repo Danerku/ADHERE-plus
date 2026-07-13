@@ -88,6 +88,19 @@ function riskDrivers(o,feat){ const D=[];
 const ADMIN=()=> !!(ME && (ME.role==='admin' || ME.role==='super_admin'));
 const SUPER=()=> !!(ME && ME.role==='super_admin');
 const online=()=>navigator.onLine;
+
+// EVERY request gets a deadline. There was no timeout anywhere, and navigator.onLine only reports
+// whether the tablet has a LINK — in a facility with a working wifi router but a dead uplink it is
+// permanently true. So a request would hang for the browser's default (tens of seconds to minutes)
+// while the 60-second loop kept firing more of them on top, stacking up in-flight requests on a link
+// that was never going to answer. A read now gives up quickly and is served from the device instead.
+const NET_TIMEOUT=12000;                 // generous for 2G, far short of the browser's default
+function tfetch(url,opt,ms){
+  const c=(typeof AbortController!=='undefined')?new AbortController():null;
+  const t=setTimeout(()=>{ try{ c&&c.abort(); }catch(e){} }, ms||NET_TIMEOUT);
+  return fetch(url, Object.assign({}, opt, c?{signal:c.signal}:{}))
+    .finally(()=>clearTimeout(t));
+}
 function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.now()+Math.random().toString(36).slice(2); } }
 
 // ============================================================================================
@@ -100,11 +113,16 @@ function newCid(){ try{ return crypto.randomUUID(); }catch(e){ return 'c'+Date.n
 // and one auth failure erased the entire un-attempted tail of the queue.
 // ============================================================================================
 function qRead(){ try{ const a=JSON.parse(localStorage.qq||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
-function qWrite(a){ try{ localStorage.qq=JSON.stringify(a); }catch(e){ toast('The device is out of storage — a record could not be queued. Free space and try again.'); } }
+// The QUEUE and the FAILED list are the durable copy of a patient's data. Write them through lsSet,
+// which — at quota — evicts the refetchable read CACHE first and only fails if there is genuinely no
+// room. And RETURN whether it succeeded, so a caller can tell the provider the truth. The old bare
+// try/catch swallowed a quota failure and the record was silently never queued while the UI said
+// "saved".
+function qWrite(a){ return lsSet('qq', a); }
 function qDrop(cid){ qWrite(qRead().filter(x=>x.cid!==cid)); }              // remove by identity, never by position
 function qBump(cid){ const q=qRead(); const i=q.findIndex(x=>x.cid===cid); if(i<0) return 0; q[i].tries=(q[i].tries||0)+1; qWrite(q); return q[i].tries; }
 function dlqRead(){ try{ const a=JSON.parse(localStorage.dlq||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
-function dlqWrite(a){ try{ localStorage.dlq=JSON.stringify(a); }catch(e){} }
+function dlqWrite(a){ return lsSet('dlq', a); }
 function dlqAdd(it,status,why){ const d=dlqRead(); d.push(Object.assign({},it,{status,why,failed_at:localDateTime()})); dlqWrite(d); }
 
 function queue(item){
@@ -112,7 +130,13 @@ function queue(item){
   item.by_name=(ME&&ME.full_name)||'';
   item.queued_at=localDateTime();
   if(!item.cid) item.cid=newCid();
-  const q=qRead(); q.push(item); qWrite(q); paintNet();
+  const q=qRead(); q.push(item);
+  if(!qWrite(q)){
+    // Could not persist the outbox even after evicting the cache. The record is NOT saved — say so,
+    // loudly, so nothing is lost in silence.
+    throw new Error('The device is out of storage — this record could NOT be saved. Free some space on the tablet and enter it again.');
+  }
+  paintNet();
   return {queued:true};
 }
 
@@ -152,9 +176,15 @@ function lsSet(k,v){
   }
 }
 function ocAll(){ return lsGet(OC,{}); }
-function ocPut(path,data){ const c=ocAll(); c[path]={at:Date.now(),data}; lsSet(OC,c); }
+function ocPut(path,data){
+  // A fresh server response is the truth. Any record we created on this device that the server has
+  // now confirmed back to us can retire its local copy — that, and not a blanket wipe, is how the
+  // local store stays clean.
+  if(Array.isArray(data)) locPrune(data);
+  const c=ocAll(); c[path]={at:Date.now(),data}; lsSet(OC,c);
+}
 function ocGet(path){ const c=ocAll(); return c[path]?c[path].data:null; }
-function ocClear(){ try{ localStorage.removeItem(OC); }catch(e){} }      // after a sync: refetch the truth
+function ocClear(){ try{ localStorage.removeItem(OC); }catch(e){} }
 function ocEvict(){
   const c=ocAll(); const keys=Object.keys(c).sort((a,b)=>(c[a].at||0)-(c[b].at||0));
   keys.slice(0, Math.ceil(keys.length/2)).forEach(k=>delete c[k]);       // drop the oldest half
@@ -164,10 +194,34 @@ function locAll(){ const a=lsGet(OL,[]); return Array.isArray(a)?a:[]; }
 function locAdd(r){ const a=locAll(); a.push(r); lsSet(OL,a); }
 function locUpdate(id,patch){ const a=locAll(); const i=a.findIndex(x=>String(x.id)===String(id)); if(i>=0){ Object.assign(a[i],patch); lsSet(OL,a); } }
 function locDrop(id){ lsSet(OL, locAll().filter(x=>String(x.id)!==String(id))); }
+// A record we created offline has just synced. Keep the row — swap its local id for the real one and
+// mark it synced. She then stays visible without interruption (mergeLocal de-duplicates her against
+// the server's list by id) instead of vanishing in the gap between the sync and the next refetch.
+function locReconcile(tmp, real){
+  const a=locAll(); const i=a.findIndex(x=>String(x.id)===String(tmp));
+  if(i<0) return;
+  a[i]=Object.assign({}, a[i], {id:real, _local:0, _synced:1});
+  delete a[i]._failed; delete a[i]._why;
+  lsSet(OL,a);
+}
+// Retire synced local copies the server has now confirmed. Only ever drops rows marked _synced —
+// an UNSENT record is the only copy of a patient's data and is never touched here.
+function locPrune(rows){
+  const ids=new Set(rows.map(r=>r&&String(r.id)));
+  const a=locAll();
+  const keep=a.filter(x=>!(x._synced && ids.has(String(x.id))));
+  if(keep.length!==a.length) lsSet(OL,keep);
+}
 
 let _lseq=0;
-function newLocalId(){ _lseq=(_lseq+1)%1000; return -(Date.now()*1000 + _lseq); }   // NEGATIVE integer
-const isLocalId=v=>{ const n=(typeof v==='number')?v:parseInt(v,10); return !isNaN(n) && n<0; };
+function newLocalId(){ _lseq=(_lseq+1)%1000; return -(Date.now()*1000 + _lseq); }   // NEGATIVE integer ~ -1.75e15
+// A LOCAL ID IS A SPECIFIC, HUGE NEGATIVE NUMBER — not merely "any negative". This matters: a
+// provider can type a negative into a clinical field (e.g. BP -120, blood loss -5). If "negative"
+// alone meant "local id", that mistype would look like an unresolved parent and permanently wedge
+// the whole device's sync queue. Local ids are -(epoch_ms*1000+seq), always < -1e12; nothing a human
+// types reaches that magnitude. Server ids are small positives. So the test is a magnitude gate.
+const LOCAL_ID_MIN = -1e12;
+const isLocalId=v=>{ const n=(typeof v==='number')?v:parseInt(v,10); return !isNaN(n) && n<LOCAL_ID_MIN; };
 
 function idmap(){ return lsGet(OM,{}); }
 function idmapPut(tmp,real){ const m=idmap(); m[String(tmp)]=real; lsSet(OM,m); }
@@ -178,7 +232,13 @@ const CREATES={ women:'women', episodes:'episodes', pregnancy_tests:'pregnancy_t
   fp_clients:'fp_clients', imm_clients:'imm_clients', pmtct:'pmtct', babies:'babies',
   observations:'observations', anc_visits:'anc_visits', pnc_visits:'pnc_visits',
   danger_signs:'danger_signs', maternal_vitals:'maternal_vitals', delivery:'delivery',
-  anc_screening:'anc_screening', referrals:'referrals', checklist:'checklist' };
+  anc_screening:'anc_screening', referrals:'referrals', checklist:'checklist',
+  // These are ALSO read back by id offline (labs?episode=, fp_visits?client=, imm_doses?client=,
+  // pmtct_infants?mother=, pmtct_fu?mother=, bemonc/handover?episode=). Left out of CREATES they saved
+  // no local record, so the screen re-rendered from the stale cache without the new row and the
+  // provider entered it again — a duplicate on sync. They store a local record like everything else.
+  labs:'labs', fp_visits:'fp_visits', imm_doses:'imm_doses', pmtct_infants:'pmtct_infants',
+  pmtct_fu:'pmtct_fu', bemonc:'bemonc', handover:'handover', lafp:'lafp' };
 
 // Serve a GET from the device. The query shapes the app actually uses are bounded (episode=, ep=,
 // woman=, category=, flag=, client=, mother=, id=, programme=, q=), so the matcher is exact rather
@@ -204,6 +264,7 @@ function localRows(path){
       else if(k==='category') f='service_category';
       else if(k==='programme') f='programme';
       else if(k==='client') f=(base==='fp_visits')?'fp_client_id':'client_id';
+      else if(k==='fu') continue;                        // pmtct_fu extra filters not modelled
       else continue;                                    // a filter we do not model: do not exclude
       if(String(r[f]) !== String(v)) return false;
     }
@@ -249,11 +310,29 @@ function queueWrite(method,path,bodyObj,cid){
   const base=String(path).split('?')[0];
   const seg=base.split('/');
   if(method==='POST' && CREATES[seg[0]]){
+    // SOME COLLECTIONS POST AN ARRAY (checklist, anc_screening: one row per item). Object.assign({},
+    // [..]) turns an array into {0:{...},1:{...}} — a junk record with no episode_id, invisible to
+    // localRows. The screen then reopened blank, the provider filled it in again, and the sync
+    // produced duplicates. Store ONE local record per element instead.
+    const coll=CREATES[seg[0]];
+    if(Array.isArray(bodyObj)){
+      const ids=bodyObj.map(row=>{
+        const t=newLocalId();
+        const r=Object.assign({}, row||{}, {id:t, _coll:coll, _local:1, _at:localDateTime()});
+        locAdd(r);
+        return t;
+      });
+      queue({method,path,bodyObj,cid,tmp:ids[0]});
+      return {ids, id:ids[0], local:true, queued:true};
+    }
     const tid=newLocalId();
-    const rec=Object.assign({}, bodyObj||{}, {id:tid, _coll:CREATES[seg[0]], _local:1, _at:localDateTime()});
+    const rec=Object.assign({}, bodyObj||{}, {id:tid, _coll:coll, _local:1, _at:localDateTime()});
     decorateLocal(rec, seg[0]);
-    locAdd(rec);
+    // Queue FIRST — the outbox is the durable copy. If it cannot be persisted (device truly out of
+    // space) queue() throws and the caller tells the provider it was NOT saved, instead of the UI
+    // reporting success over a record that was never written anywhere.
     queue({method,path,bodyObj,cid,tmp:tid});
+    locAdd(rec);
     // Shaped like the server's replies so no caller has to know it happened offline.
     return {id:tid, ids:[tid], local:true, queued:true};
   }
@@ -272,8 +351,24 @@ function subIds(v,m){
 function anyLocalLeft(v,m){
   if(Array.isArray(v)) return v.some(x=>anyLocalLeft(x,m));
   if(v && typeof v==='object'){ for(const k in v){ if(anyLocalLeft(v[k],m)) return true; } return false; }
-  const key=String(v);
-  return /^-\d+$/.test(key) && m[key]===undefined;
+  // Only a REAL local id (13+ digit negative) that is not yet mapped counts as unresolved. A small
+  // negative a provider typed into a field is NOT a local reference and must not stall the queue.
+  return isLocalId(v) && m[String(v)]===undefined;
+}
+// Every unmapped local id a queued item still references — used to decide whether it can be sent,
+// and to detect an ORPHAN (a child whose parent will never sync because it was rejected/dropped).
+function unresolvedRefs(v,m,acc){
+  acc=acc||[];
+  if(Array.isArray(v)){ v.forEach(x=>unresolvedRefs(x,m,acc)); return acc; }
+  if(v && typeof v==='object'){ for(const k in v) unresolvedRefs(v[k],m,acc); return acc; }
+  if(isLocalId(v) && m[String(v)]===undefined) acc.push(String(v));
+  return acc;
+}
+// Is this local-id parent still coming? True if some queued item will CREATE it (its tmp), so a
+// child that references it can wait. If nothing in the queue will ever produce it, the child is an
+// orphan and must be surfaced rather than looped on forever.
+function parentStillComing(tmpId){
+  return qRead().some(it=>String(it.tmp)===String(tmpId));
 }
 
 async function api(method, path, bodyObj){
@@ -288,7 +383,7 @@ async function api(method, path, bodyObj){
   let res=null;
   try{
     const headers={'Content-Type':'application/json'}; if(cid) headers['X-Idempotency-Key']=cid;
-    res=await fetch(API_BASE+'api/'+path,{method,headers,
+    res=await tfetch(API_BASE+'api/'+path,{method,headers,
       credentials:'include',body:bodyObj?JSON.stringify(bodyObj):undefined});
   }catch(e){
     // No HTTP response at all: airplane mode, DNS failure, connection refused, mobile data with
@@ -367,17 +462,33 @@ async function flush(){
       const m=idmap();
       const path=String(it.path).replace(/^([^?]*\/)(-\d+)/, (s,pre,id)=> (m[id]!==undefined ? pre+m[id] : s));
       const body=subIds(it.bodyObj, m);
-      if(anyLocalLeft(body,m) || /\/-\d+/.test(path)){
-        // Her parent record has not synced yet. Do NOT send a row that points at an id the server
-        // cannot resolve — that is how a partograph ends up attached to nothing. FIFO means the
-        // parent is earlier in the queue; stop here and come back on the next flush.
-        break;
+      const pending=unresolvedRefs(body,m).concat((String(path).match(/\/(-\d{13,})/g)||[]).map(s=>s.slice(1)));
+      if(pending.length){
+        // This row points at a parent (a woman, an episode) that has not synced yet. Never send an id
+        // the server cannot resolve — that is how a partograph ends up attached to nothing.
+        //
+        // But "wait for the parent" MUST NOT mean "wait forever". If the parent was REJECTED (a
+        // duplicate MRN is the classic case) it will never get a real id, and the old code sat on
+        // this item and `break`-ed on every future flush — so every record on the device, for every
+        // patient, never synced again, silently, while the badge just said "N pending".
+        //
+        // So: if any queued item will still create that parent, wait (it is ahead of us, FIFO). If
+        // NOTHING in the queue will ever produce it, this row is an ORPHAN — surface it on the failed
+        // screen where a human can act on it, and let the rest of the queue drain.
+        const orphan=pending.filter(t=>!parentStillComing(t));
+        if(orphan.length){
+          dlqAdd(it,0,'the record it belongs to could not be saved (see the entries above) — this one needs to be re-entered against the correct patient');
+          if(it.tmp) locUpdate(it.tmp,{_failed:1,_why:'the parent record could not be saved'});
+          qDrop(it.cid);
+          continue;                            // DRAIN THE REST — one bad parent no longer freezes the device
+        }
+        continue;                              // parent is still in the queue ahead of us: skip, retry next pass
       }
 
       let res=null;
       try{
         const hd={'Content-Type':'application/json'}; if(it.cid) hd['X-Idempotency-Key']=it.cid;
-        res=await fetch(API_BASE+'api/'+path,{method:it.method,headers:hd,
+        res=await tfetch(API_BASE+'api/'+path,{method:it.method,headers:hd,
           credentials:'include',body:JSON.stringify(body)});
       }catch(e){ break; }                     // network dropped again — stop. Everything stays queued.
 
@@ -386,7 +497,16 @@ async function flush(){
         if(it.tmp){
           const d=await res.json().catch(()=>({}));
           const real=(d && (d.id || (Array.isArray(d.ids)&&d.ids[0]))) || null;
-          if(real){ idmapPut(it.tmp, real); locDrop(it.tmp); ocClear(); }   // refetch the truth next read
+          // Do NOT ocClear() here, and do NOT locDrop() her.
+          //   ocClear() wiped the ENTIRE read cache on the first successful create — so when the
+          //   signal died mid-flush (the normal case on a 2G link) the device was left offline with
+          //   an empty cache and the provider could see NO patients at all.
+          //   locDrop() then deleted the only local copy, so between syncing and the next successful
+          //   GET she appeared in neither the cache nor the local rows — she vanished.
+          // Instead: KEEP her local row and swap in the real id. mergeLocal() de-duplicates her
+          // against the server's list by id, so she shows exactly once, continuously; and locPrune()
+          // retires the local copy the moment a fresh server response actually contains her.
+          if(real){ idmapPut(it.tmp, real); locReconcile(it.tmp, real); }
         }
         qDrop(it.cid); continue;              // sent. Remove THIS item, by cid.
       }
@@ -502,7 +622,11 @@ async function failedScreen(){
     d.splice(i,1); dlqWrite(d);
     delete it.status; delete it.why; delete it.failed_at; it.tries=0;
     it.cid=newCid();                                    // a fresh key: the old one may be recorded server-side
-    const q=qRead(); q.push(it); qWrite(q);
+    // Re-queue at the HEAD, not the tail. A retried item is almost always a PARENT (the woman whose
+    // MRN collided), and everything that depends on her is already in the queue. Pushing her to the
+    // back put her behind her own children, which then could not resolve her — so "Retry" appeared
+    // to do nothing at all. She goes first; her children resolve behind her.
+    const q=qRead(); q.unshift(it); qWrite(q);
     toast('Queued again — trying now','ok'); await flush(); failedScreen();
   });
   document.querySelectorAll('[data-drop]').forEach(b=>b.onclick=()=>{
@@ -546,7 +670,17 @@ async function boot(){
   // does not fire on page load — so a device that recorded data offline, was closed, and was
   // reopened on a working connection showed "sync N pending" for ever and never sent it.
   if(ME && !ME._offline) flush().then(warmCache);
-  setInterval(()=>{ if(ME && online()) flush().then(warmCache); }, 60000);
+  // The 60-second loop must never OVERLAP itself. setInterval does not wait for an async body, so on
+  // a slow link a new cycle started every 60 s while the previous one was still in flight, piling
+  // requests onto an already-starved connection. One cycle at a time.
+  let _cycling=false;
+  setInterval(async()=>{
+    if(!ME || !online() || _cycling) return;
+    _cycling=true;
+    try{ await flush(); await warmCache(); }
+    catch(e){}
+    finally{ _cycling=false; }
+  }, 60000);
 }
 $('#logout').onclick=async()=>{
   // Do not let her walk away from unsent records. They are keyed to HER user id, so once she signs

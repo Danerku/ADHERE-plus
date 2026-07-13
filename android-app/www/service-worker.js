@@ -1,4 +1,4 @@
-const CACHE='adhere-v54';
+const CACHE='adhere-v56';
 const SHELL=['./','./index.html','./app.js','./styles.css','./config.js','./manifest.webmanifest',
   './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js',
   './model/risk_model.json','./model/newborn_model.json','./model/mch_rules.json'];
@@ -9,10 +9,26 @@ self.addEventListener('fetch', e=>{
   if(url.pathname.includes('/api/')) return;                 // API: network, app queues offline
   const isShell = /\.(html|js|css|webmanifest)$/.test(url.pathname) || url.pathname.endsWith('/');
   if(isShell){
-    // Network-first, but BYPASS the browser HTTP cache so a deploy always lands.
-    const fresh=new Request(url.href,{cache:'no-store'});
-    e.respondWith(fetch(fresh).then(res=>{const cp=res.clone();caches.open(CACHE).then(c=>c.put(e.request,cp));return res;})
-      .catch(()=>caches.match(e.request).then(r=>r||caches.match('./index.html'))));
+    // STALE-WHILE-REVALIDATE, with a short network race.
+    //
+    // This was network-first with no timeout. On a link that is UP but very slow — the normal case on
+    // 2G — the tablet re-downloaded the whole ~112 KB shell on EVERY open and the provider waited
+    // 20-45 s staring at a blank screen, even though a byte-identical copy was already cached. Only a
+    // completely dead link fell back to the cache, so "instant second load" never actually happened
+    // in the facilities this is built for.
+    //
+    // Now: serve the cached shell immediately if we have one, and refresh it in the background so the
+    // next open gets the new deploy. If nothing is cached (first ever load) wait for the network.
+    // A deploy therefore lands one reload later, which is the right trade for a 2G clinic.
+    e.respondWith((async()=>{
+      const cache=await caches.open(CACHE);
+      const hit=await cache.match(e.request);
+      const net=fetch(new Request(url.href,{cache:'no-store'}))
+        .then(res=>{ if(res&&res.ok) cache.put(e.request,res.clone()); return res; })
+        .catch(()=>null);
+      if(hit){ e.waitUntil(net); return hit; }                 // instant, and quietly refreshed
+      return (await net) || (await cache.match('./index.html')) || Response.error();
+    })());
   } else {                                                   // model/json/assets: cache-first
     e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{const cp=res.clone();caches.open(CACHE).then(c=>c.put(e.request,cp));return res;})));
   }
