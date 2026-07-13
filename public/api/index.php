@@ -216,7 +216,13 @@ try {
         if(strlen($pw)<8){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'password must be at least 8 characters']; continue; }
         if(!in_array($role,$ROLES,true)){ $errors[]=['row'=>$i,'user'=>$un,'error'=>($role==='super_admin'?'only a super-admin can create a super-admin':'invalid role')]; continue; }
         $ex=db()->prepare("SELECT id FROM users WHERE username=?"); $ex->execute([$un]); if($ex->fetch()){ $errors[]=['row'=>$i,'user'=>$un,'error'=>'username already taken']; continue; }
-        $scope=in_array(($row['scope']??'facility'),['facility','woreda','zone','region'])?($row['scope']??'facility'):'facility';
+        // SCOPE ABOVE 'facility' IS A SUPER-ADMIN DECISION. facility_id was already confined (below),
+        // but `scope` was not: a facility admin could create a supervisor with scope='region', and
+        // scoped_facility_ids() would then hand that account every patient name and phone number in
+        // the region. Widening the scope is exactly the privilege escalation the facility_id check
+        // was written to prevent, through the other column. A facility admin gets 'facility'.
+        $scope=in_array(($row['scope']??'facility'),['facility','woreda','zone','region'],true)?($row['scope']??'facility'):'facility';
+        if(!is_super($me)) $scope='facility';
         // The caller-supplied facility_id is HONOURED ONLY FOR A SUPER-ADMIN. This one line is what
         // stopped an admin at facility A from minting themselves an admin at facility B.
         $fid=admin_facility_scope($me, $row['facility_id']??null);
@@ -236,7 +242,12 @@ try {
         if((int)$id===(int)$me['id'] && $b['role']!==$me['role']) err('you cannot change your own role');
         db()->prepare("UPDATE users SET role=? WHERE id=?")->execute([$b['role'],$id]);
       }
-      if(isset($b['scope']) && in_array($b['scope'],['facility','woreda','zone','region'])){ db()->prepare("UPDATE users SET scope=? WHERE id=?")->execute([$b['scope'],$id]); }
+      // Same rule on update as on create: only a super-admin may widen a user's scope beyond their own
+      // facility. Otherwise a facility admin could simply PATCH an existing account to scope='region'.
+      if(isset($b['scope']) && in_array($b['scope'],['facility','woreda','zone','region'],true)){
+        if(!is_super($me) && $b['scope']!=='facility') err('only a super-admin can grant a scope beyond a single facility',403);
+        db()->prepare("UPDATE users SET scope=? WHERE id=?")->execute([$b['scope'],$id]);
+      }
       // Moving a user between facilities is a super-admin act.
       if(isset($b['facility_id']) && $super){ db()->prepare("UPDATE users SET facility_id=? WHERE id=?")->execute([(int)$b['facility_id'],$id]); }
       if(!empty($b['password'])){ if(strlen($b['password'])<8) err('password must be at least 8 characters'); db()->prepare("UPDATE users SET password_hash=? WHERE id=?")->execute([password_hash($b['password'],PASSWORD_DEFAULT),$id]); }
@@ -628,7 +639,10 @@ try {
       'referrals'=>$series("SELECT COUNT(*) c FROM referrals r JOIN episodes e ON e.id=r.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(r.recorded_at,'%Y-%m')=?"),
       'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
       'births'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),
-      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
+      // BOTH kinds of stillbirth. This counted only 'fresh_stillbirth', so every macerated stillbirth
+      // — a death that occurred before labour, and the one a facility most needs to see — was missing
+      // from the stillbirth rate entirely. The newborn screen has always offered both.
+      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome IN ('fresh_stillbirth','macerated_stillbirth') AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
       'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
     ];
     out(['months'=>$months,'indicators'=>$ind]);
@@ -666,6 +680,11 @@ try {
     // gated to clinicians like every other clinical table — not to data recorders.
     $pmtctTbl = ($pmtctChild || $tbl==='pmtct_mothers');
     $writeRoles = $pmtctTbl ? ['provider','admin'] : ['recorder','provider','admin'];
+    // ...and READING it is gated the same way. Writing PMTCT was already restricted to clinicians,
+    // but the GET was open to any authenticated session — so the read-only `observer` and the
+    // `recorder` could pull the entire HIV cohort: names, MRNs, ART regimens, CD4, viral loads and
+    // infant PCR results. That is the most sensitive data in the system and the least protected.
+    if($pmtctTbl && $m==='GET') require_role(['provider','admin']);
     if($m==='GET'){
       // Single mother by id. Without this the client screen had to pick her out of the
       // LIMIT-300 list — so past 300 mothers she resolved to an empty object, showed a
@@ -966,16 +985,33 @@ try {
       // one row per newborn — the register says "use consecutive rows for each newborn"
       // b.mrn is the NEWBORN's; w.mrn is the mother's. Alias the newborn's so the
       // mother's (selected later in $W) doesn't overwrite it in the fetched row.
-      $st=db()->prepare("SELECT b.*, b.mrn AS mrn_baby, d.delivery_datetime, d.mode, d.mode_other_text, d.partograph_used, d.episiotomy,
+      // THE REGISTER IS DRIVEN BY THE DELIVERY, NOT BY THE BABY.
+      // This used to read FROM babies, so a delivery with no newborn row produced NO LINE AT ALL:
+      // an emergency caesarean where the mother was transferred before the baby was recorded, an
+      // early pregnancy loss, or — worst — a MATERNAL DEATH with no live newborn simply vanished from
+      // the MoH register. Now every delivery yields a line (with the newborn columns blank if there is
+      // no baby row), and the second arm still catches a newborn recorded without a delivery summary,
+      // so nothing that was visible before is lost.
+      $DCOLS="d.delivery_datetime, d.mode, d.mode_other_text, d.partograph_used, d.episiotomy,
           d.amtsl_uterotonic_type, d.amtsl_cct, d.maternal_status, d.maternal_death_cause,
           d.comp_preeclampsia, d.comp_eclampsia, d.comp_aph, d.comp_pph, d.comp_other, d.referred,
           d.hiv_test_accepted, d.hiv_retest_accepted, d.hiv_test_result, d.cnsl_feeding_options,
-          d.ippfp_acceptor, d.ippfp_method, d.remark AS delivery_remark, $W
-        FROM babies b
-        JOIN episodes e ON e.id=b.episode_id JOIN women w ON w.id=e.woman_id
-        LEFT JOIN delivery_summary d ON d.episode_id=b.episode_id
-        WHERE e.facility_id=? AND DATE(COALESCE(d.delivery_datetime,b.recorded_at)) BETWEEN ? AND ?
-        ORDER BY d.delivery_datetime, w.mrn, b.birth_order");
+          d.ippfp_acceptor, d.ippfp_method, d.remark AS delivery_remark";
+      $st=db()->prepare(
+        "SELECT b.*, b.mrn AS mrn_baby, $DCOLS, $W
+           FROM delivery_summary d
+           JOIN episodes e ON e.id=d.episode_id
+           JOIN women   w ON w.id=e.woman_id
+           LEFT JOIN babies b ON b.episode_id=d.episode_id
+          WHERE e.facility_id=? AND DATE(d.delivery_datetime) BETWEEN ? AND ?
+         UNION ALL
+         SELECT b.*, b.mrn AS mrn_baby, $DCOLS, $W
+           FROM babies b
+           JOIN episodes e ON e.id=b.episode_id
+           JOIN women   w ON w.id=e.woman_id
+           LEFT JOIN delivery_summary d ON d.episode_id=b.episode_id
+          WHERE e.facility_id=? AND d.id IS NULL AND DATE(b.recorded_at) BETWEEN ? AND ?
+         ORDER BY delivery_datetime, mrn, birth_order");
     } elseif($type==='pnc'){
       $st=db()->prepare("SELECT p.*, e.place_of_delivery, e.infant_dob, $W FROM pnc_visits p
         JOIN episodes e ON e.id=p.episode_id JOIN women w ON w.id=e.woman_id
@@ -1030,7 +1066,10 @@ try {
        WHERE p.facility_id=? AND p.test_date BETWEEN ? AND ?
        GROUP BY band ORDER BY band");
     } else err('unknown register type');
-    $st->execute([$fac,$from,$to]); $rows=$st->fetchAll();
+    // The delivery register is a UNION of two arms (deliveries, then any newborn with no delivery
+    // row), so it binds the facility and the date range twice.
+    $st->execute($type==='delivery' ? [$fac,$from,$to,$fac,$from,$to] : [$fac,$from,$to]);
+    $rows=$st->fetchAll();
     out(['type'=>$type,'from'=>$from,'to'=>$to,'facility'=>$u['facility_name']??'','count'=>count($rows),'rows'=>$rows]);
   }
 
@@ -1040,7 +1079,11 @@ try {
     $one=function($sql,$p) use($ids){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$p])); return (int)($st->fetch()['c']??0); };
     $ind=[
       'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?",$period),
+      // DHIS2 reports fresh and macerated stillbirths as SEPARATE data elements, so they stay split
+      // here — but macerated was simply never exported at all, which under-reported the facility's
+      // stillbirths to the national system.
       'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
+      'macerated_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='macerated_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),
       'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?",$period),
     ];
     out(['facility'=>$fac,'period'=>$period,'indicators'=>$ind]);

@@ -1,7 +1,14 @@
+# Docker's json-file logs grow without bound. On a 25 GB droplet that is a slow disk-full — which
+# takes the database down with it. Every service caps its logs.
+x-logging: &logs
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
 services:
   db:
     image: mysql:8.0
     restart: always
+    logging: *logs
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:?set in .env}
       MYSQL_DATABASE: ${DB_NAME:-adhere}
@@ -18,6 +25,7 @@ services:
   web:
     build: { context: .., dockerfile: docker/Dockerfile }
     restart: always
+    logging: *logs
     environment:
       DB_HOST: db
       DB_NAME: ${DB_NAME:-adhere}
@@ -33,9 +41,19 @@ services:
       db: { condition: service_healthy }
     volumes:
       - sessions:/var/adhere-sessions
+    # `restart: always` only catches a process that EXITS. An Apache that is still running but has
+    # stopped answering — worker exhaustion, a wedged pool — would sit there serving nothing while
+    # Docker considered it healthy. This actually asks it.
+    healthcheck:
+      test: ["CMD-SHELL","php -r 'exit(@file_get_contents(\"http://127.0.0.1/index.html\")?0:1);'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
   caddy:
     image: caddy:2
     restart: always
+    logging: *logs
     ports: ["80:80","443:443"]
     environment:
       SITE_DOMAIN: ${SITE_DOMAIN:?e.g. partograph.epichealthsystems.org}
