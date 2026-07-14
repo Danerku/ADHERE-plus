@@ -905,7 +905,7 @@ function route(){
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
     find:findWoman,failed:failedScreen,voided:voidedScreen,
     letter:letterScreen, export:exportScreen,
-    abortion:abortionScreen, death:deathScreen,
+    abortion:abortionScreen, losslist:lossList, death:deathScreen,
     // Preconception care. `pcc` takes a WOMAN id, not an episode id — she may have no episode at all,
     // which is the whole point of the module. `pccuptake` takes an ANC episode id.
     pcc:pccScreen, pcclist:pccList, pccuptake:pccUptake,
@@ -1028,12 +1028,14 @@ async function home(){
   const isAdmin=ADMIN();
   // Home is now the ONLY way to navigate, so its tiles have to carry real information:
   // how many are waiting, and whether you are allowed to act.
-  let hr=0,lab=0,pm=0,anc=0,pnc=0;
+  let hr=0,lab=0,pm=0,anc=0,pnc=0,loss=0;
   try{ const eps=await api('GET','episodes');
        hr =(eps||[]).filter(e=>e.high_risk==1).length;
        lab=(eps||[]).filter(e=>e.service_category==='labour'&&e.status==='laboring').length;
        anc=(eps||[]).filter(e=>e.service_category==='anc'&&e.status==='active').length;
-       pnc=(eps||[]).filter(e=>e.service_category==='pnc'&&e.status==='active').length; }catch(e){}
+       pnc=(eps||[]).filter(e=>e.service_category==='pnc'&&e.status==='active').length;
+       // Open pregnancy-loss / abortion episodes — she is being cared for and not yet closed.
+       loss=(eps||[]).filter(e=>e.service_category==='abortion'&&e.status==='active').length; }catch(e){}
   try{ const pms=await api('GET','pmtct'); pm=(pms||[]).filter(pmtctNeedsAction).length; }catch(e){}
   let pcc=0;
   try{ const pa=await api('GET','pcc'); pcc=(pa||[]).length; }catch(e){}
@@ -1055,6 +1057,7 @@ async function home(){
       tileHtml('#antenatal','&#128197;','Antenatal',n(anc,'in care','8 contacts'),'teal',roClin)+
       tileHtml('#labour','&#128147;','Labour ward',n(lab,'in labour','Labour Care Guide · AI'),'teal',roClin)+
       tileHtml('#pnc','&#128118;','Postnatal',n(pnc,'in care','Mother + newborn'),'teal',roClin)+
+      tileHtml('#losslist','&#129657;','Pregnancy loss / abortion care',n(loss,'in care','Miscarriage · abortion · ectopic'),(loss?'red':'soft'),roClin)+
       tileHtml('#highrisk','&#9888;&#65039;','High risk',n(hr,'flagged','None flagged'),(hr?'red':'soft'),roClin)
     )}
 
@@ -2272,13 +2275,23 @@ async function intrapartum(id){
         $('#drv').textContent='The risk score is not available on this device.';
         $('#why').innerHTML='';
         $('#cover').textContent='Her assessment is recorded, and the alert thresholds above still apply. Reopen the app while online to restore the score.';
-      } else if(haveCore<2){
+      } else if(!activeDx || haveCore<2){
+        // THE SCORE IS WITHHELD IN THE LATENT PHASE, NOT FABRICATED.
+        // The model was trained on active labour and half its signal is dystocia — how long she has
+        // stood still relative to the lag time allowed. Before active labour is diagnosed there is no
+        // clock (hrs is null), and scoring anyway makes the model apply its own default for the
+        // active-labour duration — i.e. it invents the very input it most depends on. With cervix +
+        // FHR alone, haveCore==2 and the old gate (<2) let it through. A fabricated green in latent
+        // phase is exactly the "no model is not a green light" failure the panel exists to prevent.
         aiBox.style.display='block';
         $('#prob').textContent='—'; $('#prob').className='';
         $('#band').textContent=''; $('#band').className='pill';
-        $('#drv').textContent='Not enough recorded to score this assessment.';
+        $('#drv').textContent = activeDx ? 'Not enough recorded to score this assessment.'
+                                         : 'The risk score starts once active labour is diagnosed.';
         $('#why').innerHTML='';
-        $('#cover').textContent='A score needs at least the hours in active labour, the cervix and the fetal heart. Nothing is guessed.';
+        $('#cover').textContent = activeDx
+          ? 'A score needs at least the hours in active labour, the cervix and the fetal heart. Nothing is guessed.'
+          : 'This assessment is recorded, and the alert thresholds above apply. The intrapartum risk model is defined for active labour (≥5 cm) — it is not scored in the latent phase.';
       } else {
         const r=RM.predict(feat);
         const cfIn={sbp:o.bp_systolic,dbp:o.bp_diastolic,fhr:o.fhr_baseline,mld:mldN,tmp:o.temperature,hrs:hrs,cvx:o.cervix_cm};
@@ -3250,6 +3263,29 @@ async function highriskList(){
    </table></div>`;
   document.querySelectorAll('#app button[data-to]').forEach(b=>b.onclick=()=>transfer(+b.dataset.w,b.dataset.to,'from_highrisk'));
   wireAssign(); wireRisk(rows);   // the "Higher risk" pill explains itself on click
+}
+
+// ---- PREGNANCY LOSS / ABORTION CARE WORKLIST ----------------------------------------------
+// Its own front door. Miscarriage, safe abortion care, complications of unsafe abortion and an
+// ectopic are time-critical and were reachable only by opening the woman first — there was no list
+// of who is being cared for right now. This gathers the OPEN loss episodes so a provider can go
+// straight to the care screen, and so the caseload is visible at a glance from Home.
+async function lossList(){
+  const [rows,provs]=await Promise.all([api('GET','episodes?category=abortion').catch(()=>[]),api('GET','providers').catch(()=>[])]);
+  const open=(rows||[]).filter(r=>r.status==='active');
+  const done=(rows||[]).filter(r=>r.status!=='active');
+  const line=r=>`<tr><td>${esc(r.mrn)}</td><td>${esc(r.first_name)} ${esc(r.father_name)}</td><td>${esc(r.gravida)}/${esc(r.para)}</td><td>${esc(r.status)}${referPill(r)}${syncPill(r)}</td>
+    <td><select class="asgn" data-ep="${r.id}" style="max-width:150px">${provOpts(provs,r.provider_id)}</select></td>
+    <td><a class="nav" href="#abortion/${r.id}">Care record</a> <a class="nav" href="#patient/${r.id}">Open</a></td></tr>`;
+  app().innerHTML=nav()+`<div class="card"><h3>Pregnancy loss / abortion care</h3>
+   <p class="muted">Women in care for a miscarriage, safe abortion care, the complications of an unsafe abortion, or an ectopic pregnancy. "Care record" opens where the procedure, medicines, complications and contraception are recorded &mdash; and where a referral letter can be printed.</p>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
+   ${open.map(line).join('')||'<tr><td colspan=6 class=muted>No open pregnancy-loss episodes. A woman enters here from a positive pregnancy test where she chooses not to continue, or when registered with service = Pregnancy loss / abortion care.</td></tr>'}
+   </table>
+   ${done.length?`<h3 style="margin-top:16px">Closed</h3>
+   <table><tr><th>MRN</th><th>Name</th><th>G/P</th><th>Status</th><th>Provider</th><th>Actions</th></tr>
+   ${done.map(line).join('')}</table>`:''}</div>`;
+  wireAssign();
 }
 
 async function transfer(womanId,cat,from){
@@ -4899,6 +4935,7 @@ async function immClient(id){
   const prog=c.programme||'Td';
   const maxDose=(prog==='Td')?5:2;
   const given={}; (doses||[]).forEach(d=>given[d.dose_no]=d.dose_date);
+  window.__immGiven=given;   // so the dose dropdown can seed the date picker with the recorded date on a correction
   const n=Object.keys(given).length;
   const nextDose=[...Array(maxDose)].map((_,i)=>i+1).find(i=>!given[i]);
   app().innerHTML=nav()+`<div class="card"><h3>${esc(c.name||'Client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(prog)} · ${esc(c.mrn||'')}</span></h3>
@@ -4922,8 +4959,8 @@ async function immClient(id){
          a "(correct)" marker; re-recording one updates its date rather than duplicating it (the server
          de-dupes on client_id + dose_no). Default to the next dose due, or dose 1 if all are given. -->
     <div class="grid" style="margin-top:12px">
-      <label>Record${nextDose?'':' / correct a'} dose<select id="dno">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (correct)':'')]),nextDose||1)}</select></label>
-      ${ecPicker('ddt','Date given',true)}
+      <label>Record${nextDose?'':' / correct a'} dose<select id="dno" onchange="ecSet('ddt', (window.__immGiven||{})[+this.value]||null)">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (correct)':'')]),nextDose||1)}</select></label>
+      ${ecPicker('ddt','Date given',true, (nextDose?null:(given[nextDose||1]||null)))}
      </div>
      <button class="act" id="dsave" style="margin-top:10px">Save dose</button> <span class="muted" id="dm"></span>
    </div>`;
@@ -6231,9 +6268,21 @@ async function abortionScreen(id){
     <label>Method accepted<select id="acfm">${selOpts([['none','None / declined'],['POP','Pill'],['Inj','Injectable'],['Imp','Implant'],['IUCD','IUCD'],['Cond','Condoms'],['TL','Tubal ligation'],['Oth','Other']], rec?rec.pac_fp_method:'')}</select></label>
    </details>
 
+   <!-- WHAT IS BEING DONE FOR HER, IN THE PRESENT TENSE.
+        "Referred" as a bare past-tense outcome recorded that it happened and handed the provider
+        nothing. Referral is an ACTION: choosing it reveals where she is going and a button that prints
+        the letter — carrying the reason and everything already done — so she does not arrive empty-handed. -->
    <div class="grid">
-    <label>Outcome <span style="color:#a32d2d">*</span><select id="acout">${selOpts([['recovered','Recovered — discharged'],['referred','Referred'],['died','SHE DIED'],['absconded','Left before care was complete']], rec?rec.outcome:'')}</select></label>
-    <label id="acrefw" style="display:none">Referred to<input id="acref" value="${esc(rec&&rec.referred_to?rec.referred_to:'')}"></label>
+    <label>What is happening for her <span style="color:#a32d2d">*</span><select id="acout">${selOpts([
+      ['recovered','Cared for here — recovered &amp; discharged'],
+      ['referred','Referring her on — needs care elsewhere'],
+      ['died','SHE DIED'],
+      ['absconded','Left before care was complete']], rec?rec.outcome:'')}</select></label>
+    <label id="acrefw" style="display:none">Refer to<input id="acref" value="${esc(rec&&rec.referred_to?rec.referred_to:'')}" placeholder="receiving facility"></label>
+   </div>
+   <div id="acreferact" style="display:none;margin:4px 0 2px">
+     <button class="act" id="acreferletter" style="background:#0f766e">Save &amp; print referral letter</button>
+     <span class="muted" style="font-size:12px;margin-left:6px">Carries her details, the reason, and what has already been done (Hb, blood loss, procedure, medicines).</span>
    </div>
    <label>Remark<input id="acrmk" value="${esc(rec&&rec.remark?rec.remark:'')}"></label>
    <div id="acdied"></div>
@@ -6255,7 +6304,9 @@ async function abortionScreen(id){
     const hb=+($('#achb').value||0); if(hb && hb<7) A.push(['red','Severe anaemia','Haemoglobin '+hb+' g/dl. Transfuse per protocol and treat the cause.']);
     if(rhNeg && !tk('acad')) A.push(['amber','Anti-D not yet recorded','She is Rh negative. Anti-D after a pregnancy loss protects every future pregnancy.']);
     $('#acalert').innerHTML=A.map(a=>alertBox(a[0],a[1],a[2])).join('');
-    $('#acrefw').style.display=($('#acout').value==='referred')?'':'none';
+    const isRef=($('#acout').value==='referred');
+    $('#acrefw').style.display=isRef?'':'none';
+    { const ra=$('#acreferact'); if(ra) ra.style.display=isRef?'':'none'; }
     // The legal ground is asked ONLY for an induced abortion. It is meaningless for a miscarriage or
     // an ectopic, and asking a woman who has just lost a wanted pregnancy to justify it would be cruel.
     const induced=($('#actype').value==='induced');
@@ -6268,13 +6319,16 @@ async function abortionScreen(id){
   const hbEl=$('#achb'); if(hbEl) hbEl.addEventListener('input',paint);
   paint();
 
-  $('#acsave').onclick=async()=>{
+  // One save, reused by the plain Save and by "Save & print referral letter". `then` is where we go
+  // after a successful save: her record, or straight to the printable letter.
+  const saveAbortion=async(then)=>{
     if(!$('#actype').value){ modal('What happened?','Record whether this was a miscarriage, safe abortion care, the complications of an unsafe abortion, or an ectopic pregnancy. They are different events and must not be counted as the same thing.','risk'); return; }
-    if(!$('#acout').value){ modal('Outcome','Record what happened to her: recovered, referred, or died.','risk'); return; }
+    if(!$('#acout').value){ modal('What is happening for her?','Record whether she is being cared for here, referred on, or has left — the record needs to say what is being done.','risk'); return; }
     if($('#actype').value==='induced' && !$('#acind').value){
       modal('On what ground?','This is safe abortion care. The law permits it on stated grounds, and the register asks which one. Record it — a service that cannot say the ground it acted on cannot report the care it gave, or defend it.','risk'); return; }
     if(!checkRanges([['achb','hgb'],['acbl','blood_loss_ml'],['acga','ga_weeks']])) return;
-    const b=$('#acsave'); if(b.disabled) return; b.disabled=true; let _saved=false;
+    const b=$('#acsave'); const rb=$('#acreferletter');
+    if(b.disabled) return; b.disabled=true; if(rb) rb.disabled=true; let _saved=false;
     try{
       const body={episode_id:+id, care_date:ecGet('acd'), ga_weeks:numOrNull($('#acga').value),
         loss_type:$('#actype').value, presentation:($('#acpres').value||null),
@@ -6292,13 +6346,25 @@ async function abortionScreen(id){
         _saved=true;
         $('#acm').textContent=' saved';
         if($('#acout').value==='died'){ setTimeout(()=>location.hash='#death/'+id, 600); return; }
+        // REFER = it is also recorded on the referrals table, so the referral letter has a reason and
+        // the facility learns whether referring her helped. The abortion record already carries the
+        // clinical detail; this is the referral event itself.
+        if($('#acout').value==='referred'){
+          await api('POST','referrals',{episode_id:+id, subject:'mother',
+            referred_to:($('#acref').value||null), urgency:( (tk('acsh')||tk('ach')||tk('acs')||$('#actype').value==='ectopic') ? 'emergency':'urgent'),
+            reason:('Pregnancy loss / abortion care — '+({spontaneous:'miscarriage',induced:'safe abortion care',unsafe:'complications of unsafe abortion',ectopic:'ectopic pregnancy',molar:'molar pregnancy',unknown:'pregnancy loss'}[$('#actype').value]||$('#actype').value)
+              + ( $('#actype').value==='induced' && $('#acind').value ? (' ('+({rape:'rape',incest:'incest',life_health:'risk to life/health',fetal_impairment:'fetal impairment',disability:'disability',minor:'minor',other:'other'}[$('#acind').value]||$('#acind').value)+')') : '') )}).catch(()=>{});
+        }
         // She is no longer pregnant. Her episode of care ends here, not on an antenatal worklist.
         await api('PATCH','episodes/'+id,{status:'closed', close_reason:'pregnancy ended'}).catch(()=>{});
+        if(then==='letter'){ toast('Recorded — opening her referral letter','ok'); setTimeout(()=>location.hash='#letter/'+id, 500); return; }
         toast('Recorded. Her episode is closed — she is no longer on the antenatal list.','ok');
         setTimeout(()=>location.hash='#patient/'+id, 900);
-      } else $('#acm').textContent=' '+((r&&r.error)||'error');
-    } finally { if(!_saved) b.disabled=false; }
+      } else { $('#acm').textContent=' '+((r&&r.error)||'error'); }
+    } finally { if(!_saved){ b.disabled=false; if(rb) rb.disabled=false; } }
   };
+  $('#acsave').onclick=()=>saveAbortion(null);
+  { const rl=$('#acreferletter'); if(rl) rl.onclick=()=>{ if(!$('#acref').value){ modal('Refer to where?','Enter the receiving facility before printing the letter.','risk'); return; } saveAbortion('letter'); }; }
 }
 
 // ---- A MATERNAL DEATH ---------------------------------------------------------------------------
@@ -6365,7 +6431,7 @@ async function deathScreen(id){
 // facility and the woreda office actually use.
 async function exportScreen(){
   if(!(ME.role==='provider'||ME.role==='supervisor'||ADMIN())){ app().innerHTML=nav()+'<div class="card">Providers, supervisors and admins only.</div>'; return; }
-  const today=new Date().toISOString().slice(0,10);
+  const today=localDate();                              // zone-correct — toISOString() would give yesterday overnight in UTC+3, dropping today's records on the 1st
   const first=today.slice(0,8)+'01';
   const T=[['women','Patients registered'],['anc','ANC contacts'],['labour','Labour monitoring (LCG)'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals'],['loss','Pregnancy loss / abortion care'],['deaths','Maternal deaths'],
     ['pcc','Preconception care'],['pcc_uptake','PCC uptake at ANC']];
@@ -6460,7 +6526,9 @@ async function letterScreen(id){
   // her name, her blood group and a referral reason, and NOTHING under what we found: no haemoglobin,
   // no blood loss, no procedure already attempted, no antibiotics already given, no anti-D. They start
   // again from nothing, and she is bleeding.
-  const ab0=(C.abortion_care||[])[0]||null;
+  // Newest first — NOT trusted from the server. The referral letter must carry her MOST RECENT loss,
+  // not the oldest on file; the other PCC consumers already sort, this one was the exception.
+  const ab0=(C.abortion_care||[]).slice().sort((a,b)=>String(b.care_date||'').localeCompare(String(a.care_date||'')) || (b.id-a.id))[0]||null;
   const abortionBlock = ab0 ? `<div class="rec-b"><h5>Her pregnancy loss / abortion care <span class="muted" style="font-weight:400">(${esc(String(ab0.care_date||'').slice(0,10))})</span></h5>
       <div class="rec-g">
         ${lrow('What happened', {spontaneous:'Miscarriage',induced:'Safe abortion care',unsafe:'Complications of an unsafe abortion',ectopic:'ECTOPIC PREGNANCY',molar:'Molar pregnancy',unknown:'Pregnancy loss'}[ab0.loss_type]||ab0.loss_type)}
@@ -6475,7 +6543,9 @@ async function letterScreen(id){
         ? `<p style="font-size:13px;margin:6px 0 0"><b>She presented with:</b> <span class="rec-alarm">${esc([ab0.comp_shock==1?'shock':'',ab0.comp_haemorrhage==1?'haemorrhage':'',ab0.comp_sepsis==1?'SEPSIS':'',ab0.comp_perforation==1?'uterine perforation':'',ab0.comp_anaemia==1?'severe anaemia':''].filter(Boolean).join(', '))}</span></p>` : ''}
     </div>` : '';
 
-  const pc0=(C.pcc||[])[0]||null;
+  // Her LATEST preconception assessment, not her oldest — a defer verdict since resolved, or a missing
+  // recent teratogenic/GBV/creatinine finding, is exactly what must not go stale on a referral.
+  const pc0=(C.pcc||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')) || (b.id-a.id))[0]||null;
   const pccBlock = pc0 ? `<div class="rec-b"><h5>Her preconception assessment <span class="muted" style="font-weight:400">(${esc(String(pc0.contact_date||'').slice(0,10))})</span></h5>
       <div class="rec-g">
         ${lrow('Plans pregnancy', {within_3m:'Within 3 months',within_1y:'Within a year',no:'No',unsure:'Unsure'}[pc0.plans_pregnancy]||'')}
@@ -6494,7 +6564,7 @@ async function letterScreen(id){
   app().innerHTML=nav()+`<div class="card rec letter">
     <div style="text-align:center;margin-bottom:10px">
       <h3 style="margin-bottom:2px">Referral letter</h3>
-      <div class="muted">${esc(ME.facility_name||'')}${ME.facility_name?' &middot; ':''}${esc(new Date().toISOString().slice(0,10))}</div>
+      <div class="muted">${esc(ME.facility_name||'')}${ME.facility_name?' &middot; ':''}${esc(localDate())}</div>
     </div>
     <div class="rec-b"><h5>The patient</h5><div class="rec-g">
       ${line('Name',name)}${line('MRN',W.mrn)}${line('Age',W.age)}
@@ -6551,7 +6621,7 @@ async function letterScreen(id){
     ${gaps.length?`<div class="rec-b"><h5>Still outstanding at the time of referral</h5>
       <ul style="margin:4px 0 0 18px;font-size:13px">${gaps.map(g=>`<li>${esc(g[0])}</li>`).join('')}</ul></div>`:''}
     <div class="rec-b"><h5>Referring provider</h5>
-      <p style="font-size:13px;margin:2px 0">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')} &middot; ${esc(new Date().toISOString().slice(0,10))}</p>
+      <p style="font-size:13px;margin:2px 0">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')} &middot; ${esc(localDate())}</p>
       <p class="muted sigline" style="font-size:12px">Signature: ______________________________ &nbsp;&nbsp; Phone: ______________________</p>
     </div>
     <div style="margin-top:12px">
@@ -7231,7 +7301,7 @@ async function patientHub(id){
       // creatinine of 3) and she conceived anyway: nobody in the antenatal room knew. She is on
       // valproate: nobody knew. She needs 5 mg folate through the first trimester, not 0.4: nobody
       // knew. She disclosed violence: nobody knew, and she will not volunteer it twice.
-      const pcc0=(C.pcc||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')))[0]||null;
+      const pcc0=(C.pcc||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')) || (b.id-a.id))[0]||null;
       const pccBanner = (pcc0 && pcc0.readiness==='defer')
         ? `<div style="background:#fdf2f2;border:1px solid #e9bcbc;color:#7f1d1d;border-radius:10px;padding:10px 12px;margin:8px 0;font-size:13px">
              <b>At her preconception assessment she was advised NOT to conceive yet</b>${pcc0.contact_date?(' ('+esc(String(pcc0.contact_date).slice(0,10))+')'):''}.
