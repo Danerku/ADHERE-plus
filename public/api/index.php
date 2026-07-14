@@ -600,7 +600,9 @@ try {
     // PATCH a clinical row to CORRECT it. Newborn DBS results, delivery details and pregnancy
     // results all come back after the fact; without this the only way to record them was to
     // insert a second row — a phantom twin, a duplicate delivery.
-    if($m==='PATCH' && in_array($tbl,['babies','delivery_summary','pnc_visits','anc_visits']) && $id){
+    // maternal_vitals added: the screen can now correct a mistyped BP or temperature, and without this
+    // the PATCH fell through to a 404 while the UI reported a save.
+    if($m==='PATCH' && in_array($tbl,['babies','delivery_summary','pnc_visits','anc_visits','maternal_vitals']) && $id){
       $u=require_role(['provider','admin']); $b=body();
       // SELECT * (not just episode_id): the linkage below needs the row's own visit_date when the
       // caller patches only the result and not the date.
