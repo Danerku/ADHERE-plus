@@ -320,3 +320,31 @@ a.tile:active{transform:translateY(0)}
 
 /* ---- Small inline buttons (rupture time, failed-queue retry/discard) ---- */
 button.sm{padding:5px 10px;font-size:12px;width:auto;margin:2px 4px 2px 0}
+
+/* ================= THE CARE RECORD =================================================
+   Everything the tool wrote down, shown back. Two rules drive this layout:
+   (1) an abnormal value must catch the eye before the provider has finished scrolling;
+   (2) it must PRINT — on paper it is the copy she carries, and the copy the receiving
+       facility reads when she is referred.                                            */
+.rec h5{margin:0 0 8px;font-size:14px;color:#0f766e}
+.rec-b{border-top:1px solid var(--border);padding:12px 0;margin-top:4px}
+.rec-b:first-of-type{border-top:0}
+.rec-c{background:#f7faf9;border-radius:10px;padding:10px 12px;margin-bottom:8px}
+.rec-c h5{color:#334155;font-size:13px}
+.rec-g{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px 18px}
+.rec-f{display:flex;justify-content:space-between;gap:10px;padding:3px 0;border-bottom:1px dotted #e2e8e6;font-size:13px}
+.rec-l{color:#64748b}
+.rec-v{font-weight:600;color:#1f2937;text-align:right}
+.rec-v.rec-alarm,td.rec-alarm{color:#a32d2d;font-weight:700}
+.rec-t{width:100%;border-collapse:collapse;font-size:13px}
+.rec-t th{text-align:left;color:#64748b;font-weight:600;padding:4px 8px 4px 0;white-space:nowrap}
+.rec-t td{padding:4px 8px 4px 0;border-bottom:1px solid #eef2f1;white-space:nowrap}
+
+@media print{
+  header,footer,.navbar,button,.pill{display:none !important}
+  body{background:#fff}
+  .card{box-shadow:none;border:0;padding:0}
+  .rec-c{background:#fff;border:1px solid #ddd;break-inside:avoid}
+  .rec-b{break-inside:avoid}
+  .rec-v.rec-alarm,td.rec-alarm{color:#000;text-decoration:underline}  /* a red pill is invisible on a mono printer */
+}

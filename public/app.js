@@ -4716,7 +4716,301 @@ async function pregTest(){
   };
 }
 
+// =================================================================================================
+// THE CARE RECORD — showing back what was written down.
+//
+// Everything below exists because of one finding: the tool captured 54 fields at an ANC contact and
+// showed 12 of them back. The rest — a reactive syphilis result, the anti-D for a Rh-negative woman,
+// the IPV disclosure, the unsuppressed viral load, the serial fundal heights, the danger note one
+// provider wrote for the next — went into the database and were never seen by a human being again.
+// A record that cannot be read is not a record.
+//
+// LABELS AND CODES. The MoH forms store codes (maternal condition 1-4, newborn problem 1-11). The
+// code is meaningless on a screen, so every code is rendered as the words the provider ticked.
+// =================================================================================================
+const YN = v => (v==1||v==='1') ? 'Yes' : ((v==0||v==='0') ? 'No' : null);
+const CODES = {
+  maternal_condition:{1:'Normal',2:'Complicated — managed',3:'Complicated — referred',4:'Died'},
+  nb_treatment_outcome:{1:'Improved',2:'No change',3:'Died',4:'Referred',5:'Unknown',6:'Resuscitated and survived'},
+  nb_death_cause:{1:'Prematurity',2:'Infection',3:'Asphyxia',4:'Other'},
+  place_of_delivery:{1:'This facility',2:'Other facility',3:'Home'},
+  hiv_test_result:{P:'POSITIVE',N:'Negative'},
+  maternal_death_cause:{1:'Haemorrhage',2:'Hypertensive disorder',3:'Sepsis',4:'Obstructed labour',5:'Abortion complication',6:'Other'},
+};
+const CSV_CODES = {
+  nb_problems:{1:'Normal',2:'Prematurity',3:'Sepsis / VSD',4:'Respiratory distress',5:'Perinatal asphyxia',6:'Low birth weight',
+               7:'Congenital malformation',8:'Absence of reflex',9:'Jaundice',10:'Head circumference <33cm',11:'Other'},
+  nb_treatment:{1:'Oxygen resuscitation',2:'KMC',3:'Antibiotic',4:'Chlorhexidine',5:'Blood transfusion',6:'Other'},
+  substance_use:{none:'None',alcohol:'Alcohol',tobacco:'Tobacco',khat:'Khat',caffeine:'Heavy caffeine',other:'Other'},
+};
+// How each column reads on the record. [label, kind]. kind: t=text/number, y=yes/no tick, c=coded, v=CSV coded.
+// `!` marks a value that must CATCH THE EYE when it is abnormal — it is rendered as a red pill.
+const F = {
+  // ANC contact
+  visit_date:['Date','t'], contact_no:['Contact','t'], ga_weeks:['Gestational age (weeks)','t'],
+  weight_kg:['Weight (kg)','t'], bmi:['BMI','t'], height_cm:['Height (cm)','t'],
+  bp_systolic:['BP systolic','t'], bp_diastolic:['BP diastolic','t'],
+  fundal_height_cm:['Fundal height (cm)','t'], fetal_heart_rate:['Fetal heart rate','t'],
+  presentation:['Presentation','t'], fetal_movement:['Fetal movement','t'],
+  urine_protein:['Urine protein','t!'], hgb:['Haemoglobin','t'], anaemia_grade:['Anaemia','t!'],
+  muac:['MUAC (cm)','t'], muac_flag:['MUAC below 23 cm','y!'], pallor:['Pallor','t!'],
+  urine_gramstain:['Urine gram stain','t!'], ogtt_result:['OGTT (diabetes)','t!'],
+  malaria_assessed:['Malaria assessed','t'],
+  syphilis_result:['Syphilis','t!'], syphilis_treated:['Syphilis treated','y'],
+  hepb_result:['Hepatitis B','t!'], hepb_treated:['Hepatitis B treated','y'], hepb_prophylaxis:['HepB prophylaxis','y'],
+  hiv_test_accepted:['HIV test accepted','y'], hiv_test_result:['HIV result','c!'], hiv_posttest_counselled:['Post-test counselled','y'],
+  art_continued:['ART continued','y'], viral_load:['Viral load','t!'], viral_load_date:['Viral load date','t'],
+  art_clinic_linked:['Linked back to ART clinic','y'],
+  td_dose_no:['Td dose given','t'], ifa_tabs:['Iron-folic acid given (tablets)','t'], ifa_tabs_consumed:['IFA tablets taken','t'],
+  calcium_given:['Calcium given','y'], deworming:['Deworming given','y'], anti_d_given:['Anti-D given','y'],
+  ultrasound_lt24w:['Ultrasound before 24 weeks','t'],
+  mental_health:['Mental health','t!'], ipv_screen:['Intimate partner violence','t!'], substance_use:['Substance use','v'],
+  cnsl_danger_signs:['Counselled: danger signs','y'], cnsl_nutrition:['Counselled: nutrition','y'], cnsl_ecd:['Counselled: early child development','y'],
+  cnsl_infant_feeding:['Counselled: infant feeding','y'], cnsl_family_planning:['Counselled: family planning','y'],
+  cnsl_lifestyle:['Counselled: lifestyle','y'], cnsl_bpcr:['Counselled: birth preparedness','y'],
+  danger_note:['Danger signs noted','t!'], remark:['Remark','t'], next_appointment:['Next appointment','t'],
+  // PNC visit
+  visit_period:['Period','t'], maternal_condition:['Mother','c!'], other_obs_complication:['Other complication','t!'],
+  m_temp:['Temperature','t!'], m_bp_systolic:['BP systolic','t'], m_bp_diastolic:['BP diastolic','t'], m_pulse:['Pulse','t'],
+  bleeding:['Lochia','t!'], uterine_tone:['Uterine tone','t!'], perineum:['Perineum / wound','t!'], breast:['Breasts','t'],
+  mood:['Mood','t!'], mother_breastfeeding:['Breastfeeding','t'], pp_fp:['Postpartum family planning','t'], ifa_continued:['IFA continued','t'],
+  pph:['Postpartum haemorrhage','y!'],
+  nb_temp:['Newborn temperature','t!'], nb_feeding:['Newborn feeding','t!'], cord:['Cord','t!'],
+  nb_convulsions:['Convulsions','t!'], nb_fast_breathing:['Fast breathing','t!'], nb_chest_indrawing:['Chest indrawing','t!'],
+  nb_lethargy:['Lethargy','t!'], nb_jaundice:['Jaundice','t!'], nb_kmc:['KMC','t'], nb_immunization:['Immunisation','t'],
+  nb_eid:['Early infant diagnosis (HIV)','t!'], nb_weight_g:['Newborn weight (g)','t'],
+  nb_problems:['Newborn problems','v!'], nb_problem_other:['Other problem','t'], nb_treatment:['Treatment given','v'],
+  nb_treatment_outcome:['Treatment outcome','c!'], nb_death_age_days:['Age at death (days)','t!'], nb_death_cause:['Cause of death','c!'],
+  cnsl_breastfeeding:['Counselled: breastfeeding','y'], cnsl_newborn_care:['Counselled: newborn care','y'], cnsl_epi:['Counselled: immunisation','y'],
+  ippfp_acceptor:['Postpartum FP acceptor','t'], ippfp_method:['Postpartum FP method','t'], ippfp_timing:['FP method timing','t'],
+  // delivery
+  delivery_datetime:['Date and time of birth','t'], mode:['Mode of birth','t'], mode_other_text:['Mode (other)','t'],
+  maternal_status:['Mother at discharge','t!'], maternal_outcome:['Maternal outcome','t!'], maternal_death_cause:['Cause of maternal death','c!'],
+  blood_loss_ml:['Blood loss (ml)','t!'], episiotomy:['Episiotomy','y'], partograph_used:['Partograph used','t'],
+  amtsl_uterotonic:['AMTSL: uterotonic','t'], amtsl_uterotonic_type:['AMTSL: uterotonic type','t'], amtsl_cct:['AMTSL: cord traction','t'],
+  amtsl_uterine_tone:['AMTSL: uterine tone','t!'], amtsl_massage:['AMTSL: uterine massage','t'], amtsl_placenta:['Placenta','t!'],
+  comp_preeclampsia:['Pre-eclampsia','y!'], comp_eclampsia:['Eclampsia','y!'], comp_aph:['Antepartum haemorrhage','y!'],
+  comp_pph:['Postpartum haemorrhage','y!'], comp_other:['Other complication','y!'], referred:['Referred','y!'],
+  hiv_retest_accepted:['HIV retest accepted','y'], cnsl_feeding_options:['Counselled: feeding options','y'],
+  // newborn
+  birth_order:['Birth order','t'], sex:['Sex','t'], weight_g:['Birth weight (g)','t!'],
+  apgar_1min:['APGAR 1 min','t!'], apgar_5min:['APGAR 5 min','t!'], outcome:['Outcome','t!'], resuscitated:['Resuscitated','t!'],
+  breastfeed_initiated:['Breastfeeding initiated within 1 hour','t!'], vitamin_k_time:['Vitamin K','t!'],
+  enc_dried:['Dried and warmed','y'], enc_breathing:['Breathing checked','y'], enc_eye_ointment:['Eye ointment','y'], enc_cord_care:['Chlorhexidine cord care','y'],
+  vacc_bcg:['BCG','y'], vacc_opv0:['OPV-0','y'], vacc_hbv:['Hepatitis B birth dose','y'],
+  prob_prematurity:['Prematurity','y!'], prob_sepsis_vsd:['Sepsis','y!'], prob_resp_distress:['Respiratory distress','y!'],
+  prob_lbw:['Low birth weight','y!'], prob_congenital:['Congenital malformation','y!'], prob_jaundice:['Jaundice','y!'],
+  prob_other:['Other problem','y'], prob_other_text:['Other problem (detail)','t'],
+  kmc:['Kangaroo mother care','t'], phototherapy:['Phototherapy','t'], antibiotics:['Antibiotics','t'], oxygen:['Oxygen','t'],
+  nicu:['NICU','t!'], nicu_facility:['NICU facility','t'],
+  hiv_exposed:['HIV exposed','y!'], arv_prophylaxis:['Infant ARV prophylaxis','t!'], dbs_sample:['DBS sample','t!'],
+  dbs_result:['DBS result','t!'], art_linked:['Linked to ART clinic','y!'],
+  resuscitated_survived:['Resuscitated and survived','y'], death_age_days:['Age at death (days)','t!'],
+  death_age_hours:['Age at death (hours)','t!'], death_cause:['Cause of death','t!'], birth_notification:['Birth notified','y'],
+  mrn:['Newborn MRN','t'],
+};
+// A value that a clinician must not scroll past.
+function isAlarming(col, v){
+  const s=String(v==null?'':v).toLowerCase();
+  if(v==null||v==='') return false;
+  switch(col){
+    case 'hiv_test_result': return s==='p';
+    case 'syphilis_result': case 'hepb_result': return s.indexOf('react')>=0 || s==='positive' || s==='p';
+    case 'urine_protein': return s==='+'||s==='++'||s==='+++';
+    case 'anaemia_grade': return s==='moderate'||s==='severe';
+    case 'viral_load': return (+v)>=1000;
+    case 'ipv_screen': return s==='disclosed'||s==='yes';
+    case 'mental_health': return s!=='' && s!=='normal' && s!=='none';
+    case 'ogtt_result': return s==='gdm'||s==='abnormal'||s==='high';
+    case 'urine_gramstain': case 'pallor': return s!=='' && s!=='normal' && s!=='negative' && s!=='none' && s!=='no';
+    case 'blood_loss_ml': return (+v)>=500;
+    case 'apgar_1min': case 'apgar_5min': return (+v)<7;
+    case 'weight_g': return (+v)<2500;
+    case 'nb_temp': case 'm_temp': return (+v)>=38 || (+v)<36;
+    case 'maternal_condition': return String(v)!=='1';
+    case 'nb_treatment_outcome': return String(v)==='3';
+    case 'bleeding': return s==='heavy'||s==='offensive';
+    case 'uterine_tone': return s==='atonic';
+    case 'perineum': return s==='infected';
+    case 'mood': return s==='low'||s==='support';
+    case 'cord': return s!=='' && s!=='normal';
+    case 'nb_feeding': return s!=='' && s!=='good' && s!=='normal';
+    case 'outcome': return s.indexOf('still')>=0 || s.indexOf('death')>=0 || s.indexOf('died')>=0;
+    case 'maternal_status': case 'maternal_outcome': return s==='died'||s==='death'||s==='unstable_referred'||s==='near_miss';
+    case 'nicu': return s==='admitted'||s==='referred_out';
+    case 'dbs_result': return s==='positive'||s==='p';
+    case 'resuscitated': return s==='yes'||s==='1';
+    case 'breastfeed_initiated': return s==='no'||s==='0';
+    case 'vitamin_k_time': return s==='not_given'||s==='none';
+    case 'nb_eid': return s==='not_done'||s==='due';
+    default:
+      // yes/no alarms (comp_*, prob_*, pph, muac_flag, hiv_exposed…)
+      return (v==1||v==='1');
+  }
+}
+// One field, rendered — or nothing at all if it was never recorded. ("Not recorded" on 54 lines is
+// noise; what was NOT done that SHOULD have been is handled separately, by gapsFor().)
+function fld(col, v){
+  const def=F[col]; if(!def) return '';
+  if(v===null||v===undefined||v==='') return '';
+  const [label,kindRaw]=def; const kind=kindRaw.replace('!','');
+  let shown;
+  if(kind==='y'){ shown=YN(v); if(shown===null) return ''; if(shown==='No' && !isAlarming(col,v)) return ''; }
+  else if(kind==='c'){ shown=(CODES[col]||{})[v] || String(v); }
+  else if(kind==='v'){
+    const map=CSV_CODES[col]||{};
+    shown=String(v).split(',').map(s=>s.trim()).filter(Boolean).map(c=>map[c]||c).join(', ');
+    if(!shown) return '';
+  }
+  else shown=String(v);
+  const alarm=kindRaw.indexOf('!')>=0 && isAlarming(col,v);
+  return `<div class="rec-f"><span class="rec-l">${esc(label)}</span>`+
+         `<span class="rec-v${alarm?' rec-alarm':''}">${esc(shown)}</span></div>`;
+}
+const fields = (row, cols) => cols.map(c=>fld(c,row[c])).join('');
+const recBlock = (title, body, note) => body.trim()
+  ? `<div class="rec-b"><h5>${title}</h5>${note?`<p class="muted" style="font-size:12px;margin:0 0 6px">${note}</p>`:''}<div class="rec-g">${body}</div></div>` : '';
+
+// WHAT IS MISSING, AND STILL MATTERS. Some omissions are only visible as omissions: a Rh-negative
+// woman with no anti-D at 28 weeks, a woman past 24 weeks with no dating scan, a reactive syphilis
+// never treated. These are the ones worth putting in front of the provider — not a wall of blanks.
+function gapsFor(W, anc){
+  const g=[]; const last=(col)=>{ for(let i=anc.length-1;i>=0;i--){ const v=anc[i][col]; if(v!==null&&v!==undefined&&v!=='') return v; } return null; };
+  const any=(col,val)=>anc.some(v=>String(v[col]||'').toLowerCase()===val);
+  const ga=+(last('ga_weeks')||0);
+  const rhNeg=String(W.rh_factor||'').toLowerCase()==='neg';
+  const syph=String(last('syphilis_result')||'').toLowerCase();
+  const hepb=String(last('hepb_result')||'').toLowerCase();
+  if(rhNeg && ga>=28 && !anc.some(v=>v.anti_d_given==1))
+    g.push(['Anti-D has not been given','She is Rh negative and past 28 weeks. Without anti-D she can be sensitised, which threatens this baby and every pregnancy after it.']);
+  if((syph.indexOf('react')>=0||syph==='positive') && !anc.some(v=>v.syphilis_treated==1))
+    g.push(['Syphilis is reactive and no treatment is recorded','Treat her and her partner. Untreated maternal syphilis causes stillbirth and congenital syphilis, and it is preventable with benzathine penicillin.']);
+  if((hepb.indexOf('react')>=0||hepb==='positive') && !anc.some(v=>v.hepb_prophylaxis==1))
+    g.push(['Hepatitis B is reactive and no prophylaxis is recorded','Plan the birth dose of HBV vaccine (and immunoglobulin where available) for the newborn.']);
+  if(ga>=24 && !anc.some(v=>String(v.ultrasound_lt24w||'').toLowerCase()==='yes'||v.ultrasound_lt24w==1))
+    g.push(['No dating ultrasound before 24 weeks','Gestational age can no longer be established reliably by scan. Date her from the last menstrual period and record the uncertainty.']);
+  if(ga>=20 && !anc.some(v=>v.calcium_given==1))
+    g.push(['Calcium has not been started','From 20 weeks, calcium reduces the risk of pre-eclampsia in this population.']);
+  if(anc.length && !anc.some(v=>+v.td_dose_no>0))
+    g.push(['No tetanus (Td) dose recorded','Neonatal tetanus is prevented here, at ANC, or not at all.']);
+  if(anc.length && !anc.some(v=>+v.ifa_tabs>0))
+    g.push(['No iron-folic acid given','Anaemia is the commonest treatable contributor to maternal death in this setting.']);
+  if(ga>=13 && !anc.some(v=>v.deworming==1))
+    g.push(['No deworming recorded','Indicated once after the first trimester.']);
+  if(String(W.hiv_known_positive||'')==='1' || any('hiv_test_result','p')){
+    const vl=last('viral_load');
+    if(vl===null) g.push(['She is HIV positive and no viral load is recorded','A viral load determines the delivery plan and the infant’s ARV prophylaxis.']);
+    else if(+vl>=1000 && !anc.some(v=>v.art_clinic_linked==1))
+      g.push(['Viral load is not suppressed and no ART-clinic referral is recorded','An unsuppressed viral load is the strongest predictor of transmission to the baby. Refer her back to the ART clinic.']);
+  }
+  return g;
+}
+
+// THE FULL RECORD. Everything written down about her, in the order it happened, across every episode
+// of care — because her syphilis result was found in the antenatal room and matters in the labour
+// ward, and her blood loss at birth matters at her postnatal visit on day three.
 async function reportScreen(id){
+  const C=await api('GET','chart?episode='+id).catch(e=>({error:e.message}));
+  if(!C || C.error || !C.woman){
+    app().innerHTML=nav()+`<div class="card"><h3>Record could not be loaded</h3>
+      <p class="muted">${esc((C&&C.error)||'This episode could not be found.')}</p>
+      <a class="nav" href="#patient/${esc(id)}">&lsaquo; Back to patient</a></div>`;
+    return;
+  }
+  const W=C.woman, anc=C.anc_visits||[], pnc=C.pnc_visits||[], bbs=C.babies||[], dels=C.deliveries||[],
+        refs=C.referrals||[], dgs=C.danger_signs||[], vits=C.vitals||[], labs=C.labs||[],
+        scr=C.anc_screening||[], obs=C.observations||[], eps=C.episodes||[];
+  const name=((W.first_name||'')+' '+(W.father_name||'')+' '+(W.grandfather_name||'')).trim();
+  const gaps=gapsFor(W,anc);
+  const yesScr=scr.filter(s=>s.response==='yes');
+
+  // A single fundal height says nothing. The SERIES is the only growth screen a health centre has
+  // without a scan — and it was never once shown to anybody.
+  const trendRow=(label,col,fmt)=>{
+    if(!anc.some(v=>v[col]!==null&&v[col]!==undefined&&v[col]!=='')) return '';
+    return `<tr><th>${esc(label)}</th>${anc.map(v=>{
+      const raw=v[col]; const val=(raw===null||raw===undefined||raw==='')?'·':(fmt?fmt(v):raw);
+      const al=(raw!==''&&raw!=null&&isAlarming(col,raw));
+      return `<td${al?' class="rec-alarm"':''}>${esc(val)}</td>`; }).join('')}</tr>`;
+  };
+  const trends = anc.length ? `<div class="rec-b"><h5>Across her contacts</h5>
+     <div style="overflow-x:auto"><table class="rec-t">
+      <tr><th>Contact</th>${anc.map(v=>`<td>${esc(v.contact_no||'·')}</td>`).join('')}</tr>
+      <tr><th>Date</th>${anc.map(v=>`<td>${esc(String(v.visit_date||'').slice(5,10))}</td>`).join('')}</tr>
+      <tr><th>GA (weeks)</th>${anc.map(v=>`<td>${esc(v.ga_weeks||'·')}</td>`).join('')}</tr>
+      ${trendRow('Weight (kg)','weight_kg')}
+      ${trendRow('Blood pressure','bp_systolic',v=>(v.bp_systolic||'?')+'/'+(v.bp_diastolic||'?'))}
+      ${trendRow('Fundal height (cm)','fundal_height_cm')}
+      ${trendRow('Fetal heart rate','fetal_heart_rate')}
+      ${trendRow('Urine protein','urine_protein')}
+      ${trendRow('Haemoglobin','hgb')}
+      ${trendRow('MUAC (cm)','muac')}
+      ${trendRow('Iron-folic acid','ifa_tabs')}
+     </table></div></div>` : '';
+
+  const ancBlocks = anc.map(v=>`<div class="rec-c">
+      <h5>ANC contact ${esc(v.contact_no||'')} <span class="muted">&mdash; ${esc(v.visit_date||'')}${v.ga_weeks?(' &middot; '+esc(v.ga_weeks)+' weeks'):''}</span></h5>
+      <div class="rec-g">
+        ${fields(v,['weight_kg','bmi','bp_systolic','bp_diastolic','fundal_height_cm','fetal_heart_rate','presentation','fetal_movement','urine_protein','hgb','anaemia_grade','muac','muac_flag','pallor','urine_gramstain','ogtt_result','malaria_assessed'])}
+        ${fields(v,['syphilis_result','syphilis_treated','hepb_result','hepb_treated','hepb_prophylaxis','hiv_test_accepted','hiv_test_result','hiv_posttest_counselled','art_continued','viral_load','viral_load_date','art_clinic_linked'])}
+        ${fields(v,['td_dose_no','ifa_tabs','ifa_tabs_consumed','calcium_given','deworming','anti_d_given','ultrasound_lt24w'])}
+        ${fields(v,['mental_health','ipv_screen','substance_use'])}
+        ${fields(v,['cnsl_danger_signs','cnsl_nutrition','cnsl_ecd','cnsl_infant_feeding','cnsl_family_planning','cnsl_lifestyle','cnsl_bpcr'])}
+        ${fields(v,['danger_note','remark','next_appointment'])}
+      </div></div>`).join('');
+
+  const delBlocks = dels.map(d=>`<div class="rec-c"><h5>Birth <span class="muted">&mdash; ${esc(String(d.delivery_datetime||'').slice(0,16))}</span></h5>
+      <div class="rec-g">${fields(d,['mode','mode_other_text','partograph_used','episiotomy','blood_loss_ml','amtsl_uterotonic','amtsl_uterotonic_type','amtsl_cct','amtsl_uterine_tone','amtsl_massage','amtsl_placenta','comp_preeclampsia','comp_eclampsia','comp_aph','comp_pph','comp_other','referred','maternal_status','maternal_outcome','maternal_death_cause','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_feeding_options','ippfp_acceptor','ippfp_method','ippfp_timing','remark'])}</div></div>`).join('');
+
+  const babyBlocks = bbs.map(b=>`<div class="rec-c"><h5>Newborn ${esc(b.birth_order||'')} <span class="muted">${b.mrn?('&mdash; MRN '+esc(b.mrn)):''}</span></h5>
+      <div class="rec-g">${fields(b,['sex','weight_g','apgar_1min','apgar_5min','outcome','resuscitated','resuscitated_survived','breastfeed_initiated','vitamin_k_time','enc_dried','enc_breathing','enc_eye_ointment','enc_cord_care','vacc_bcg','vacc_opv0','vacc_hbv','prob_prematurity','prob_sepsis_vsd','prob_resp_distress','prob_lbw','prob_congenital','prob_jaundice','prob_other','prob_other_text','kmc','phototherapy','antibiotics','oxygen','nicu','nicu_facility','hiv_exposed','arv_prophylaxis','dbs_sample','dbs_result','art_linked','death_age_days','death_age_hours','death_cause','birth_notification'])}</div></div>`).join('');
+
+  const pncBlocks = pnc.map(p=>`<div class="rec-c"><h5>Postnatal visit <span class="muted">&mdash; ${esc(p.visit_date||'')}${p.visit_period?(' &middot; '+esc(p.visit_period)):''}</span></h5>
+      <div class="rec-g">
+        ${fields(p,['maternal_condition','other_obs_complication','m_temp','m_bp_systolic','m_bp_diastolic','m_pulse','bleeding','uterine_tone','perineum','breast','mood','pph','mother_breastfeeding','pp_fp','ifa_continued'])}
+        ${fields(p,['nb_temp','nb_feeding','cord','nb_convulsions','nb_fast_breathing','nb_chest_indrawing','nb_lethargy','nb_jaundice','nb_kmc','nb_immunization','nb_eid','nb_weight_g','nb_problems','nb_problem_other','nb_treatment','nb_treatment_outcome','nb_death_age_days','nb_death_cause'])}
+        ${fields(p,['hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_danger_signs','cnsl_breastfeeding','cnsl_newborn_care','cnsl_family_planning','cnsl_epi','cnsl_ecd','ippfp_acceptor','ippfp_method','danger_note','remark'])}
+      </div></div>`).join('');
+
+  const HIST={prior_cs:'Previous caesarean',prior_stillbirth:'Previous stillbirth',prior_pph:'Previous PPH',
+    prior_preeclampsia:'Previous pre-eclampsia',prior_obstructed:'Previous obstructed labour',
+    chronic_htn:'Chronic hypertension',diabetes:'Diabetes',cardiac_renal:'Cardiac / renal disease'};
+  const histBody = fields(W,['height_cm']) + Object.keys(HIST).filter(k=>String(W[k]||'').toLowerCase()==='yes')
+    .map(k=>`<div class="rec-f"><span class="rec-l">${esc(HIST[k])}</span><span class="rec-v rec-alarm">Yes</span></div>`).join('');
+
+  app().innerHTML=nav()+`<div class="card rec">
+   <h3>Care record &mdash; ${esc(name)}</h3>
+   <p><b>MRN ${esc(W.mrn||'')}</b>${W.age?(' &middot; '+esc(W.age)+' years'):''} &middot; G${esc(W.gravida||'?')}/P${esc(W.para||'?')}${W.blood_group?(' &middot; blood group '+esc(W.blood_group)+(W.rh_factor?(' '+esc(W.rh_factor)):'')):''}${W.phone?(' &middot; '+esc(W.phone)):''}</p>
+   <p class="muted">${eps.length} episode(s) of care here &middot; ${anc.length} ANC contact(s) &middot; ${dels.length} birth(s) &middot; ${bbs.length} newborn(s) &middot; ${pnc.length} postnatal visit(s)</p>
+
+   ${gaps.length?`<div class="rec-b" style="border-left:4px solid #a32d2d">
+     <h5 style="color:#a32d2d">Still outstanding</h5>
+     ${gaps.map(g=>`<div style="margin-bottom:8px"><b>${esc(g[0])}</b><div class="muted" style="font-size:13px">${esc(g[1])}</div></div>`).join('')}
+   </div>`:''}
+
+   ${recBlock('History', histBody, 'What she carries into every episode of care.')}
+   ${yesScr.length?`<div class="rec-b"><h5>Risk screening</h5><div class="rec-g">${yesScr.map(s=>`<div class="rec-f"><span class="rec-l">${esc(s.item_code||'')}</span><span class="rec-v rec-alarm">Yes</span></div>`).join('')}</div></div>`:''}
+   ${trends}
+   ${ancBlocks?`<div class="rec-b"><h5>Antenatal contacts</h5>${ancBlocks}</div>`:''}
+   ${labs.length?`<div class="rec-b"><h5>Laboratory</h5><table class="rec-t"><tr><th>Test</th><th>Requested</th><th>Result</th><th>Result date</th><th>Note</th></tr>
+      ${labs.map(l=>`<tr><td>${esc(l.test_code||'')}</td><td>${esc(String(l.requested_date||'').slice(0,10))}</td><td>${esc(l.result||'— pending —')}</td><td>${esc(String(l.result_date||'').slice(0,10))}</td><td>${esc(l.note||'')}</td></tr>`).join('')}</table></div>`:''}
+   ${obs.length?`<div class="rec-b"><h5>Labour</h5><p class="muted" style="font-size:13px">${obs.length} partograph observation(s). Last: cervix ${esc(obs[obs.length-1].cervix_cm||'—')} cm, fetal heart ${esc(obs[obs.length-1].fetal_heart_rate||'—')}.</p></div>`:''}
+   ${delBlocks?`<div class="rec-b"><h5>Birth</h5>${delBlocks}</div>`:''}
+   ${babyBlocks?`<div class="rec-b"><h5>Newborn(s)</h5>${babyBlocks}</div>`:''}
+   ${pncBlocks?`<div class="rec-b"><h5>Postnatal care</h5>${pncBlocks}</div>`:''}
+   ${dgs.length?`<div class="rec-b"><h5>Danger signs recorded</h5><div class="rec-g">${dgs.map(d=>`<div class="rec-f"><span class="rec-l">${esc(String(d.obs_datetime||'').slice(0,16))}</span><span class="rec-v">${esc([d.headache==1?'headache':'',d.blurred_vision==1?'blurred vision':'',d.epigastric_pain==1?'epigastric pain':'',d.vaginal_bleeding==1?'vaginal bleeding':'',d.remark||''].filter(Boolean).join(', ')||'recorded')}</span></div>`).join('')}</div></div>`:''}
+   ${refs.length?`<div class="rec-b"><h5>Referrals</h5><div class="rec-g">${refs.map(r=>`<div class="rec-f"><span class="rec-l">${esc(String(r.recorded_at||'').slice(0,10))} &rarr; ${esc(r.referred_to||'')}</span><span class="rec-v${String(r.urgency||'')==='emergency'?' rec-alarm':''}">${esc(r.reason||'')}${r.feedback?(' &middot; feedback: '+esc(r.feedback)):''}</span></div>`).join('')}</div></div>`:''}
+   ${vits.length?`<div class="rec-b"><h5>Vital signs</h5><table class="rec-t"><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>Resp</th><th>SpO2</th></tr>
+      ${vits.map(v=>`<tr><td>${esc(String(v.obs_datetime||'').slice(0,16))}</td><td>${esc((v.bp_systolic||'—')+'/'+(v.bp_diastolic||'—'))}</td><td>${esc(v.pulse||'—')}</td><td>${esc(v.temperature||'—')}</td><td>${esc(v.resp_rate||'—')}</td><td>${esc(v.spo2||'—')}</td></tr>`).join('')}</table></div>`:''}
+
+   <div style="margin-top:12px">
+     <button class="sec" onclick="window.print()">Print / save as PDF</button>
+     <span class="muted" style="font-size:12px;margin-left:8px">Gives her a copy of her own record to carry &mdash; and the receiving facility a copy when she is referred.</span>
+   </div>
+  </div>`;
+}
+
+async function _reportScreenOld(id){
   const [e,obs,chk,deliv,babies,anc,pnc,refs]=await Promise.all([
     epOne(id), api('GET','observations?episode='+id).catch(()=>[]),
     api('GET','checklist?episode='+id).catch(()=>[]), api('GET','delivery?episode='+id).catch(()=>[]),
@@ -4801,12 +5095,12 @@ async function patientHub(id){
   // the application to record a previous caesarean. The model then scored her prior_cs = 0.
   const scrTile = tile('#anc/'+id,'Risk screening');
   let tiles, fold='';
-  if(ME.role==='observer') tiles=[tile('#report/'+id,'Care summary')];   // read-only role: view the summary, no data-entry screens
-  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary'),tile('#editwoman/'+e.woman_id,'Edit details')];
-  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  if(ME.role==='observer') tiles=[tile('#report/'+id,'Full record')];   // read-only role: view the summary, no data-entry screens
+  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details')];
+  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Full record')];
     if(isLab&&delivered){ const lab=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
       fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Care summary')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Full record')];
   tiles=tiles.filter(Boolean);
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
@@ -4826,6 +5120,7 @@ async function patientHub(id){
       <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
       <span id="rmtshow" class="muted"></span></p>`:''}
     <div class="hubgrid">${tiles.join('')}</div>${fold}
+    <div id="hubknown"></div>
     ${(ME.role==='provider'||ADMIN())?`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
       ${String(e.status||'')==='closed'
         ? `<span class="pill" style="background:#eef1f0;color:#4a5754">This episode of care is closed${e.closed_datetime?(' &middot; '+esc(String(e.closed_datetime).slice(0,16))):''}</span>
@@ -4839,6 +5134,63 @@ async function patientHub(id){
       <div class="muted" style="font-size:12px;margin-top:4px">For a record that should never have existed &mdash; the wrong patient, a duplicate, a test entry. It is taken off every worklist, register and count, but <b>nothing is destroyed</b>: the record is kept with your name and your reason, and an admin can restore it.
       ${ME.role==='provider'?' An admin is told when a provider removes a record.':''}</div>
      </div>`:''}</div>`;
+
+  // ---- WHAT IS ALREADY KNOWN ABOUT HER ------------------------------------------------------
+  // The tool held a reactive syphilis result, an unsuppressed viral load, the fundal-height series
+  // and the danger note the last provider wrote — and showed the next provider a row of tiles. This
+  // panel puts the findings that CHANGE WHAT YOU DO TODAY in front of her before she starts writing.
+  //
+  // It loads AFTER the tiles, and never blocks them: on a bad link the hub still works.
+  if(ME.role!=='observer' && ME.role!=='recorder' && !isLocalId(e.id)){
+    (async()=>{
+      const C=await api('GET','chart?episode='+id).catch(()=>null);
+      const box=$('#hubknown'); if(!C||!C.woman||!box) return;
+      const anc=C.anc_visits||[], pnc=C.pnc_visits||[], bbs=C.babies||[], dels=C.deliveries||[];
+      const gaps=gapsFor(C.woman,anc);
+      const lastOf=(rows,col)=>{ for(let i=rows.length-1;i>=0;i--){ const v=rows[i][col]; if(v!==null&&v!==undefined&&v!=='') return v; } return null; };
+
+      // The findings that persist and must not be re-asked or forgotten.
+      const persist=[];
+      const push=(col,val)=>{ const h=fld(col,val); if(h) persist.push(h); };
+      push('syphilis_result', lastOf(anc,'syphilis_result')); push('syphilis_treated', lastOf(anc,'syphilis_treated'));
+      push('hepb_result', lastOf(anc,'hepb_result')); push('hepb_prophylaxis', lastOf(anc,'hepb_prophylaxis'));
+      push('hiv_test_result', lastOf(anc,'hiv_test_result')); push('viral_load', lastOf(anc,'viral_load'));
+      push('hgb', lastOf(anc,'hgb')); push('anaemia_grade', lastOf(anc,'anaemia_grade'));
+      push('td_dose_no', lastOf(anc,'td_dose_no')); push('ifa_tabs', lastOf(anc,'ifa_tabs'));
+      push('calcium_given', lastOf(anc,'calcium_given')); push('deworming', lastOf(anc,'deworming'));
+      push('anti_d_given', lastOf(anc,'anti_d_given')); push('ultrasound_lt24w', lastOf(anc,'ultrasound_lt24w'));
+      push('presentation', lastOf(anc,'presentation')); push('urine_protein', lastOf(anc,'urine_protein'));
+      push('ipv_screen', lastOf(anc,'ipv_screen')); push('mental_health', lastOf(anc,'mental_health'));
+      push('substance_use', lastOf(anc,'substance_use'));
+      const d0=dels[0]||{};
+      push('blood_loss_ml', d0.blood_loss_ml); push('comp_pph', d0.comp_pph); push('comp_eclampsia', d0.comp_eclampsia);
+      push('comp_preeclampsia', d0.comp_preeclampsia); push('amtsl_placenta', d0.amtsl_placenta);
+      push('ippfp_method', d0.ippfp_method);
+      bbs.forEach(b=>{ ['weight_g','apgar_5min','outcome','breastfeed_initiated','vitamin_k_time','hiv_exposed','arv_prophylaxis','dbs_sample','dbs_result','nicu']
+        .forEach(c=>{ const h=fld(c,b[c]); if(h) persist.push('<div class="rec-f"><span class="rec-l">Newborn '+esc(b.birth_order||'')+' &middot; '+esc((F[c]||[c])[0])+'</span><span class="rec-v'+(isAlarming(c,b[c])?' rec-alarm':'')+'">'+esc(String(b[c]))+'</span></div>'); }); });
+
+      // The last provider's own words to the next one — written down and, until now, never read.
+      const notes=[];
+      const lastAnc=anc[anc.length-1], lastPnc=pnc[pnc.length-1];
+      if(lastAnc&&lastAnc.danger_note) notes.push(['Danger signs noted at the last contact', lastAnc.danger_note]);
+      if(lastAnc&&lastAnc.remark)      notes.push(['Remark from the last contact', lastAnc.remark]);
+      if(lastPnc&&lastPnc.danger_note) notes.push(['Danger signs at the last postnatal visit', lastPnc.danger_note]);
+      if(lastPnc&&lastPnc.remark)      notes.push(['Remark from the last postnatal visit', lastPnc.remark]);
+
+      if(!persist.length && !notes.length && !gaps.length) return;
+      box.innerHTML=`<div class="card rec" style="margin-top:12px">
+        <h3 style="font-size:15px">What is already known about her</h3>
+        <p class="muted" style="font-size:12px;margin-top:-4px">Recorded at an earlier contact. Read it before you write today&rsquo;s.</p>
+        ${gaps.length?`<div class="rec-b" style="border-left:4px solid #a32d2d;padding-left:10px">
+          <h5 style="color:#a32d2d">Still outstanding</h5>
+          ${gaps.map(g=>`<div style="margin-bottom:6px"><b>${esc(g[0])}</b><div class="muted" style="font-size:12px">${esc(g[1])}</div></div>`).join('')}
+        </div>`:''}
+        ${persist.length?`<div class="rec-b"><div class="rec-g">${persist.join('')}</div></div>`:''}
+        ${notes.length?`<div class="rec-b">${notes.map(n=>`<div style="margin-bottom:6px"><span class="rec-l" style="font-size:12px">${esc(n[0])}</span><div style="font-weight:600;color:#1f2937">${esc(n[1])}</div></div>`).join('')}</div>`:''}
+        <a class="nav" href="#report/${esc(id)}">Open her full record &rsaquo;</a>
+      </div>`;
+    })();
+  }
 
   // ---- VOID (soft delete) -------------------------------------------------------------------
   // Nothing could ever be removed: not a woman registered twice by mistake, not an episode opened on

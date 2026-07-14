@@ -468,6 +468,66 @@ try {
     }
   }
 
+  // ==========================================================================================
+  // THE CHART — her whole record, by WOMAN, in ONE call.
+  //
+  // ADHERE+ captured far more than it ever showed back. 40 of the 54 fields on the ANC contact were
+  // written to the database and never displayed to anyone again: a reactive syphilis result, whether
+  // anti-D was given to a Rh-negative woman, an unsuppressed viral load, the serial fundal heights
+  // that are the only growth-restriction screen a health centre has, the free-text danger note the
+  // last provider wrote for the next one. Care was recorded and then it was gone.
+  //
+  // BY WOMAN, NOT BY EPISODE. Her ANC contacts hang off the ANC episode and her delivery off the
+  // labour episode, so an episode-scoped read can never show the midwife in the labour ward what was
+  // found in the antenatal room. This returns the whole continuum, in the order it happened.
+  //
+  // One request, not twelve: on a 2G link in a health centre, twelve round trips is the difference
+  // between a provider using the record and not bothering.
+  // ==========================================================================================
+  if ($r==='chart' && $m==='GET'){
+    $u=require_role(['provider','admin','supervisor']);
+    $fac=(int)$u['facility_id'];
+    $wid=(int)($_GET['woman']??0);
+    if(!$wid && ($eid=(int)($_GET['episode']??0))){
+      $q=db()->prepare("SELECT woman_id FROM episodes WHERE id=? AND facility_id=? AND voided=0");
+      $q->execute([$eid,$fac]); $row=$q->fetch(); $wid=(int)($row['woman_id']??0);
+    }
+    if(!$wid) err('woman or episode is required',400);
+
+    $w=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=? AND voided=0");
+    $w->execute([$wid,$fac]); $woman=$w->fetch();
+    if(!$woman) err('not found',404);
+
+    // Every episode of care she has had here (a voided one is not part of her record).
+    $ep=db()->prepare("SELECT * FROM episodes WHERE woman_id=? AND facility_id=? AND voided=0 ORDER BY id");
+    $ep->execute([$wid,$fac]);
+    $eps=$ep->fetchAll();
+    $ids=array_map(function($e){return (int)$e['id'];}, $eps);
+    if(!$ids) out(['woman'=>$woman,'episodes'=>[],'anc_visits'=>[],'anc_screening'=>[],'labs'=>[],
+                   'deliveries'=>[],'babies'=>[],'pnc_visits'=>[],'danger_signs'=>[],'vitals'=>[],
+                   'referrals'=>[],'observations'=>[],'checklist'=>[],'bemonc'=>[],'risk_scores'=>[]]);
+    $in=implode(',', array_fill(0,count($ids),'?'));
+
+    $all=function($sql) use ($ids){ $st=db()->prepare($sql); $st->execute($ids); return $st->fetchAll(); };
+    out([
+      'woman'         => $woman,
+      'episodes'      => $eps,
+      'anc_visits'    => $all("SELECT * FROM anc_visits        WHERE episode_id IN ($in) ORDER BY visit_date, contact_no, id"),
+      'anc_screening' => $all("SELECT * FROM anc_risk_screening WHERE episode_id IN ($in) ORDER BY id"),
+      'labs'          => $all("SELECT * FROM lab_orders        WHERE episode_id IN ($in) ORDER BY requested_date, id"),
+      'deliveries'    => $all("SELECT * FROM delivery_summary  WHERE episode_id IN ($in) ORDER BY delivery_datetime, id"),
+      'babies'        => $all("SELECT * FROM babies            WHERE episode_id IN ($in) ORDER BY birth_order, id"),
+      'pnc_visits'    => $all("SELECT * FROM pnc_visits        WHERE episode_id IN ($in) ORDER BY visit_date, id"),
+      'danger_signs'  => $all("SELECT * FROM danger_signs      WHERE episode_id IN ($in) ORDER BY obs_datetime, id"),
+      'vitals'        => $all("SELECT * FROM maternal_vitals   WHERE episode_id IN ($in) ORDER BY obs_datetime, id"),
+      'referrals'     => $all("SELECT * FROM referrals         WHERE episode_id IN ($in) ORDER BY recorded_at, id"),
+      'observations'  => $all("SELECT * FROM partograph_obs    WHERE episode_id IN ($in) ORDER BY recorded_at, id"),
+      'checklist'     => $all("SELECT * FROM checklist_responses WHERE episode_id IN ($in) ORDER BY id"),
+      'bemonc'        => $all("SELECT * FROM bemonc_care       WHERE episode_id IN ($in) ORDER BY id"),
+      'risk_scores'   => $all("SELECT * FROM risk_scores       WHERE episode_id IN ($in) ORDER BY scored_at, id"),
+    ]);
+  }
+
   // ---- providers list (for handover picker; any logged-in user) ----
   if ($r==='providers' && $m==='GET'){ $u=user(); $st=db()->prepare("SELECT id,full_name,role FROM users WHERE is_active=1 AND role IN ('provider','admin') AND facility_id=? ORDER BY full_name"); $st->execute([$u['facility_id']]); out($st->fetchAll()); }
 
