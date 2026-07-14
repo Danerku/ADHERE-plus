@@ -1012,6 +1012,31 @@ function accountScreen(){
 function tick(id,label){ return `<label class="tick"><input type="checkbox" id="${id}"> ${label}</label>`; }
 function tk(id){ const el=document.getElementById(id); return (el&&el.checked)?1:0; }
 
+// ---- CORRECTING A RECORD -------------------------------------------------------------------
+// A wrong BP, weight or GA recorded at a contact could not be corrected ANYWHERE in the tool. The
+// server has always supported PATCH on anc_visits / pnc_visits / maternal_vitals — no screen called
+// it. These three helpers re-fill a form from the row being corrected, using the SAME id map the
+// save uses, so a field can never be shown but not saved (or saved but not shown).
+//   fillVals: <input>/<select> by id            fillTicks: checkboxes by id
+//   fillEcs : Ethiopian date pickers by id
+function fillVals(row, map){                     // map: {elementId: 'column_name'}
+  Object.keys(map).forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    const v=row[map[id]];
+    if(v===null||v===undefined) return;          // leave a not-recorded field blank
+    el.value=String(v);
+  });
+}
+function fillTicks(row, map){
+  Object.keys(map).forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    el.checked = (row[map[id]]==1 || row[map[id]]==='1');
+  });
+}
+function fillEcs(row, map){
+  Object.keys(map).forEach(id=>{ const iso=row[map[id]]; if(iso) ecSet(id, String(iso).slice(0,10)); });
+}
+
 // Targeted population category — the 9-code list (A-I) from the MoH instruction page.
 // (The register footer prints a contradictory 7-code list; MoH to confirm.)
 const TARGET_POP=[['A','Female commercial sex workers'],['B','Long distance drivers'],['C','Mobile / daily labourers'],
@@ -2590,6 +2615,22 @@ function hivCell(p){
     </select>`;
 }
 
+// The ANC contact currently being CORRECTED (null when recording a new one). Same pattern as the
+// newborn screen's EDIT_BABY, which already works.
+let EDIT_ANC=null;
+// The id map, declared ONCE and used by BOTH the prefill and the save, so the two can never drift.
+const ANC_VALS={ cno:'contact_no', ga:'ga_weeks', wt:'weight_kg', bps:'bp_systolic', bpd:'bp_diastolic',
+  fh:'fundal_height_cm', fhr:'fetal_heart_rate', pres:'presentation', up:'urine_protein', hb:'hgb',
+  muac:'muac', fm:'fetal_movement', mal:'malaria_assessed', dn:'danger_note', us:'ultrasound_lt24w',
+  syr:'syphilis_result', hbr:'hepb_result', tdn:'td_dose_no', ift:'ifa_tabs', htr:'hiv_test_result',
+  vl:'viral_load', ifc2:'ifa_tabs_consumed', pal:'pallor', ugs:'urine_gramstain', ogt:'ogtt_result',
+  mh:'mental_health', ipv:'ipv_screen', rmk:'remark' };
+const ANC_TICKS={ syt:'syphilis_treated', hbt:'hepb_treated', hbp:'hepb_prophylaxis', dw:'deworming',
+  hta:'hiv_test_accepted', hpc:'hiv_posttest_counselled', artc:'art_continued', artcl:'art_clinic_linked',
+  cal:'calcium_given', and:'anti_d_given', c1:'cnsl_danger_signs', c2:'cnsl_nutrition', cl:'cnsl_lifestyle',
+  cb:'cnsl_bpcr', c3:'cnsl_ecd', c4:'cnsl_infant_feeding', c5:'cnsl_family_planning' };
+const ANC_ECS={ vd:'visit_date', na:'next_appointment', vld:'viral_load_date' };
+
 async function ancVisits(id){
   window._ancAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
   const [past,e,labs]=await Promise.all([
@@ -2697,13 +2738,34 @@ async function ancVisits(id){
 
    <label>Remark<input id="rmk" placeholder="appointment or anything not covered above"></label>
    <div id="ancreqbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
-   <button class="act" id="asave" style="margin-top:10px">Save contact</button> <span class="muted" id="am"></span></div>
-   <div class="card"><h3>Previous contacts</h3><table><tr><th>Date</th><th>#</th><th>GA</th><th>Wt</th><th>BP</th><th>MUAC</th><th>Hb</th><th>Anaemia</th><th>HIV result</th><th>Next</th></tr>
-    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.contact_no||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.muac||'')}${p.muac_flag==1?' <span class="pill amber">&lt;23</span>':''}</td><td>${esc(p.hgb||'')}</td><td>${p.anaemia_grade&&p.anaemia_grade!=='normal'?('<span class="pill amber">'+esc(p.anaemia_grade)+'</span>'):esc(p.anaemia_grade||'')}</td>
+   <button class="act" id="asave" style="margin-top:10px">${EDIT_ANC?'Save the correction':'Save contact'}</button>
+   ${EDIT_ANC?'<button class="sec" id="acancel" style="margin-top:10px;margin-left:6px">Cancel</button>':''}
+   <span class="muted" id="am"></span></div>
+   <div class="card"><h3>Previous contacts</h3><table><tr><th>Date</th><th>#</th><th>GA</th><th>Wt</th><th>BP</th><th>MUAC</th><th>Hb</th><th>Anaemia</th><th>HIV result</th><th>Next</th><th></th></tr>
+    ${past.map(p=>`<tr${EDIT_ANC&&String(EDIT_ANC.id)===String(p.id)?' style="background:#fff8e6"':''}><td>${esc(p.visit_date||'')}</td><td>${esc(p.contact_no||'')}</td><td>${esc(p.ga_weeks||'')}</td><td>${esc(p.weight_kg||'')}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.muac||'')}${p.muac_flag==1?' <span class="pill amber">&lt;23</span>':''}</td><td>${esc(p.hgb||'')}</td><td>${p.anaemia_grade&&p.anaemia_grade!=='normal'?('<span class="pill amber">'+esc(p.anaemia_grade)+'</span>'):esc(p.anaemia_grade||'')}</td>
       <td>${hivCell(p)}</td>
-      <td>${esc(p.next_appointment||'')}</td></tr>`).join('')||'<tr><td colspan=10 class=muted>No contacts yet.</td></tr>'}
+      <td>${esc(p.next_appointment||'')}</td>
+      <td>${canDo('anc')?`<button class="sm" data-editanc="${p.id}">Correct</button>`:''}</td></tr>`).join('')||'<tr><td colspan=11 class=muted>No contacts yet.</td></tr>'}
    </table>
-   <p class="muted" style="font-size:12px">A test sent to the lab has no result on the day. Record it here when it comes back &mdash; it updates <b>this</b> contact, and a positive result puts her on the high-risk worklist and into PMTCT.</p></div>`;
+   <p class="muted" style="font-size:12px">A test sent to the lab has no result on the day. Record it here when it comes back &mdash; it updates <b>this</b> contact, and a positive result puts her on the high-risk worklist and into PMTCT.<br>
+   Use <b>Correct</b> to fix a value that was written down wrong. It updates the contact &mdash; it does not create a second one.</p></div>`;
+
+  // ---- CORRECT A PAST CONTACT --------------------------------------------------------------
+  // Until now a wrong BP, weight, GA, Td dose or counselling tick recorded at contact 2 could not be
+  // corrected anywhere in the tool. The only editable thing on this whole screen was the HIV result.
+  document.querySelectorAll('#app button[data-editanc]').forEach(b=>b.onclick=()=>{
+    EDIT_ANC=(past||[]).find(x=>String(x.id)===String(b.dataset.editanc))||null;
+    ancVisits(id);
+  });
+  const ac=$('#acancel'); if(ac) ac.onclick=()=>{ EDIT_ANC=null; ancVisits(id); };
+  if(EDIT_ANC){
+    fillVals(EDIT_ANC, ANC_VALS);
+    fillTicks(EDIT_ANC, ANC_TICKS);
+    fillEcs(EDIT_ANC, ANC_ECS);
+    const box=$('#ancreqbox');
+    if(box){ box.style.display=''; box.style.background='#fff8e6'; box.style.borderColor='#ef9f27'; box.style.color='#633806';
+      box.innerHTML='<b>Correcting the contact of '+esc(EDIT_ANC.visit_date||'')+'.</b> Saving will UPDATE that contact, not add a new one.'; }
+  }
 
   // ---- LATE RESULTS -------------------------------------------------------------------------
   // An HIV test sent to the lab does not come back the same day in most facilities. The result was
@@ -2829,7 +2891,12 @@ async function ancVisits(id){
     try{
       const su=['none','alcohol','tobacco','khat','caffeine','other'].filter(s=>tk('su_'+s)).join(',')||null;
       const hbv=+hb_.value||null, muv=+muac.value||null, wtv=+wt.value||null;
-      const r=await api('POST','anc_visits',{episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:wtv,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:numOrNull(fhr.value),presentation:pres.value,urine_protein:up.value,hgb:hbv,muac:muv,fetal_movement:(fm.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
+      // CORRECTING an existing contact PATCHes it. Recording a new one POSTs. Without this, fixing a
+      // wrong BP meant adding a SECOND contact for the same day — inflating the ANC contact count and
+      // leaving both the wrong value and the right one on her record.
+      const editing = EDIT_ANC && EDIT_ANC.id;
+      const r=await api(editing?'PATCH':'POST', editing?('anc_visits/'+EDIT_ANC.id):'anc_visits',
+        {episode_id:+id,visit_date:ecGet('vd'),contact_no:(cno.value||null),ga_weeks:+ga.value||null,weight_kg:wtv,bp_systolic:+bps.value||null,bp_diastolic:+bpd.value||null,fundal_height_cm:+fh.value||null,fetal_heart_rate:numOrNull(fhr.value),presentation:pres.value,urine_protein:up.value,hgb:hbv,muac:muv,fetal_movement:(fm.value||null),malaria_assessed:(mal.value||null),danger_note:dn.value,next_appointment:ecGet('na'),
     ultrasound_lt24w:(us.value||null),syphilis_result:(syr.value||null),syphilis_treated:tk('syt'),hepb_result:(hbr.value||null),hepb_treated:tk('hbt'),hepb_prophylaxis:tk('hbp'),td_dose_no:(+tdn.value||null),ifa_tabs:numOrNull(ift.value),deworming:tk('dw'),
     // A woman already on ART is not re-tested — that block is replaced by ART continuation.
     hiv_test_accepted:(onART?null:tk('hta')),hiv_test_result:(onART?null:(htr.value||null)),hiv_posttest_counselled:(onART?null:tk('hpc')),
@@ -2841,13 +2908,33 @@ async function ancVisits(id){
     bmi:bmiCalc(wtv,e.height_cm),anaemia_grade:(anaemiaGrade(hbv)||null),muac_flag:(muv?(muacFlag(muv)?1:0):null)});
     // Contact 1 IS the booking contact: its GA is the booking GA. Store it once on the
     // woman so it survives even when later contacts are entered out of order.
-    if(r&&r.ids&&String(cno.value)==='1'&&+ga.value){
+    // NOTE the success test: a PATCH returns {ok:true} and NO ids, so keying this on `r.ids` alone
+    // would mean CORRECTING contact 1's GA silently left her booking GA — and therefore her
+    // late-initiation flag, and the GA fed to the model — on the old, wrong value.
+    if(r&&(r.ids||r.ok)&&String(cno.value)==='1'&&+ga.value){
       const ep=await epOne(id);
       if(ep&&ep.woman_id){ await api('PATCH','women/'+ep.woman_id,{ga_first_contact:+ga.value,first_contact_date:ecGet('vd'),late_anc_initiation:lateAnc(ga.value)?1:0}).catch(()=>{}); }
       const msg=gaRisk(ga.value); if(msg) modal('Late ANC initiation',msg,'risk');
     }
-    $('#am').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>ancVisits(id),500); } finally{ b.disabled=false; } };
+    // A PATCH returns {ok:true}, a POST returns {ids:[...]} — accept either as success.
+    const ok = r && (r.ids || r.ok || r.queued);
+    $('#am').textContent = ok ? (editing?' corrected':' saved') : (' '+((r&&r.error)||'error'));
+    if(ok && !r.queued){ EDIT_ANC=null; setTimeout(()=>ancVisits(id),500); }
+    } finally{ b.disabled=false; } };
 }
+
+let EDIT_PNC=null;                         // the PNC visit being corrected, or null when recording a new one
+const PNC_VALS={ mt:'m_temp', bps:'m_bp_systolic', bpd:'m_bp_diastolic', pl:'m_pulse', bl:'bleeding',
+  br:'breast', md:'mood', ut:'uterine_tone', pw:'perineum', mbf:'mother_breastfeeding', ppf:'pp_fp',
+  ifc:'ifa_continued', nt:'nb_temp', nf:'nb_feeding', cd:'cord', ncv:'nb_convulsions',
+  nfb:'nb_fast_breathing', nci:'nb_chest_indrawing', nlt:'nb_lethargy', njd:'nb_jaundice',
+  nkmc:'nb_kmc', nimm:'nb_immunization', neid:'nb_eid', dn:'danger_note', pbaby:'baby_id',
+  vp:'visit_period', mc:'maternal_condition', ooc:'other_obs_complication', phtr:'hiv_test_result',
+  nwt:'nb_weight_g', npo:'nb_problem_other', nto:'nb_treatment_outcome' };
+const PNC_TICKS={ ppph:'pph', phta:'hiv_test_accepted', phrt:'hiv_retest_accepted',
+  pc1:'cnsl_danger_signs', pc2:'cnsl_breastfeeding', pc3:'cnsl_newborn_care',
+  pc4:'cnsl_family_planning', pc5:'cnsl_epi', pc6:'cnsl_ecd' };
+const PNC_ECS={ vd:'visit_date' };
 
 async function pncVisits(id){
   window._pncAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
@@ -2933,10 +3020,27 @@ async function pncVisits(id){
    </div></details>
 
    <label>Remark<input id="prmk"></label>
-   <button class="act" id="psave" style="margin-top:10px">Save PNC visit</button> <span class="muted" id="pm"></span></div>
-   <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Period</th><th>M temp</th><th>M BP</th><th>Condition</th><th>NB feeding</th></tr>
-    ${past.map(p=>`<tr><td>${esc(p.visit_date||'')}</td><td>${esc(p.visit_period||p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(({'1':'Normal','2':'Complicated, managed','3':'Complicated, referred','4':'Died'})[String(p.maternal_condition||'')]||'')}</td><td>${esc(p.nb_feeding||'')}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>No PNC visits yet.</td></tr>'}
+   <button class="act" id="psave" style="margin-top:10px">${EDIT_PNC?'Save the correction':'Save PNC visit'}</button>
+   ${EDIT_PNC?'<button class="sec" id="pcancel" style="margin-top:10px;margin-left:6px">Cancel</button>':''}
+   <span class="muted" id="pm"></span></div>
+   <div class="card"><h3>Previous PNC visits</h3><table><tr><th>Date</th><th>Period</th><th>M temp</th><th>M BP</th><th>Condition</th><th>NB feeding</th><th></th></tr>
+    ${past.map(p=>`<tr${EDIT_PNC&&String(EDIT_PNC.id)===String(p.id)?' style="background:#fff8e6"':''}><td>${esc(p.visit_date||'')}</td><td>${esc(p.visit_period||p.pnc_day||'')}</td><td>${esc(p.m_temp||'')}</td><td>${esc((p.m_bp_systolic||'')+'/'+(p.m_bp_diastolic||''))}</td><td>${esc(({'1':'Normal','2':'Complicated, managed','3':'Complicated, referred','4':'Died'})[String(p.maternal_condition||'')]||'')}</td><td>${esc(p.nb_feeding||'')}</td>
+      <td>${canDo('anc')?`<button class="sm" data-editpnc="${p.id}">Correct</button>`:''}</td></tr>`).join('')||'<tr><td colspan=7 class=muted>No PNC visits yet.</td></tr>'}
+   <p class="muted" style="font-size:12px">Use <b>Correct</b> to fix a value written down wrong. It updates that visit &mdash; it does not add a second one.</p>
    </table></div>`;
+
+  // ---- CORRECT A PAST PNC VISIT ------------------------------------------------------------
+  document.querySelectorAll('#app button[data-editpnc]').forEach(b=>b.onclick=()=>{
+    EDIT_PNC=(past||[]).find(x=>String(x.id)===String(b.dataset.editpnc))||null;
+    pncVisits(id);
+  });
+  const pc=$('#pcancel'); if(pc) pc.onclick=()=>{ EDIT_PNC=null; pncVisits(id); };
+  if(EDIT_PNC){
+    fillVals(EDIT_PNC, PNC_VALS);
+    fillTicks(EDIT_PNC, PNC_TICKS);
+    fillEcs(EDIT_PNC, PNC_ECS);
+  }
+
   // ---- THE ALERTS THIS SCREEN NEVER HAD ----
   // PNC used to collect newborn convulsions, fast breathing, chest indrawing, lethargy and
   // jaundice, plus the mother's BP, temperature, pulse and lochia — and fire NOTHING. A newborn
@@ -3001,7 +3105,10 @@ async function pncVisits(id){
       modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this visit.</i>','risk');
       return; }
     window._pncAck=false;
-    const b=$('#psave'); b.disabled=true; try{ await savePncId(); const r=await api('POST','pnc_visits',{episode_id:+id,visit_date:ecGet('vd'),m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
+    const b=$('#psave'); b.disabled=true; try{ await savePncId();
+    const editingP = EDIT_PNC && EDIT_PNC.id;
+    const r=await api(editingP?'PATCH':'POST', editingP?('pnc_visits/'+EDIT_PNC.id):'pnc_visits',
+      {episode_id:+id,visit_date:ecGet('vd'),m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
     baby_id:(+pbaby.value||null),
     visit_period:(vp.value||null),maternal_condition:(+mc.value||null),pph:tk('ppph'),other_obs_complication:(ooc.value||null),
     hiv_test_accepted:tk('phta'),hiv_retest_accepted:tk('phrt'),hiv_test_result:(phtr.value||null),
@@ -3009,7 +3116,10 @@ async function pncVisits(id){
     nb_weight_g:numOrNull(nwt.value),nb_problems:csv('np',[1,2,3,4,5,6,7,8,9,10,11]),nb_problem_other:(npo.value||null),nb_treatment:csv('nt',[1,2,3,4,5,6]),
     nb_treatment_outcome:(+nto.value||null),nb_death_age_days:numOrNull(ndd.value),nb_death_cause:(+ndc.value||null),
     ippfp_acceptor:(pacc.value||null),ippfp_method:(pmth.value||null),remark:prmk.value});
-    $('#pm').textContent=(r&&(r.ids||r.queued))?' saved':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>pncVisits(id),500); } finally{ b.disabled=false; } };
+    const okP = r && (r.ids || r.ok || r.queued);
+    $('#pm').textContent = okP ? (editingP?' corrected':' saved') : (' '+((r&&r.error)||'error'));
+    if(okP && !r.queued){ EDIT_PNC=null; setTimeout(()=>pncVisits(id),500); }
+    } finally{ b.disabled=false; } };
 }
 
 // Which baby (if any) we are EDITING rather than adding. Module-scoped so the Edit button in the
@@ -3186,9 +3296,13 @@ async function babiesScreen(id){
     } finally{ b.disabled=false; } };
 }
 
+let EDIT_VITAL=null;                       // the vitals row being corrected, or null when recording new
+const VIT_VALS={ bps:'bp_systolic', bpd:'bp_diastolic', pl:'pulse', tp:'temperature',
+                 rr:'resp_rate', sp:'spo2', ntt:'note' };
+
 async function vitalsScreen(id){
   const past=await api('GET','maternal_vitals?episode='+id).catch(()=>[]);
-  const hist=past.map(p=>{ const ms=meowsScore({sbp:p.bp_systolic,dbp:p.bp_diastolic,pulse:p.pulse,temp:p.temperature,rr:p.resp_rate,spo2:p.spo2}); return `<tr><td>${esc((p.obs_datetime||p.recorded_at||'').slice(0,16))}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.pulse||'')}</td><td>${esc(p.temperature||'')}</td><td>${esc(p.resp_rate||'')}</td><td>${esc(p.spo2||'')}</td><td><span class="pill ${ms.band}">${ms.total}</span></td></tr>`; }).join('')||'<tr><td colspan=7 class=muted>No vitals yet.</td></tr>';
+  const hist=past.map(p=>{ const ms=meowsScore({sbp:p.bp_systolic,dbp:p.bp_diastolic,pulse:p.pulse,temp:p.temperature,rr:p.resp_rate,spo2:p.spo2}); return `<tr${EDIT_VITAL&&String(EDIT_VITAL.id)===String(p.id)?' style="background:#fff8e6"':''}><td>${esc((p.obs_datetime||p.recorded_at||'').slice(0,16))}</td><td>${esc((p.bp_systolic||'')+'/'+(p.bp_diastolic||''))}</td><td>${esc(p.pulse||'')}</td><td>${esc(p.temperature||'')}</td><td>${esc(p.resp_rate||'')}</td><td>${esc(p.spo2||'')}</td><td><span class="pill ${ms.band}">${ms.total}</span></td><td>${canDo('anc')?`<button class="sm" data-editvit="${p.id}">Correct</button>`:''}</td></tr>`; }).join('')||'<tr><td colspan=8 class=muted>No vitals yet.</td></tr>';
   app().innerHTML=nav()+`<div class="card"><h3>Maternal vital signs — episode ${esc(id)}</h3>
    <div class="grid">
     <label>BP systolic<input id="bps" type="number" placeholder="mmHg"></label>
@@ -3201,10 +3315,22 @@ async function vitalsScreen(id){
    <p class="muted" style="font-size:12px;margin:-4px 0 6px">Leave blank anything you have not measured. A normal value that nobody took would score green on MEOWS &mdash; which is worse than an empty box.</p>
    <label>Note<input id="ntt"></label>
    <div id="meows" style="margin-top:10px"></div>
-   <button class="act" id="vsave" style="margin-top:10px">Record vitals</button> <span class="muted" id="vm"></span></div>
-   <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th><th>MEOWS</th></tr>
+   <button class="act" id="vsave" style="margin-top:10px">${EDIT_VITAL?'Save the correction':'Record vitals'}</button>
+   ${EDIT_VITAL?'<button class="sec" id="vcancel" style="margin-top:10px;margin-left:6px">Cancel</button>':''}
+   <span class="muted" id="vm"></span></div>
+   <div class="card"><h3>Vitals history</h3><table><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>RR</th><th>SpO2</th><th>MEOWS</th><th></th></tr>
     ${hist}
-   </table></div>`;
+   </table>
+   <p class="muted" style="font-size:12px">Use <b>Correct</b> to fix a value written down wrong. It updates that reading &mdash; it does not add a second one.</p></div>`;
+
+  // ---- CORRECT A PAST SET OF VITALS ---------------------------------------------------------
+  document.querySelectorAll('#app button[data-editvit]').forEach(b=>b.onclick=()=>{
+    EDIT_VITAL=(past||[]).find(x=>String(x.id)===String(b.dataset.editvit))||null;
+    vitalsScreen(id);
+  });
+  const vc=$('#vcancel'); if(vc) vc.onclick=()=>{ EDIT_VITAL=null; vitalsScreen(id); };
+  if(EDIT_VITAL) fillVals(EDIT_VITAL, VIT_VALS);
+
   // MEOWS ALONE CANNOT RAISE A BAND ON ONE DERANGED VITAL. Temperature caps at 2 points and amber needs
   // 3, so a woman at 40.0 C with everything else normal scored 2 = GREEN, on the one screen whose whole
   // purpose is spotting maternal deterioration - and this screen showed no alerts at all, only a score.
@@ -3228,8 +3354,17 @@ async function vitalsScreen(id){
   ['bps','bpd','pl','tp','rr','sp'].forEach(x=>{ const e=$('#'+x); if(e) e.oninput=showMeows; }); showMeows();
   $('#vsave').onclick=async()=>{
     if(!checkRanges([['bps','bp_systolic'],['bpd','bp_diastolic'],['pl','pulse'],['tp','temperature'],['rr','resp_rate'],['sp','spo2']])) return;
-    const b=$('#vsave'); b.disabled=true; try{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:numOrNull(bps.value),bp_diastolic:numOrNull(bpd.value),pulse:numOrNull(pl.value),temperature:numOrNull(tp.value),resp_rate:numOrNull(rr.value),spo2:numOrNull(sp.value),note:ntt.value});
-    $('#vm').textContent=(r&&(r.ids||r.queued))?' recorded':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>vitalsScreen(id),400); } finally{ b.disabled=false; } };
+    const b=$('#vsave'); b.disabled=true; try{
+    const editingV = EDIT_VITAL && EDIT_VITAL.id;
+    // When correcting, KEEP the original observation time — the reading was taken then, not now.
+    const r=await api(editingV?'PATCH':'POST', editingV?('maternal_vitals/'+EDIT_VITAL.id):'maternal_vitals',
+      {episode_id:+id, obs_datetime:(editingV ? (EDIT_VITAL.obs_datetime||nowStr()) : nowStr()),
+       bp_systolic:numOrNull(bps.value),bp_diastolic:numOrNull(bpd.value),pulse:numOrNull(pl.value),
+       temperature:numOrNull(tp.value),resp_rate:numOrNull(rr.value),spo2:numOrNull(sp.value),note:ntt.value});
+    const okV = r && (r.ids || r.ok || r.queued);
+    $('#vm').textContent = okV ? (editingV?' corrected':' recorded') : (' '+((r&&r.error)||'error'));
+    if(okV && !r.queued){ EDIT_VITAL=null; setTimeout(()=>vitalsScreen(id),400); }
+    } finally{ b.disabled=false; } };
 }
 
 async function handoverScreen(id){
