@@ -125,6 +125,27 @@ function sync_hiv_from_baby(int $babyId): void {
 //               is to offer contraception, and it used to be a dead end.
 function pregtest_link(int $pid, int $wid, string $res, array $b, array $u): array {
   $eid=null; $fpid=null;
+  // WHAT SHE WANTS TO DO ABOUT THE PREGNANCY.
+  //
+  // A positive test used to have exactly one door out of it: open an ANC episode. That assumes every
+  // woman with a positive test is continuing the pregnancy. Some are not — and a woman who is not,
+  // offered nothing but an antenatal booking, walks out of the facility with nothing. Safe abortion
+  // care is provided at health-centre level here; the unsafe alternative is what the guideline exists
+  // to prevent. Record what she decided, so the follow-up can happen.
+  //
+  // An ANC episode is opened ONLY if she is continuing. Nothing else opens one behind her back.
+  $fields=array_intersect_key($b, array_flip(['intent','abortion_care','referred_to','followup_date','counselled']));
+  if($fields){
+    $sets=[]; $vals=[];
+    foreach($fields as $k=>$v){ $sets[]="`$k`=?"; $vals[]=($v===''?null:$v); }
+    $vals[]=$pid;
+    db()->prepare("UPDATE pregnancy_tests SET ".implode(',',$sets)." WHERE id=?")->execute($vals);
+  }
+  $intent = $b['intent'] ?? null;
+  if($res==='positive' && $intent && $intent!=='continue'){
+    audit('pregnancy_intent','pregnancy_tests',$pid,['intent'=>$intent,'care'=>($b['abortion_care']??null)]);
+    return [null,null];     // she is not continuing (or has not decided) — no ANC episode is opened
+  }
   if($res==='positive' && !empty($b['link_to_anc'])){
     // Never open a SECOND ANC episode for a woman who already has one open — that splits her
     // contacts across two charts.

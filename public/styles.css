@@ -347,4 +347,19 @@ button.sm{padding:5px 10px;font-size:12px;width:auto;margin:2px 4px 2px 0}
   .rec-c{background:#fff;border:1px solid #ddd;break-inside:avoid}
   .rec-b{break-inside:avoid}
   .rec-v.rec-alarm,td.rec-alarm{color:#000;text-decoration:underline}  /* a red pill is invisible on a mono printer */
+
+  /* THE REFERRAL LETTER IS ONE PAGE.
+     It is carried by a woman, in a bag, on a bus, to a hospital that will read it in thirty seconds.
+     Two pages means the second one is lost. Everything below is in service of fitting on one sheet
+     and still being legible to a tired clinician under a bad light. */
+  @page{size:A4;margin:12mm}
+  .letter{font-size:11px;line-height:1.35}
+  .letter h3{font-size:15px;margin:0 0 2px}
+  .letter h5{font-size:11.5px;margin:0 0 3px}
+  .letter .rec-b{padding:5px 0;margin:0}
+  .letter .rec-g{grid-template-columns:1fr 1fr;gap:0 14px}
+  .letter .rec-f{padding:1.5px 0;font-size:11px}
+  .letter .muted{font-size:10px}
+  .letter .rec-v.rec-alarm{font-weight:700;text-decoration:underline}
+  .letter .sigline{margin-top:14px}
 }

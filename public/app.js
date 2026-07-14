@@ -3238,7 +3238,7 @@ async function pncVisits(id){
     <label>Severe jaundice<select id="njd"><option value="no">No</option><option value="yes">Yes</option></select></label>
     <label>KMC (if LBW)<select id="nkmc"><option value="">N/A</option><option value="initiated">Initiated</option><option value="not">Not</option></select></label>
     <label>Birth immunisation<select id="nimm"><option value="">-</option><option value="given">BCG/OPV-0 given</option><option value="not">Not given</option></select></label>
-    <label>EID (HIV-exposed)<select id="neid"><option value="">N/A</option><option value="taken">Sample taken</option><option value="not">Not taken</option></select></label>
+    <label id="neidw">EID (HIV-exposed)<select id="neid"><option value="">N/A</option><option value="taken">Sample taken</option><option value="not">Not taken</option></select></label>
     <label>Newborn weight (g)<input id="nwt" type="number" placeholder="grams"></label>
    </div><label>Danger signs / note<input id="dn"></label>
    <div id="pncalerts"></div>
@@ -3342,6 +3342,17 @@ async function pncVisits(id){
   ['nt','bps','bpd','pl','mt'].forEach(k=>{const el=$('#'+k); if(el) el.addEventListener('input',paintPnc);});
   paintPnc();
 
+  // EARLY INFANT DIAGNOSIS IS FOR AN EXPOSED INFANT. Asking it of every mother, including the ones
+  // whose HIV test in this system came back negative, is noise — and noise is where the exposed
+  // infant gets lost. Show it only when one of HER newborns is recorded as exposed, or she is known
+  // positive. (Nothing is hidden from a woman who IS positive: hers is the case it exists for.)
+  const exposedHere = (bbs||[]).some(b=>b.hiv_exposed==1) || String(WP.hiv_known_positive||'')==='1';
+  const neidw=$('#neidw');
+  if(neidw && !exposedHere){
+    neidw.style.display='none';
+    const el=$('#neid'); if(el) el.value='';     // never send a value for a question we did not ask
+  }
+
   const csv=(pre,codes)=>codes.filter(c=>tk(pre+c)).join(',')||null;   // MoH multi-code fields are comma-separated
   // MoH PNC items 6 & 7 live on the episode, not the visit. Derive them from the delivery
   // record when she delivered here; otherwise take what the provider entered. Without this
@@ -3410,6 +3421,25 @@ async function babiesScreen(id){
   const past=await api('GET','babies?episode='+id).catch(()=>[]);
   const nextOrder=(past.length||0)+1;
   const ed=EDIT_BABY;                       // the baby being corrected, or null when adding
+
+  // IS THIS INFANT HIV-EXPOSED? THE TOOL ALREADY KNOWS.
+  //
+  // The screen asked the provider "Is the newborn HIV-exposed?" as if it were an open question, on
+  // every baby, including the babies of women whose HIV test in this very system came back negative.
+  // Asking a question you already know the answer to is not neutral: it invites a mis-tap that puts a
+  // non-exposed infant on the ARV/DBS pathway, and it buries the babies who ARE exposed in a list of
+  // identical dropdowns.
+  //
+  // So: derive it from HER record. Positive -> the infant IS exposed, and the pathway is opened and
+  // said out loud. Negative -> say so, and offer a way to change it if her status has changed (a
+  // seroconversion in late pregnancy is exactly the case that must not be locked out).
+  const C=await api('GET','chart?episode='+id).catch(()=>null);
+  const anyPos = rows => (rows||[]).some(r=>String(r.hiv_test_result||'').toUpperCase()==='P');
+  const anyNeg = rows => (rows||[]).some(r=>String(r.hiv_test_result||'').toUpperCase()==='N');
+  const mHiv = !C||!C.woman ? 'unknown'
+    : (String(C.woman.hiv_known_positive||'')==='1' || anyPos(C.anc_visits) || anyPos(C.deliveries) || anyPos(C.pnc_visits)) ? 'positive'
+    : (anyNeg(C.anc_visits) || anyNeg(C.deliveries) || anyNeg(C.pnc_visits)) ? 'negative'
+    : 'unknown';
   app().innerHTML=nav()+`<div class="card"><h3>Newborn record — episode ${esc(id)}</h3>
    ${ed
      ? `<div style="background:#e8f3f0;border:1px solid #0f766e;color:#0f5c55;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">
@@ -3435,9 +3465,15 @@ async function babiesScreen(id){
    </div>
    <div id="nbwarn"></div>
 
-   <details class="moh" open><summary>HIV exposure &amp; early infant diagnosis</summary>
-    <div class="grid">
-     <label>Is the newborn HIV-exposed? <span class="muted" style="font-weight:400">(mother HIV positive)</span><select id="hex">${selOpts([['1','Yes — exposed'],['0','No — not exposed']])}</select></label>
+   <details class="moh" ${mHiv==='positive'?'open':''}><summary>HIV exposure &amp; early infant diagnosis${mHiv==='negative'?' <span class="muted">&mdash; her HIV test was negative</span>':''}</summary>
+    ${mHiv==='positive'?`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin-bottom:8px;font-size:13px">
+       <b>Her HIV test is positive &mdash; this infant IS HIV-exposed.</b> The pathway below is not optional: ARV prophylaxis now, a DBS sample for early infant diagnosis, and the ART clinic if it is positive.</div>`:''}
+    ${mHiv==='negative'?`<div style="background:#eef6f5;border:1px solid #dbe7e4;color:#334155;border-radius:10px;padding:9px 12px;margin-bottom:8px;font-size:13px">
+       <b>Her HIV test was negative</b>, so this infant is not HIV-exposed and none of the exposed-infant questions apply. Nothing to record here.
+       <button class="sm" id="hexoverride" type="button" style="margin-left:8px">Her status has changed</button>
+       <div class="muted" style="font-size:12px;margin-top:4px">Use that only if she has since tested positive &mdash; a seroconversion late in pregnancy is exactly the case that must not be locked out.</div></div>`:''}
+    <div class="grid" id="hexask" style="${mHiv==='negative'?'display:none':(mHiv==='positive'?'display:none':'')}">
+     <label>Is the newborn HIV-exposed? <span class="muted" style="font-weight:400">(mother HIV positive)</span><select id="hex">${selOpts([['1','Yes — exposed'],['0','No — not exposed']], mHiv==='positive'?'1':'')}</select></label>
     </div>
     <div id="hexblock" style="display:none">
      <div class="muted" style="font-size:12px;margin:6px 0">Exposed infant pathway: <b>ARV prophylaxis &rarr; DBS for early infant diagnosis &rarr; if positive, link to the ART clinic.</b></div>
@@ -3528,6 +3564,13 @@ async function babiesScreen(id){
     $('#pathprompt').style.display=any?'none':'';
   };
   ['a1','a5','wg','rs','brb','oc','cc','hex','dbsr','nicu','bpre','bsep','brds','bjau'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('change',showNb); el.addEventListener('input',showNb);}});
+  // She is HIV positive: the infant IS exposed. Not a question, not a dropdown to mis-tap — the
+  // pathway is simply open. (`hex` still carries the value 1, so the record and the register are
+  // unchanged.)
+  if(mHiv==='positive' && $('#hex')) $('#hex').value='1';
+  // She tested negative: nothing is asked. If her status has changed, the provider can say so.
+  const hov=$('#hexoverride');
+  if(hov) hov.onclick=()=>{ const a=$('#hexask'); if(a) a.style.display=''; hov.style.display='none'; };
   showNb();
 
   $('#bsave').onclick=async()=>{
@@ -4753,8 +4796,38 @@ async function pregTest(){
     <label>Result<select id="ptr"><option value="pending">Not back yet</option><option value="negative">Negative</option><option value="positive">Positive</option></select></label>
    </div>
    <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
-     <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
-     <div style="margin-top:4px">A positive test means she needs ANC. Ticking this registers her for antenatal care and she will appear on the ANC worklist immediately.</div>
+     <b>Her test is positive. What does she want to do?</b>
+     <div class="muted" style="font-size:12px;margin:2px 0 6px;color:#04342c">Ask her before anything is booked. A positive test is not a decision, and the tool used to assume it was: the only door out of this screen was an antenatal booking.</div>
+     <label style="margin-top:4px">Her decision<select id="ptint">
+       <option value="">— not recorded —</option>
+       <option value="continue">She is continuing the pregnancy</option>
+       <option value="not_continue">She does not want to continue</option>
+       <option value="undecided">She has not decided</option>
+     </select></label>
+
+     <div id="ptcont" style="display:none;margin-top:8px">
+       <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
+       <div>She will appear on the ANC worklist immediately, and her first-contact tests will be prompted there.</div>
+     </div>
+
+     <div id="ptterm" style="display:none;margin-top:8px;background:#fff;border:1px solid #cfe8df;border-radius:8px;padding:8px 10px">
+       <div class="muted" style="font-size:12px;color:#334155">Safe abortion care is provided at health-centre level in Ethiopia by trained midwives, clinical nurses and health officers, under the FMOH Technical and Procedural Guideline. Counsel her, and record what actually happened &mdash; a woman sent away with nothing is the pathway the guideline exists to prevent.</div>
+       <label style="margin-top:6px">Care<select id="ptac">
+         <option value="">— select —</option>
+         <option value="here">Provided here</option>
+         <option value="referred">Referred to another facility</option>
+         <option value="declined">She declined care today</option>
+       </select></label>
+       <label id="ptrefwrap" style="display:none;margin-top:6px">Referred to<input id="ptref" placeholder="facility name"></label>
+       <div class="ticks" style="margin-top:4px">${tick('ptcns','Counselled (options, and contraception afterwards)')}</div>
+       <div class="muted" style="font-size:12px;color:#334155">Contraception after an abortion prevents the next unintended pregnancy, and she is here now. Open her family-planning record from the FP screen when she is ready.</div>
+     </div>
+
+     <div id="ptund" style="display:none;margin-top:8px;background:#fff;border:1px solid #cfe8df;border-radius:8px;padding:8px 10px">
+       <div class="muted" style="font-size:12px;color:#334155">Undecided is not a dead end &mdash; it is a date to see her again. Gestational age only goes one way, and every week narrows what she can safely choose.</div>
+       ${ecPicker('ptfu','See her again on')}
+       <div class="ticks" style="margin-top:4px">${tick('ptcns2','Counselled')}</div>
+     </div>
    </div>
    <div id="ptneg" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
      <div class="ticks">${tick('ptfp','Offer family planning now (open her as an FP client)')}</div>
@@ -4763,11 +4836,22 @@ async function pregTest(){
    <label>Note<input id="ptn" placeholder="optional"></label>
    <button class="act" id="ptsave" style="margin-top:10px">Save test</button> <span class="muted" id="ptm"></span></div>
 
-   <div class="card"><h3>Recent tests</h3><table><tr><th>Date</th><th>MRN</th><th>Name</th><th>Result</th><th>Linked to ANC</th></tr>
-    ${(past||[]).map(p=>`<tr><td>${esc(p.test_date||'')}</td><td>${esc(p.mrn||'')}</td><td>${esc((p.first_name||'')+' '+(p.father_name||''))}</td>
+   <div class="card"><h3>Recent tests</h3><table><tr><th>Date</th><th>MRN</th><th>Name</th><th>Result</th><th>What she decided</th><th>Where she went</th></tr>
+    ${(past||[]).map(p=>{
+      const INT={continue:'Continuing',not_continue:'Not continuing',undecided:'Undecided'};
+      const CARE={here:'care given here',referred:'referred'+(p.referred_to?(' to '+p.referred_to):''),declined:'declined care'};
+      const decided = p.result!=='positive' ? '—'
+        : p.intent ? (p.intent==='undecided'
+            ? '<span class="pill amber">Undecided</span>'+(p.followup_date?(' <span class="muted">see her again '+esc(p.followup_date)+'</span>'):' <span class="muted">no follow-up date</span>')
+            : esc(INT[p.intent]||p.intent)+(p.intent==='not_continue'&&p.abortion_care?(' <span class="muted">&middot; '+esc(CARE[p.abortion_care]||p.abortion_care)+'</span>'):''))
+        : '<span class="muted">not recorded</span>';
+      return `<tr><td>${esc(p.test_date||'')}</td><td>${esc(p.mrn||'')}</td><td>${esc((p.first_name||'')+' '+(p.father_name||''))}</td>
       <td>${p.result==='positive'?'<span class="pill amber">Positive</span>':esc(p.result||'')}</td>
-      <td>${p.linked_episode_id?('<a class="nav" href="#patient/'+p.linked_episode_id+'">ANC episode '+p.linked_episode_id+'</a>'):(p.result==='positive'?'<span class="muted">not linked</span>':'—')}</td></tr>`).join('')
-      ||'<tr><td colspan=5 class=muted>No tests recorded yet.</td></tr>'}
+      <td>${decided}</td>
+      <td>${p.linked_episode_id?('<a class="nav" href="#patient/'+p.linked_episode_id+'">ANC episode '+p.linked_episode_id+'</a>')
+            :(p.linked_fp_client_id?('<a class="nav" href="#fpclient/'+p.linked_fp_client_id+'">Family planning</a>')
+            :(p.result==='positive'&&p.intent==='continue'?'<span class="muted">not linked</span>':'—'))}</td></tr>`;}).join('')
+      ||'<tr><td colspan=6 class=muted>No tests recorded yet.</td></tr>'}
    </table></div>`;
 
   let found=[];
@@ -4778,6 +4862,16 @@ async function pregTest(){
     $('#ptpos').style.display=(ptr.value==='positive')?'':'none';
     $('#ptneg').style.display=(ptr.value==='negative')?'':'none';
   });
+  // Her decision drives which block is shown. Nothing is booked until she has said what she wants.
+  const ptint=$('#ptint');
+  if(ptint) ptint.addEventListener('change',()=>{
+    $('#ptcont').style.display=(ptint.value==='continue')?'':'none';
+    $('#ptterm').style.display=(ptint.value==='not_continue')?'':'none';
+    $('#ptund').style.display =(ptint.value==='undecided')?'':'none';
+    const lk=$('#ptlink'); if(lk) lk.checked=(ptint.value==='continue');   // only continuing opens ANC
+  });
+  const ptac=$('#ptac');
+  if(ptac) ptac.addEventListener('change',()=>{ $('#ptrefwrap').style.display=(ptac.value==='referred')?'':'none'; });
 
   // Record a result that has come back from the lab. THIS is where she gets routed.
   document.querySelectorAll('[data-save]').forEach(btn=>btn.onclick=async()=>{
@@ -4785,15 +4879,39 @@ async function pregTest(){
     const pid=btn.dataset.save;
     const sel=document.querySelector('[data-res="'+pid+'"]');
     if(!sel.value){ modal('Select the result','Record whether her test was positive or negative.'); return; }
+    // A POSITIVE RESULT IS NOT A DECISION. This list used to open an ANC episode the moment the
+    // strip was read positive — booking her for antenatal care before anyone had asked her what she
+    // wanted. Ask first; the answer decides where she goes.
+    const askIntent=()=>new Promise(resolve=>{
+      const old=document.getElementById('mdl'); if(old) old.remove();
+      const d=document.createElement('div'); d.id='mdl';
+      d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
+      d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:460px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25)">
+        <h3 style="margin:0 0 6px;font-size:16px">Her test is positive. What does she want to do?</h3>
+        <p class="muted" style="font-size:13px;margin:0 0 10px">Ask her before anything is booked.</p>
+        <button class="act" data-i="continue" style="width:100%;margin-bottom:6px">She is continuing &mdash; open her ANC episode</button>
+        <button class="sec" data-i="not_continue" style="width:100%;margin-bottom:6px">She does not want to continue</button>
+        <button class="sec" data-i="undecided" style="width:100%;margin-bottom:6px">She has not decided</button>
+        <button class="sec" data-i="" style="width:100%">Record the result only, for now</button>
+      </div>`;
+      document.body.appendChild(d);
+      d.querySelectorAll('[data-i]').forEach(b=>b.onclick=()=>{ d.remove(); resolve(b.dataset.i); });
+    });
+    let intent=null;
+    if(sel.value==='positive'){ intent=await askIntent(); }
     btn.disabled=true;
     try{
       const neg=(sel.value==='negative');
       const r=await api('PATCH','pregnancy_tests/'+pid,{result:sel.value,
-        link_to_anc:(sel.value==='positive')?1:0,
+        intent:(sel.value==='positive'?(intent||null):null),
+        link_to_anc:(sel.value==='positive'&&intent==='continue')?1:0,
         link_to_fp:(neg&&tk('ptfpall'))?1:0, fp_offered:(neg&&tk('ptfpall'))?1:0});
-      if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); location.hash='#patient/'+r.episode_id; return; }
+      if(r&&r.episode_id){ toast('She is continuing — ANC episode opened','ok'); location.hash='#patient/'+r.episode_id; return; }
       if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); location.hash='#fpclient/'+r.fp_client_id; return; }
-      toast('Result recorded','ok'); setTimeout(pregTest,500);
+      if(intent==='not_continue'){ toast('Recorded. Open her test below to record the care she was given or the referral.','ok'); }
+      else if(intent==='undecided'){ toast('Recorded. Set a date to see her again on the test below.','ok'); }
+      else toast('Result recorded','ok');
+      setTimeout(pregTest,700);
     }catch(e){ btn.disabled=false; toast(e.message||'error'); }
   });
 
@@ -4802,11 +4920,18 @@ async function pregTest(){
     if(!ptw.value){ modal('Select the woman','Search for her by MRN or name and select her from the list. If she is not registered yet, register her first.'); return; }
     b.disabled=true;
     try{
+      const intent=(($('#ptint')||{}).value)||null;
       const r=await api('POST','pregnancy_tests',{woman_id:+ptw.value,test_date:ecGet('ptd'),result:ptr.value,
         note:(ptn.value||null),
-        link_to_anc:(ptr.value==='positive'&&tk('ptlink'))?1:0,
+        // An ANC episode is opened ONLY if she said she is continuing.
+        link_to_anc:(ptr.value==='positive'&&intent==='continue'&&tk('ptlink'))?1:0,
         link_to_fp:(ptr.value==='negative'&&tk('ptfp'))?1:0,
-        fp_offered:(ptr.value==='negative'&&tk('ptfp'))?1:0});
+        fp_offered:(ptr.value==='negative'&&tk('ptfp'))?1:0,
+        intent:(ptr.value==='positive')?intent:null,
+        abortion_care:(intent==='not_continue')?((($('#ptac')||{}).value)||null):null,
+        referred_to:(intent==='not_continue'&&(($('#ptac')||{}).value)==='referred')?((($('#ptref')||{}).value)||null):null,
+        followup_date:(intent==='undecided')?ecGet('ptfu'):null,
+        counselled:((intent==='not_continue'&&tk('ptcns'))||(intent==='undecided'&&tk('ptcns2')))?1:0});
       if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+r.episode_id,700); }
       else if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); setTimeout(()=>location.hash='#fpclient/'+r.fp_client_id,700); }
       else if(r&&(r.id||r.queued)){ $('#ptm').textContent=' saved'; setTimeout(()=>pregTest(),600); }
@@ -5190,7 +5315,7 @@ async function letterScreen(id){
   const ep=(C.episodes||[]).find(e=>String(e.id)===String(id))||{};
   const line=(l,v)=>v?`<div class="rec-f"><span class="rec-l">${esc(l)}</span><span class="rec-v">${esc(v)}</span></div>`:'';
   const gaps=gapsFor(W,anc,C.labs);
-  app().innerHTML=nav()+`<div class="card rec">
+  app().innerHTML=nav()+`<div class="card rec letter">
     <div style="text-align:center;margin-bottom:10px">
       <h3 style="margin-bottom:2px">Referral letter</h3>
       <div class="muted">${esc(ME.facility_name||'')}${ME.facility_name?' &middot; ':''}${esc(new Date().toISOString().slice(0,10))}</div>
@@ -5232,11 +5357,12 @@ async function letterScreen(id){
     ${gaps.length?`<div class="rec-b"><h5>Still outstanding at the time of referral</h5>
       <ul style="margin:4px 0 0 18px;font-size:13px">${gaps.map(g=>`<li>${esc(g[0])}</li>`).join('')}</ul></div>`:''}
     <div class="rec-b"><h5>Referring provider</h5>
-      <p style="font-size:13px">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')}</p>
-      <p class="muted" style="font-size:12px;margin-top:24px">Signature: ______________________________</p>
+      <p style="font-size:13px;margin:2px 0">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')} &middot; ${esc(new Date().toISOString().slice(0,10))}</p>
+      <p class="muted sigline" style="font-size:12px">Signature: ______________________________ &nbsp;&nbsp; Phone: ______________________</p>
     </div>
     <div style="margin-top:12px">
       <button class="act" onclick="window.print()">Print the letter</button>
+      <span class="muted" style="font-size:12px;margin-left:8px">One page &mdash; it is carried by her, in a bag, on a bus. A second page is a page that gets lost.</span>
       <a class="nav" href="#report/${esc(id)}" style="margin-left:8px">Her full record &rsaquo;</a>
     </div>
   </div>`;
