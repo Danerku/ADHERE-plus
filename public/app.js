@@ -63,7 +63,11 @@ const RANGES={
   ifa_tabs:       [   0,     200,  'IFA tablets'                 ],
   gravida:        [   0,      20,  'Gravida'                     ],
   para:           [   0,      20,  'Para'                        ],
-  viral_load:     [   0, 10000000, 'Viral load'                  ],
+  // `viral_load` is NOT a number. On the ANC contact it stores suppressed/unsuppressed/pending/not_done, and
+  // in PMTCT follow-up undetectable/detectable. The numeric copies/mL is a separate column, `vl_value`.
+  // Validating the word as a number rejected the whole write with "Viral load must be a number" — which the
+  // provider experienced simply as the form refusing to save.
+  vl_value:       [   0, 10000000, 'Viral load (copies/mL)'      ],
   cd4:            [   0,    2000,  'CD4 count'                   ]
 };
 // Check one field. Empty is always fine (not every measurement is taken).
@@ -5239,7 +5243,13 @@ const CODES = {
   hepb_result:{R:'REACTIVE',NR:'Non-reactive',ND:'Not done'},
   ultrasound_lt24w:{Y:'Yes',N:'No'},
   partograph_used:{Y:'Yes',N:'No'},
-  maternal_death_cause:{1:'Haemorrhage',2:'Hypertensive disorder',3:'Sepsis',4:'Obstructed labour',5:'Abortion complication',6:'Other'},
+  // MoH delivery register field 18 — and the DB column comment on delivery_summary.maternal_death_cause —
+  // read: 1=Haemorrhage 2=PE/Eclampsia 3=Obstructed labour 4=Sepsis 5=Anaemia 6=Other. The delivery FORM
+  // has always written those codes. This decoder used to read 3 as sepsis and 4 as obstructed labour, so a
+  // woman who died of obstructed labour was rendered on her own care record — the record an MDSR review
+  // reads — as having died of sepsis. The register is the authority; the decoder was the thing that was wrong.
+  maternal_death_cause:{1:'Haemorrhage',2:'Pre-eclampsia / eclampsia',3:'Obstructed labour',4:'Sepsis',5:'Anaemia',6:'Other'},
+  breastfeed_initiated:{1:'Within 1 hour',2:'1-2 hours',3:'After 3 hours',4:'NOT AT ALL',5:'Other milk'},
 };
 const CSV_CODES = {
   nb_problems:{1:'Normal',2:'Prematurity',3:'Sepsis / VSD',4:'Respiratory distress',5:'Perinatal asphyxia',6:'Low birth weight',
@@ -5299,7 +5309,9 @@ const F = {
   // newborn
   birth_order:['Birth order','t'], sex:['Sex','t'], weight_g:['Birth weight (g)','t!'],
   apgar_1min:['APGAR 1 min','t!'], apgar_5min:['APGAR 5 min','t!'], outcome:['Outcome','t!'], resuscitated:['Resuscitated','t!'],
-  breastfeed_initiated:['Breastfeeding initiated within 1 hour','t!'], vitamin_k_time:['Vitamin K','t!'],
+  // This is an MoH CODE (1-5), not a yes/no. It was labelled "initiated within 1 hour" and printed raw, so a
+  // baby who was never put to the breast (code 4) read as "Breastfeeding initiated within 1 hour: 4".
+  breastfeed_initiated:['Breastfeeding initiated','c!'], vitamin_k_time:['Vitamin K','t!'],
   enc_dried:['Dried and warmed','y'], enc_breathing:['Breathing checked','y'], enc_eye_ointment:['Eye ointment','y'], enc_cord_care:['Chlorhexidine cord care','y'],
   vacc_bcg:['BCG','y'], vacc_opv0:['OPV-0','y'], vacc_hbv:['Hepatitis B birth dose','y'],
   prob_prematurity:['Prematurity','y!'], prob_sepsis_vsd:['Sepsis','y!'], prob_resp_distress:['Respiratory distress','y!'],
@@ -5314,11 +5326,29 @@ const F = {
   mrn:['Newborn MRN','t'],
 };
 // A value that a clinician must not scroll past.
+//
+// THIS FUNCTION IS ONLY AS GOOD AS ITS VOCABULARY. Every case below is written against the value the FORM
+// actually stores, not against the word an English speaker would guess. Getting that wrong is worse than
+// having no highlighting at all, and it was wrong in both directions:
+//
+//   * The WHO newborn danger signs (convulsions, fast breathing, chest indrawing, lethargy, jaundice) are
+//     stored as 'yes'/'no'. They had no case at all, so they fell to the default (v==1) and a CONVULSING
+//     NEWBORN was rendered in plain text, while
+//   * a clean cord ('clean'), a baby feeding well ('well') and a pink palm ('pink') were all flagged RED,
+//     because the allow-lists only knew the words 'normal'/'good'/'negative'.
+//
+// So the routine findings shouted and the danger signs were silent. A provider who learns to trust the red
+// highlighting was being trained on noise. The vocabularies below were read back out of the live database.
+const YES = s => s==='yes' || s==='y' || s==='1' || s===1;
 function isAlarming(col, v){
   const s=String(v==null?'':v).toLowerCase();
   if(v==null||v==='') return false;
   switch(col){
     case 'hiv_test_result': return s==='p';
+    // ---- WHO newborn danger signs (PNC form: yes/no). Any 'yes' is an emergency. ----
+    case 'nb_convulsions': case 'nb_fast_breathing': case 'nb_chest_indrawing':
+    case 'nb_lethargy': case 'nb_jaundice':
+      return YES(s);
     // 'R' = reactive, 'NR' = NON-reactive. A substring test on "react" would flag both, and a test
     // on the letter r would flag "nr" — either way, a woman with a NEGATIVE test would be shown as
     // positive. Match exactly.
@@ -5326,11 +5356,19 @@ function isAlarming(col, v){
       return s==='r' || s==='positive' || s==='p' || s==='reactive';
     case 'urine_protein': return s==='+'||s==='++'||s==='+++';
     case 'anaemia_grade': return s==='moderate'||s==='severe';
-    case 'viral_load': return (+v)>=1000;
+    // A viral load is a WORD here, not a number: ANC stores suppressed/unsuppressed/pending/not_done and
+    // PMTCT follow-up stores undetectable/detectable. `+'unsuppressed'` is NaN, so the >=1000 test could
+    // never fire — the one HIV result that changes management was rendered as ordinary grey text.
+    // (The numeric copies/mL, when it is entered, lives in vl_value.)
+    case 'viral_load': return s==='unsuppressed' || s==='detectable';
+    case 'vl_value': return (+v)>=1000;
     case 'ipv_screen': return s==='disclosed'||s==='yes';
     case 'mental_health': return s!=='' && s!=='normal' && s!=='none';
     case 'ogtt_result': return s==='gdm'||s==='abnormal'||s==='high';
-    case 'urine_gramstain': case 'pallor': return s!=='' && s!=='normal' && s!=='negative' && s!=='none' && s!=='no';
+    case 'urine_gramstain': return s!=='' && s!=='normal' && s!=='negative' && s!=='none' && s!=='no';
+    // Pallor is stored 'pink' (normal) / 'pale'. The old allow-list did not know the word "pink", so every
+    // healthy palm was flagged red.
+    case 'pallor': return s==='pale';
     case 'blood_loss_ml': return (+v)>=500;
     case 'apgar_1min': case 'apgar_5min': return (+v)<7;
     case 'weight_g': return (+v)<2500;
@@ -5338,19 +5376,32 @@ function isAlarming(col, v){
     case 'maternal_condition': return String(v)!=='1';
     case 'nb_treatment_outcome': return String(v)==='3';
     case 'bleeding': return s==='heavy'||s==='offensive';
-    case 'uterine_tone': return s==='atonic';
+    // PNC uterine tone is firm/atonic; the DELIVERY column is a different one (amtsl_uterine_tone) and
+    // was never covered at all — an atonic uterus at birth is the commonest cause of PPH.
+    case 'uterine_tone': case 'amtsl_uterine_tone': return s==='atonic';
+    case 'amtsl_placenta': return s==='incomplete'||s==='retained';
     case 'perineum': return s==='infected';
     case 'mood': return s==='low'||s==='support';
-    case 'cord': return s!=='' && s!=='normal';
-    case 'nb_feeding': return s!=='' && s!=='good' && s!=='normal';
+    // Cord is stored clean/infected/bleeding — 'clean' is the NORMAL answer and was being flagged red.
+    case 'cord': return s==='infected'||s==='bleeding';
+    // Newborn feeding is well/difficulty/none — 'well' is the normal answer.
+    case 'nb_feeding': return s==='difficulty'||s==='none';
     case 'outcome': return s.indexOf('still')>=0 || s.indexOf('death')>=0 || s.indexOf('died')>=0;
     case 'maternal_status': case 'maternal_outcome': return s==='died'||s==='death'||s==='unstable_referred'||s==='near_miss';
     case 'nicu': return s==='admitted'||s==='referred_out';
     case 'dbs_result': return s==='positive'||s==='p';
+    case 'dbs_sample': return s==='not_sent';
+    case 'arv_prophylaxis': return s==='not_given'||s==='declined';
     case 'resuscitated': return s==='yes'||s==='1';
-    case 'breastfeed_initiated': return s==='no'||s==='0';
+    // MoH code 1-5. 4 = never put to the breast. Testing for the word 'no' could never match a digit.
+    case 'breastfeed_initiated': return String(v)==='4';
     case 'vitamin_k_time': return s==='not_given'||s==='none';
-    case 'nb_eid': return s==='not_done'||s==='due';
+    // The EID select stores 'taken' / 'not' (not 'not_done').
+    case 'nb_eid': return s==='not'||s==='not_done'||s==='due';
+    case 'nb_kmc': return s==='not';
+    case 'nb_immunization': return s==='not';
+    case 'other_obs_complication': return s!=='' && s!=='oth';   // PE / E / SEP are all emergencies
+    case 'nb_death_cause': case 'death_cause': case 'maternal_death_cause': return true;  // a recorded death is always alarming
     default:
       // yes/no alarms (comp_*, prob_*, pph, muac_flag, hiv_exposed…)
       return (v==1||v==='1');
@@ -5422,8 +5473,13 @@ function gapsFor(W, anc, labs){
     g.push(['No deworming recorded','Indicated once after the first trimester.']);
   if(String(W.hiv_known_positive||'')==='1' || any('hiv_test_result','p')){
     const vl=last('viral_load');
-    if(vl===null) g.push(['She is HIV positive and no viral load is recorded','A viral load determines the delivery plan and the infant’s ARV prophylaxis.']);
-    else if(+vl>=1000 && !anc.some(v=>v.art_clinic_linked==1))
+    // The ANC contact stores a WORD (suppressed/unsuppressed/pending/not_done), so the old `+vl>=1000`
+    // was NaN>=1000 — always false. This rule, the one that catches the strongest predictor of
+    // transmission to the baby, could never fire.
+    const vlUnsuppressed = ['unsuppressed','detectable'].indexOf(String(vl||'').toLowerCase())>=0;
+    const vlPending = ['pending','not_done'].indexOf(String(vl||'').toLowerCase())>=0;
+    if(vl===null || vlPending) g.push(['She is HIV positive and no viral load result is recorded','A viral load determines the delivery plan and the infant’s ARV prophylaxis.']);
+    else if(vlUnsuppressed && !anc.some(v=>v.art_clinic_linked==1))
       g.push(['Viral load is not suppressed and no ART-clinic referral is recorded','An unsuppressed viral load is the strongest predictor of transmission to the baby. Refer her back to the ART clinic.']);
   }
   return g;

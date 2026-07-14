@@ -164,8 +164,14 @@ function ranges(){
     'apgar_5min'=>[0,10,'APGAR (5 min)'],        'weight_g'=>[300,6000,'Birth weight (g)'],
     'blood_loss_ml'=>[0,5000,'Blood loss (ml)'], 'td_dose_no'=>[1,5,'TD dose'],
     'ifa_tabs'=>[0,200,'IFA tablets'],           'gravida'=>[0,20,'Gravida'],
-    'para'=>[0,20,'Para'],                       'viral_load'=>[0,10000000,'Viral load'],
-    'cd4'=>[0,2000,'CD4'],
+    'para'=>[0,20,'Para'],
+    // `viral_load` IS NOT A NUMBER and must never be listed here. The ANC contact stores
+    // suppressed/unsuppressed/pending/not_done and the PMTCT follow-up stores undetectable/detectable.
+    // While it was in this table, check_ranges() refused the whole write with "Viral load must be a
+    // number" — so a PMTCT viral-load follow-up could not be saved at all, and vl_suppressed on the
+    // facility dashboard could never be populated. The numeric copies/mL is a different column.
+    'vl_value'=>[0,10000000,'Viral load (copies/mL)'],
+    'cd4_count'=>[0,2000,'CD4 count'],
   ];
 }
 // Rejects a row that carries an impossible measurement. Call it BEFORE the insert/update.

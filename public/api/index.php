@@ -777,7 +777,28 @@ try {
       // (?woman=), because closing an episode ends the care, not the record.
       if(!$epOne && !$wom && empty($_GET['all'])) $sql.=" AND e.status <> 'closed'";
       $sql.=" ORDER BY e.id DESC LIMIT 200";
-      $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
+      $st=db()->prepare($sql); $st->execute($args); $rows=$st->fetchAll();
+      // HER HIV STATUS IS NOT PART OF A WORKLIST ROW FOR EVERYONE WHO CAN SEE THE WORKLIST.
+      // This route carries hiv_known_positive, hiv_linked_art, art_regimen and an HIV_POS risk code —
+      // and it had NO role check at all, only require_auth via user(). So the read-only `observer` and
+      // the clerical `recorder` could pull the entire HIV cohort of the facility in one call: exactly
+      // what /pmtct and /registers were deliberately tightened to prevent. The gate on those two routes
+      // was worth nothing while this one was open.
+      //
+      // The worklist itself is their job, so it is not the ACCESS that is wrong — it is the payload.
+      // Clinical roles see the whole row; everyone else sees the same list with the HIV columns removed
+      // and HIV_POS stripped out of the risk codes.
+      $clinical = in_array($u['role'], ['provider','admin','supervisor','super_admin'], true);
+      if(!$clinical){
+        foreach($rows as &$row){
+          unset($row['hiv_known_positive'], $row['hiv_linked_art'], $row['art_regimen']);
+          if(!empty($row['risk_codes'])){
+            $row['risk_codes'] = implode(',', array_filter(explode(',', $row['risk_codes']), function($c){ return $c!=='HIV_POS'; }));
+          }
+        }
+        unset($row);
+      }
+      out($rows); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       // voided=0: no new episode of care may be opened on a REMOVED patient. (If she was removed by
       // mistake, an admin restores her — that is what the restore screen is for.)
@@ -1010,6 +1031,19 @@ try {
       // immunization client it means a child (0, or 9-14 for HPV), not a mother.
       $rows = array_map('blank_to_null',$rows);
       foreach($rows as $row){ require_ep($row['episode_id']??0); check_ranges($row,['age']); }
+      // ---- ONE TRANSACTION, OR NOTHING ------------------------------------------------------------
+      // Three of the writes below DELETE the answer that is already there and then INSERT the
+      // replacement. With autocommit, the DELETE lands immediately — so if the INSERT then failed (an
+      // over-long free-text answer is enough: MySQL 1406), the previous answer was GONE and nothing had
+      // taken its place. A re-save of the ANC risk screening could silently erase a recorded previous
+      // caesarean — the strongest single feature the risk model has — and the provider would see only
+      // an error, not a loss.
+      //
+      // The same applies to a batch (the checklist posts an array): row 5 failing used to leave rows
+      // 1-4 committed and the request returned an error, so a retry re-inserted them.
+      // Now the whole request is one transaction: it either all lands, or the record is untouched.
+      $tx = !db()->inTransaction() && db()->beginTransaction();
+      try {
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id'];
         if($tbl==='handovers') $row['from_provider_id']=$u['id'];   // sender identity from the session, never caller-supplied
         if($tbl==='messages')  $row['from_user_id']=$u['id'];
@@ -1043,7 +1077,12 @@ try {
       if($tbl==='anc_visits'){ foreach($rows as $row){ if(!empty($row['td_dose_no'])) td_to_register((int)$row['episode_id'],(int)$row['td_dose_no'],$row['visit_date']??null,$u); } }
       // An HIV-exposed newborn belongs in the HEI cohort, not only on the delivery record.
       if($tbl==='babies'){ foreach($ids as $bid) sync_hiv_from_baby((int)$bid); }
-
+      if($tx) db()->commit();
+      } catch (Throwable $e) {
+        // The DELETE is rolled back with the failed INSERT: her previous answer is still there.
+        if($tx && db()->inTransaction()) db()->rollBack();
+        throw $e;                                  // the handler at the foot of this file turns it into a 4xx
+      }
       audit('create',$tbl,$ids[0]??null); out(['ids'=>$ids],201); }
   }
 
@@ -1173,9 +1212,7 @@ try {
       $row['recorded_by']=$u['id'];
       // child rows must belong to a client in THIS facility
       if($tbl==='fp_visits'){ $c=db()->prepare("SELECT id FROM fp_clients WHERE id=? AND facility_id=?"); $c->execute([$row['fp_client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('FP client not in your facility',404); }
-      if($tbl==='immunization_doses'){ $c=db()->prepare("SELECT id FROM immunization_clients WHERE id=? AND facility_id=?"); $c->execute([$row['client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('immunization client not in your facility',404);
-        // one row per dose: re-recording a dose updates its date rather than duplicating it
-        db()->prepare("DELETE FROM immunization_doses WHERE client_id=? AND dose_no=?")->execute([$row['client_id'],$row['dose_no']]); }
+      if($tbl==='immunization_doses'){ $c=db()->prepare("SELECT id FROM immunization_clients WHERE id=? AND facility_id=?"); $c->execute([$row['client_id']??0,$u['facility_id']]); if(!$c->fetch()) err('immunization client not in your facility',404); }
       if($pmtctChild){
         if(!$ownsMother($row['mother_id']??0)) err('PMTCT client not in your facility',404);
         // An infant_id must belong to THAT mother — otherwise a follow-up row could be
@@ -1199,12 +1236,28 @@ try {
         if(empty($row['cohort_month0'])) $row['cohort_month0']=substr(($row['booking_date']??date('Y-m-d')),0,7);
       }
       // (the woman-record write-back happens after the insert, below — it needs the new id)
+      //
+      // DELETE-THEN-INSERT INSIDE A TRANSACTION. Both of the replace-in-place writes below used to run
+      // under autocommit: the old dose / the old follow-up cell was deleted, and if the insert that was
+      // meant to replace it then failed (an over-long note is enough), the answer was simply gone. The
+      // transaction makes the pair atomic — either the new value lands, or the old one is still there.
+      $tx2 = !db()->inTransaction() && db()->beginTransaction();
+      try {
+      if($tbl==='immunization_doses'){
+        // one row per dose: re-recording a dose updates its date rather than duplicating it
+        db()->prepare("DELETE FROM immunization_doses WHERE client_id=? AND dose_no=?")->execute([$row['client_id'],$row['dose_no']]);
+      }
       if($tbl==='pmtct_followup'){
         // One cell per subject per month — re-recording a month corrects it, never duplicates it.
         db()->prepare("DELETE FROM pmtct_followup WHERE mother_id=? AND subject=? AND month_no=? AND (infant_id <=> ?)")
             ->execute([$row['mother_id'],$row['subject']??'mother',$row['month_no']??0,$row['infant_id']??null]);
       }
       $id2=insert($tbl,$row);
+      if($tx2) db()->commit();
+      } catch (Throwable $e) {
+        if($tx2 && db()->inTransaction()) db()->rollBack();
+        throw $e;
+      }
       // PMTCT ENROLMENT MUST REACH HER MATERNITY RECORD. Until now it did not: she was enrolled
       // in PMTCT and her `women` row still said nothing about HIV — so at her next ANC contact
       // the tool offered a woman on ART an HIV test, she never appeared on the high-risk
@@ -1619,6 +1672,14 @@ try {
     case 1292:  // incorrect date/datetime value
     case 1366:  // incorrect value for column
       err('One of the values is not valid for this field.', 400);
+    // THE TWO A PROVIDER ACTUALLY HITS BY TYPING. Both were missing from this list and fell through to
+    // the 500 below — which is the one status the offline queue retries FOR EVER.
+    case 1406:  // Data too long for column
+      // Reachable from ordinary use: danger_note / remark / note are VARCHAR(255), the "other" free-text
+      // fields are shorter still. A long note is a fault in the request, not in the server.
+      err('That text is too long for this field. Please shorten it.', 400);
+    case 1048:  // Column cannot be null
+      err('A required field is missing.', 400);
     default:
       err('server error', 500);
   }
