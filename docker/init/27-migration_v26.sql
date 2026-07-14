@@ -26,9 +26,14 @@
 -- =============================================================================================
 
 -- ---- guard: has this migration already run? --------------------------------------------------
+-- NOTE the column names. This table already exists from v21-v25 with (name, applied_at, note) —
+-- an earlier draft of this migration invented (k, at) and failed on its very last statement with
+-- "Unknown column 'k'". The ALTERs had already applied by then (they run inside the procedure,
+-- above), but the marker row was never written. Matching the existing convention fixes both.
 CREATE TABLE IF NOT EXISTS schema_fixups (
-  k   VARCHAR(64) PRIMARY KEY,
-  at  DATETIME NOT NULL
+  name       VARCHAR(64) NOT NULL PRIMARY KEY,
+  applied_at DATETIME    NOT NULL,
+  note       VARCHAR(255)
 );
 
 DROP PROCEDURE IF EXISTS adhere_v26;
@@ -128,17 +133,9 @@ DELIMITER ;
 CALL adhere_v26();
 DROP PROCEDURE IF EXISTS adhere_v26;
 
-INSERT IGNORE INTO schema_fixups (k, at) VALUES ('v26_integrity', NOW());
+INSERT IGNORE INTO schema_fixups (name, applied_at, note)
+  VALUES ('integrity_v26', NOW(), 'unique keys on checklist_responses + bemonc_care; the 11 missing foreign keys');
 
 -- ---- what was applied -------------------------------------------------------------------------
 SELECT 'unique keys' AS what, TABLE_NAME, INDEX_NAME
-  FROM information_schema.STATISTICS
- WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME IN ('uk_chk_item','uk_bem_item')
- GROUP BY TABLE_NAME, INDEX_NAME;
-
-SELECT 'foreign keys' AS what, TABLE_NAME, CONSTRAINT_NAME
-  FROM information_schema.TABLE_CONSTRAINTS
- WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_TYPE='FOREIGN KEY'
-   AND CONSTRAINT_NAME IN ('fk_ancv_ep','fk_pncv_ep','fk_baby_ep','fk_mv_ep','fk_bem_ep','fk_lab_ep',
-                           'fk_ref_ep','fk_fpc_woman','fk_immc_woman','fk_pmm_woman','fk_pt_woman')
- ORDER BY TABLE_NAME;
+  FROM i

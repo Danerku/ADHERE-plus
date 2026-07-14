@@ -26,9 +26,13 @@
 -- =============================================================================================
 
 -- ---- guard: has this migration already run? --------------------------------------------------
+-- NOTE the column names. This table already exists from v21-v25 with (name, applied_at, note) —
+-- an earlier draft of this migration invented (k, at) and failed on its very last statement with
+-- "Unknown column 'k'". The ALTERs had already applied by then (they run inside the procedure,
+-- above), but the marker row was never written. Matching the existing convention fixes both.
 CREATE TABLE IF NOT EXISTS schema_fixups (
-  k   VARCHAR(64) PRIMARY KEY,
-  at  DATETIME NOT NULL
+  name       VARCHAR(64) NOT NULL PRIMARY KEY,
+  note       VARCHAR(255)
 );
 
 DROP PROCEDURE IF EXISTS adhere_v26;
@@ -128,7 +132,8 @@ DELIMITER ;
 CALL adhere_v26();
 DROP PROCEDURE IF EXISTS adhere_v26;
 
-INSERT IGNORE INTO schema_fixups (k, at) VALUES ('v26_integrity', NOW());
+INSERT IGNORE INTO schema_fixups (name, applied_at, note)
+  VALUES ('integrity_v26', NOW(), 'unique keys on checklist_responses + bemonc_care; the 11 missing foreign keys');
 
 -- ---- what was applied -------------------------------------------------------------------------
 SELECT 'unique keys' AS what, TABLE_NAME, INDEX_NAME
