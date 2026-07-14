@@ -138,4 +138,13 @@ INSERT IGNORE INTO schema_fixups (name, applied_at, note)
 
 -- ---- what was applied -------------------------------------------------------------------------
 SELECT 'unique keys' AS what, TABLE_NAME, INDEX_NAME
-  FROM i
+  FROM information_schema.STATISTICS
+ WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME IN ('uk_chk_item','uk_bem_item')
+ GROUP BY TABLE_NAME, INDEX_NAME;
+
+SELECT 'foreign keys' AS what, TABLE_NAME, CONSTRAINT_NAME
+  FROM information_schema.TABLE_CONSTRAINTS
+ WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_TYPE='FOREIGN KEY'
+   AND CONSTRAINT_NAME IN ('fk_ancv_ep','fk_pncv_ep','fk_baby_ep','fk_mv_ep','fk_bem_ep','fk_lab_ep',
+                           'fk_ref_ep','fk_fpc_woman','fk_immc_woman','fk_pmm_woman','fk_pt_woman')
+ ORDER BY TABLE_NAME;
