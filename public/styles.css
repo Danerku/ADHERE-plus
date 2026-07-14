@@ -321,6 +321,28 @@ a.tile:active{transform:translateY(0)}
 /* ---- Small inline buttons (rupture time, failed-queue retry/discard) ---- */
 button.sm{padding:5px 10px;font-size:12px;width:auto;margin:2px 4px 2px 0}
 
+/* ---- THE ETHIOPIAN CALENDAR ------------------------------------------------------
+   A month you can see, with today marked and the Gregorian date printed underneath —
+   a health centre runs on both calendars at once, and the provider was doing the
+   conversion in her head. The three selects are still there, under "Type it instead". */
+.ecwrap{position:relative;display:block}
+.ecbtn{width:100%;text-align:left;background:#fff;border:1px solid var(--border);border-radius:10px;
+       padding:10px 12px;font-size:14px;font-weight:600;color:#1f2937;cursor:pointer}
+.ecbtn:hover{border-color:#0f766e}
+.ecbtn.empty{color:#94a3b8;font-weight:500}
+.ecpop{position:absolute;z-index:60;top:calc(100% + 4px);left:0;width:270px;background:#fff;
+       border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.18)}
+.echead{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid var(--border)}
+.ecnav{width:30px;padding:2px 0;font-size:16px;background:#eef2f1;color:#334155;border-radius:8px}
+.ecdow{display:grid;grid-template-columns:repeat(7,1fr);padding:6px 6px 0;color:#94a3b8;font-size:11px;text-align:center}
+.ecgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;padding:4px 6px 6px}
+.ecd{padding:7px 0;font-size:13px;background:transparent;color:#1f2937;border-radius:8px;border:0;cursor:pointer;width:auto;margin:0}
+.ecd:hover{background:#eef2f1}
+.ecd.blank{visibility:hidden}
+.ecd.today{outline:2px solid #0f766e;font-weight:700}
+.ecd.sel{background:#0f766e;color:#fff;font-weight:700}
+.ecmanual summary{font-size:12px;color:#64748b;cursor:pointer;margin-top:4px}
+
 /* ---- ZONE 3: the step strip ------------------------------------------------------
    Where she is in her care, in the order care actually happens. Horizontally scrollable,
    because a phone is narrow and a labour episode has eight steps — and because hiding a

@@ -1165,6 +1165,95 @@ function ecDays(id){
     .map(d=>`<option${d===want?' selected':''}>${d}</option>`).join('');
   if(want>n){ D.value=''; if(typeof toast==='function') toast((Ethiopian?Ethiopian.months[em-1]:'This month')+' has only '+n+' days — choose the day again.'); }
 }
+// =================================================================================================
+// A CALENDAR, NOT THREE DROPDOWNS.
+//
+// A clinician in the field asked for this: picking a date meant working three separate dropdowns —
+// day, month, year — with no way to see the month, no way to see where today is, and no way to see
+// what the date means in the Gregorian calendar the lab report and the phone are using. So dates
+// were guessed, and a guessed date on a last menstrual period is a guessed gestational age, which
+// is a guessed due date and a guessed preterm birth.
+//
+// The month grid shows her the month. Today is marked. The Gregorian equivalent is printed
+// underneath, because a health centre runs on both calendars at once and the provider is the one
+// doing the conversion in her head.
+//
+// The three selects are STILL THERE, underneath — every form in the app reads its date through
+// ecGet()/ecSet() off those ids, and the offline queue replays what they produced. The grid writes
+// into them. Nothing else in the tool has to know the grid exists.
+// =================================================================================================
+function ecLabelOf(y,m,d){
+  const mons=(window.Ethiopian?Ethiopian.months:[]);
+  if(!(y&&m&&d)) return 'Choose a date';
+  const g=(window.Ethiopian&&Ethiopian.toGreg)?Ethiopian.toGreg(+y,+m,+d):null;
+  const gl=g?(' · '+new Date(g+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})):'';
+  return d+' '+(mons[m-1]||m)+' '+y+gl;
+}
+function ecRefreshLabel(id){
+  const el=document.getElementById(id+'_btn'); if(!el) return;
+  const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).value, y=($('#'+id+'_y')||{}).value;
+  el.textContent=ecLabelOf(y,m,d);
+  el.classList.toggle('empty', !(d&&m&&y));
+}
+// Pick a day from the grid: write it into the three selects, which remain the source of truth.
+function ecPick(id,y,m,d){
+  const D=document.getElementById(id+'_d'), M=document.getElementById(id+'_m'), Y=document.getElementById(id+'_y');
+  if(!D||!M||!Y) return;
+  if(![...Y.options].some(o=>+o.value===+y || +o.text===+y)) Y.add(new Option(y,y));   // a date outside the default range must still be pickable
+  Y.value=String(y); M.value=String(m); ecDays(id); D.value=String(d);
+  ecRefreshLabel(id);
+  const g=document.getElementById(id+'_grid'); if(g) g.style.display='none';
+  // let any listener on the selects (alerts, GA recalculation) know the date changed
+  [D,M,Y].forEach(el=>el.dispatchEvent(new Event('change',{bubbles:true})));
+}
+function ecNav(id,dm){
+  const g=document.getElementById(id+'_grid'); if(!g) return;
+  let y=+g.dataset.y, m=+g.dataset.m;
+  m+=dm; if(m<1){ m=13; y--; } if(m>13){ m=1; y++; }
+  g.dataset.y=y; g.dataset.m=m;
+  ecDrawGrid(id);
+}
+function ecDrawGrid(id){
+  const g=document.getElementById(id+'_grid'); if(!g||!window.Ethiopian) return;
+  const y=+g.dataset.y, m=+g.dataset.m;
+  const mons=Ethiopian.months||[];
+  const n=ecDayCount(y,m);
+  const t=ecToday();
+  const selD=+($('#'+id+'_d')||{}).value, selM=+($('#'+id+'_m')||{}).value, selY=+($('#'+id+'_y')||{}).value;
+  // where does day 1 fall in the week? convert it and ask the Gregorian date.
+  const g1=Ethiopian.toGreg(y,m,1);
+  const startDow=g1?new Date(g1+'T00:00:00').getDay():0;      // 0 = Sunday
+  const cells=[];
+  for(let i=0;i<startDow;i++) cells.push('<span class="ecd blank"></span>');
+  for(let d=1;d<=n;d++){
+    const isToday=(y===t.year&&m===t.month&&d===t.day);
+    const isSel=(y===selY&&m===selM&&d===selD);
+    cells.push(`<button type="button" class="ecd${isToday?' today':''}${isSel?' sel':''}" onclick="ecPick('${id}',${y},${m},${d})">${d}</button>`);
+  }
+  g.innerHTML=`<div class="echead">
+      <button type="button" class="ecnav" onclick="ecNav('${id}',-1)">&lsaquo;</button>
+      <b>${esc(mons[m-1]||m)} ${esc(y)}</b>
+      <button type="button" class="ecnav" onclick="ecNav('${id}',1)">&rsaquo;</button>
+    </div>
+    <div class="ecdow">${['S','M','T','W','T','F','S'].map(x=>`<span>${x}</span>`).join('')}</div>
+    <div class="ecgrid">${cells.join('')}</div>
+    ${m===13?`<div class="muted" style="font-size:11px;padding:4px 6px">Pagume has only ${n} days this year.</div>`:''}
+    <div style="display:flex;gap:6px;padding:6px">
+      <button type="button" class="sm" onclick="ecPick('${id}',${t.year},${t.month},${t.day})">Today</button>
+      <button type="button" class="sm" onclick="document.getElementById('${id}_grid').style.display='none'">Close</button>
+    </div>`;
+}
+function ecOpen(id){
+  const g=document.getElementById(id+'_grid'); if(!g) return;
+  const open=(g.style.display!=='none');
+  document.querySelectorAll('.ecpop').forEach(x=>x.style.display='none');   // one calendar at a time
+  if(open) return;
+  const t=ecToday();
+  g.dataset.y = (($('#'+id+'_y')||{}).value) || t.year;
+  g.dataset.m = (($('#'+id+'_m')||{}).value) || t.month;
+  ecDrawGrid(id);
+  g.style.display='block';
+}
 function ecPicker(id,label,def,iso){ const t=ecToday(); const mons=(window.Ethiopian?Ethiopian.months:[]);
   let s=null;
   if(iso && window.Ethiopian){ const dt=new Date(iso+'T00:00:00'); if(!isNaN(dt)) s=Ethiopian.toEth(dt); }
@@ -1173,13 +1262,19 @@ function ecPicker(id,label,def,iso){ const t=ecToday(); const mons=(window.Ethio
   if(sel && years.indexOf(sel.year)<0) years=years.concat([sel.year]).sort((a,b)=>a-b);  // don't lose an out-of-range year
   const dayN=ecDayCount(sel?sel.year:t.year, sel?sel.month:t.month);
   const days=Array.from({length:dayN},(_,i)=>i+1);
+  const shown=sel?ecLabelOf(sel.year,sel.month,sel.day):'Choose a date';
   return `<label>${label} <span class="muted" style="font-weight:400">(Ethiopian calendar)</span>
-   <span style="display:flex;gap:6px;flex-wrap:wrap">
-    <select id="${id}_d" style="min-width:80px"><option value="">Day</option>${days.map(d=>`<option${sel&&d===sel.day?' selected':''}>${d}</option>`).join('')}</select>
-    <select id="${id}_m" style="min-width:135px" onchange="ecDays('${id}')"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${sel&&(i+1)===sel.month?' selected':''}>${m}</option>`).join('')}</select>
-    <select id="${id}_y" style="min-width:90px" onchange="ecDays('${id}')"><option value="">Year</option>${years.map(y=>`<option${y===(sel?sel.year:t.year)?' selected':''}>${y}</option>`).join('')}</select>
+   <span class="ecwrap">
+     <button type="button" id="${id}_btn" class="ecbtn${sel?'':' empty'}" onclick="ecOpen('${id}')">${esc(shown)}</button>
+     <div id="${id}_grid" class="ecpop" style="display:none"></div>
    </span>
-   <span class="muted" style="font-weight:400;font-size:11px">format: Day &middot; Month &middot; Year</span></label>`; }
+   <details class="ecmanual"><summary>Type it instead</summary>
+    <span style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+     <select id="${id}_d" style="min-width:80px" onchange="ecRefreshLabel('${id}')"><option value="">Day</option>${days.map(d=>`<option${sel&&d===sel.day?' selected':''}>${d}</option>`).join('')}</select>
+     <select id="${id}_m" style="min-width:135px" onchange="ecDays('${id}');ecRefreshLabel('${id}')"><option value="">Month</option>${mons.map((m,i)=>`<option value="${i+1}"${sel&&(i+1)===sel.month?' selected':''}>${m}</option>`).join('')}</select>
+     <select id="${id}_y" style="min-width:90px" onchange="ecDays('${id}');ecRefreshLabel('${id}')"><option value="">Year</option>${years.map(y=>`<option${y===(sel?sel.year:t.year)?' selected':''}>${y}</option>`).join('')}</select>
+    </span>
+   </details></label>`; }
 function ecGet(id){ const d=($('#'+id+'_d')||{}).value, m=($('#'+id+'_m')||{}).value, y=($('#'+id+'_y')||{}).value;
   if(!(d&&m&&y&&window.Ethiopian)) return null;
   // toGreg now returns null for a date that does not exist, rather than quietly rolling it forward.
@@ -1192,7 +1287,9 @@ function ecSet(id,iso){ const D=$('#'+id+'_d'), M=$('#'+id+'_m'), Y=$('#'+id+'_y
   const dt=new Date(iso+'T00:00:00'); if(isNaN(dt)){ D.value=''; M.value=''; return; }
   const e=Ethiopian.toEth(dt);
   if(![...Y.options].some(o=>+o.value===e.year)) Y.add(new Option(e.year,e.year));
-  D.value=String(e.day); M.value=String(e.month); Y.value=String(e.year); }
+  D.value=String(e.day); M.value=String(e.month); Y.value=String(e.year);
+  ecRefreshLabel(id);          // the calendar button shows the date; prefilling must update it too
+}
 // ---- CLINIC WALL-CLOCK TIME --------------------------------------------------
 // toISOString() emits UTC. Ethiopia is UTC+3, so every timestamp the tool wrote used to be
 // three hours behind the clock on the wall:
@@ -5772,26 +5869,10 @@ async function letterScreen(id){
   </div>`;
 }
 
-async function _reportScreenOld(id){
-  const [e,obs,chk,deliv,babies,anc,pnc,refs]=await Promise.all([
-    epOne(id), api('GET','observations?episode='+id).catch(()=>[]),
-    api('GET','checklist?episode='+id).catch(()=>[]), api('GET','delivery?episode='+id).catch(()=>[]),
-    api('GET','babies?episode='+id).catch(()=>[]), api('GET','anc_screening?episode='+id).catch(()=>[]),
-    api('GET','pnc_visits?episode='+id).catch(()=>[]), api('GET','referrals?episode='+id).catch(()=>[])]);
-  const d=(deliv||[])[0]||{}; const last=obs[obs.length-1]||{};
-  const ancYes=(anc||[]).filter(a=>a.response==='yes').length;
-  app().innerHTML=nav()+`<div class="card"><h3>Care summary — episode ${esc(id)}</h3>
-   <p><b>${esc((e.first_name||'')+' '+(e.father_name||''))}</b> · MRN ${esc(e.mrn||'')} · G${esc(e.gravida||'?')}/P${esc(e.para||'?')} · ${esc(e.service_category||'')} · status ${esc(e.status||'')}</p>
-   <p class="muted">Admitted ${esc((e.admission_datetime||'').slice(0,16))}${e.admitted_from&&e.admitted_from!=='new'?(' ('+esc(e.admitted_from)+')'):''}</p>
-   <h4>Partograph</h4><p class="muted">${obs.length} observation(s). Last: cervix ${esc(last.cervix_cm||'—')} cm, FHR ${esc(last.fetal_heart_rate||'—')}, hrs ${esc(last.hours_since_active||'—')}.</p>
-   <h4>ANC screening</h4><p class="muted">${anc.length?(ancYes?(ancYes+' risk factor(s) → specialised care'):'no risk factors → basic ANC'):'not screened'}</p>
-   <h4>Safe-birth checklist</h4><p class="muted">${chk.length} item(s) recorded.</p>
-   <h4>Delivery</h4><p class="muted">${d.delivery_datetime?('Mode '+esc(d.mode||'')+', partograph '+esc(d.partograph_used||'?')+', mother '+esc(d.maternal_status||d.maternal_outcome||'')):'not delivered'}</p>
-   <h4>Newborn(s)</h4><p class="muted">${babies.length?babies.map(b=>'#'+esc(b.birth_order)+' '+esc(b.sex||'')+' '+esc(b.weight_g||'?')+'g APGAR '+esc(b.apgar_1min||'?')+'/'+esc(b.apgar_5min||'?')+' '+esc(b.outcome||'')).join('; '):'none recorded'}</p>
-   <h4>PNC follow-up</h4><p class="muted">${pnc.length} visit(s).</p>
-   <h4>Referral</h4><p class="muted">${refs.length?refs.map(r=>'to '+esc(r.referred_to||'')+' ('+esc(r.urgency||'')+') — '+esc(r.reason||'')).join('; '):'none'}</p>
-   <button class="sec" onclick="window.print()" style="margin-top:10px">Print</button></div>`;
-}
+// (The old "Care summary" screen lived here — eight counts and nothing else: "3 observation(s)",
+//  "12 item(s) recorded", "2 visit(s)". It was replaced by the care record, which shows what was
+//  actually found. It is deleted rather than left commented out: dead code in a clinical file is a
+//  trap for whoever reads it next.)
 
 const BEMONC=[
  ['BEM_ANTIBIOTICS','Parenteral antibiotics'],
