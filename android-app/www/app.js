@@ -23,6 +23,78 @@ function clinicalFlags(o){ let band='green'; const R=[]; const up=b=>{band=escal
 // APGAR of 0 (a flat, white, asphyxiated newborn) or an estimated blood loss of 0 became
 // indistinguishable from "not assessed". Empty stays null; a real 0 is kept.
 function numOrNull(v){ if(v===''||v===null||v===undefined) return null; const n=+v; return Number.isNaN(n)?null:n; }
+
+// ============================================================================================
+// PLAUSIBLE RANGES — a typing error is not a measurement.
+//
+// A clinician typed a height of 1,700,000 cm. Nothing stopped her: the HTML min/max attributes are
+// only a hint, and the save did `+ht.value||null` with no check. Three women in the live database
+// already carry heights of 65, 45 and 55 cm — the same mistake in the other direction. Height is
+// stored ONCE on her record and drives BMI at EVERY antenatal contact, so one bad number silently
+// corrupts her BMI, and her BMI risk grade, for the whole pregnancy.
+//
+// These bounds are deliberately WIDE. They are not clinical normals — the alerts already handle
+// abnormal. They are the limits of what a human measurement can possibly be, so the only thing they
+// ever reject is a slip of the finger. A real 0 is still a real 0 (see numOrNull): FHR 0 means no
+// fetal heart heard, APGAR 0 means a flat baby, and both must get through.
+const RANGES={
+  //  key            min      max     label                          note
+  height_cm:      [ 120,     200,  'Height (cm)'                 ],
+  weight_kg:      [  30,     200,  'Weight (kg)'                 ],
+  age:            [  10,      60,  'Age'                         ],
+  ga_weeks:       [   4,      43,  'Gestational age (weeks)'     ],
+  bp_systolic:    [  60,     250,  'Systolic BP'                 ],
+  bp_diastolic:   [  30,     160,  'Diastolic BP'                ],
+  pulse:          [  30,     200,  'Pulse'                       ],
+  temperature:    [  30,      43,  'Temperature (°C)'       ],
+  resp_rate:      [   6,      60,  'Respiratory rate'            ],
+  spo2:           [  50,     100,  'SpO₂ (%)'               ],
+  fundal_height:  [  10,      45,  'Fundal height (cm)'          ],
+  fetal_heart:    [   0,     220,  'Fetal heart rate'            ],   // 0 = no fetal heart heard
+  hgb:            [   3,      20,  'Haemoglobin (g/dl)'          ],
+  muac:           [  10,      45,  'MUAC (cm)'                   ],
+  cervix_cm:      [   0,      10,  'Cervical dilatation (cm)'    ],
+  contractions:   [   0,      10,  'Contractions per 10 min'     ],
+  hours_labour:   [   0,      48,  'Hours in active labour'      ],
+  apgar:          [   0,      10,  'APGAR'                       ],
+  birth_weight_g: [ 300,    6000,  'Birth weight (g)'            ],
+  blood_loss_ml:  [   0,    5000,  'Estimated blood loss (ml)'   ],
+  td_dose:        [   1,       5,  'Td dose number'              ],
+  ifa_tabs:       [   0,     200,  'IFA tablets'                 ],
+  gravida:        [   0,      20,  'Gravida'                     ],
+  para:           [   0,      20,  'Para'                        ],
+  viral_load:     [   0, 10000000, 'Viral load'                  ],
+  cd4:            [   0,    2000,  'CD4 count'                   ]
+};
+// Check one field. Empty is always fine (not every measurement is taken).
+function rangeError(key, v){
+  const R=RANGES[key]; if(!R) return null;
+  const n=numOrNull(v); if(n===null) return null;              // blank -> nothing to check
+  if(!Number.isFinite(n)) return R[2]+' must be a number.';
+  if(n<R[0] || n>R[1]) return R[2]+' of '+n+' is not possible — it must be between '+R[0]+' and '+R[1]+'. Please check what you typed.';
+  return null;
+}
+// Guard a save. `pairs` is [[elementId, rangeKey], ...]. Returns true if everything is plausible;
+// otherwise shows the problem and returns false so the caller does NOT save.
+// Any element that is not on the screen is simply skipped, so a screen can list fields it may not
+// render for every role without breaking.
+function checkRanges(pairs){
+  const errs=[];
+  pairs.forEach(([id,key])=>{
+    const el=document.getElementById(id); if(!el) return;
+    const e=rangeError(key, el.value);
+    if(e){ errs.push(e); el.style.borderColor='#d13b3b'; }
+    else { el.style.borderColor=''; }
+  });
+  // Diastolic above systolic is a transposition, not a reading.
+  const s=document.getElementById('bps')||document.getElementById('sbp');
+  const d=document.getElementById('bpd')||document.getElementById('dbp');
+  if(s&&d){ const sv=numOrNull(s.value), dv=numOrNull(d.value);
+    if(sv!==null && dv!==null && dv>=sv){ errs.push('The diastolic BP ('+dv+') cannot be the same as or higher than the systolic ('+sv+'). They may have been entered the wrong way round.'); s.style.borderColor='#d13b3b'; d.style.borderColor='#d13b3b'; } }
+  if(errs.length){ modal('Please check these values', errs.join('<br><br>'), 'risk'); return false; }
+  return true;
+}
+// ============================================================================================
 // The model's field-missingness defaults. NOTE: age, parity, ga and prior_cs are NOT here — the
 // model was trained to impute them itself, and supplying a fixed guess (age 25, GA 39) as if it were
 // measured both defeats that and, for GA, scored every woman as term. Those come from her record or
@@ -1151,7 +1223,17 @@ function anaemiaAction(g){ return ({
 // Acute malnutrition — Guideline 5.2.2d
 function muacFlag(m){ return (+m>0 && +m<23); }
 // BMI — Table 4 / Annex 7. Derived from height + weight, never asked.
-function bmiCalc(kg,cm){ kg=+kg; cm=+cm; if(!kg||!cm) return null; return Math.round((kg/Math.pow(cm/100,2))*10)/10; }
+// BMI refuses to compute from an impossible height or weight. Three women in the live database carry
+// heights of 65, 45 and 55 cm — at 55 cm a normal weight gives a BMI near 200, which was displayed as
+// a straight-faced clinical finding and graded "overweight". Better to show nothing and say why than
+// to show a number that is certainly wrong.
+function bmiCalc(kg,cm){
+  kg=+kg; cm=+cm;
+  if(!kg||!cm) return null;
+  if(cm<RANGES.height_cm[0] || cm>RANGES.height_cm[1]) return null;   // implausible height -> no BMI
+  if(kg<RANGES.weight_kg[0] || kg>RANGES.weight_kg[1]) return null;   // implausible weight -> no BMI
+  return Math.round((kg/Math.pow(cm/100,2))*10)/10;
+}
 function bmiFlag(b){ if(!b) return ''; if(b<18.5) return 'underweight'; if(b>25) return 'overweight'; return 'normal'; }
 // A modal the user must acknowledge — a toast is too easy to miss for a risk flag.
 // The safety modals - IMMINENT ECLAMPSIA, newborn danger signs, PPH - are the most important dialogs in
@@ -1299,6 +1381,9 @@ async function register(){
   $('#save').onclick=async()=>{
     const em=mrnError(mrn.value); if(em){ $('#m').textContent=' '+em; modal('Check the MRN',em); return; }
     const ea=ageError(age.value); if(ea){ $('#m').textContent=' '+ea; modal('Check the age',ea); return; }
+    // Height is stored ONCE and drives BMI at every antenatal contact — a slip here follows her all
+    // pregnancy. Gravida/para bound too: a typo there feeds the risk model.
+    if(!checkRanges([['ht','height_cm'],['gr','gravida'],['pa','para']])) return;
     $('#m').textContent=' saving…';
     try{
       const w=await api('POST','women',{mrn:mrn.value.trim(),first_name:fn.value,father_name:fa.value,grandfather_name:gf.value,age:+age.value||null,marital_status:ms.value,phone:ph.value,kebele:kb.value,next_of_kin:nok.value,kin_phone:kph.value,kin_address:(kad.value||null),sms_consent:1,
@@ -1353,7 +1438,7 @@ async function findWoman(arg){
   const preId=(arg&&/^\d+$/.test(arg))?+arg:null;
   app().innerHTML=nav()+`<div class="card"><h3>Find a woman already registered</h3>
    <p class="muted">She is on file from a previous pregnancy or visit. Open her record and start a new episode &mdash; do not register her again, or her history is split across two records.</p>
-   <label>Search by MRN or name<input id="fq" placeholder="type at least 2 characters" autofocus></label>
+   <label>Search by MRN or name<input id="fq" placeholder="her name, her father&rsquo;s name, or her MRN" autofocus></label>
    <div id="fres" style="margin-top:10px"></div></div>
    <div id="fsel"></div>`;
   const render=(list)=>{
@@ -1365,7 +1450,9 @@ async function findWoman(arg){
     document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>openWoman(+b.dataset.pick,list));
   };
   let t=null;
-  $('#fq').addEventListener('input',()=>{ clearTimeout(t); const q=fq.value.trim(); if(q.length<2){ $('#fres').innerHTML=''; return; }
+  // A SINGLE LETTER IS A VALID SEARCH. The two-character minimum meant typing "D" did nothing at all,
+  // which is exactly what a provider does first — and it looked like the search was broken.
+  $('#fq').addEventListener('input',()=>{ clearTimeout(t); const q=fq.value.trim(); if(q.length<1){ $('#fres').innerHTML=''; return; }
     t=setTimeout(async()=>{ const r=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]); render(r||[]); },250); });
 
   async function openWoman(wid,list){
@@ -1600,6 +1687,12 @@ async function partograph(id){
     if(miss.length){ $('#rec').disabled=false;
       modal('Not recorded yet','These have not been measured: <b>'+miss.map(esc).join(', ')+'</b>.<br><br>ADHERE+ will not fill them in for you. The fetal heart rate in particular drives both the cervicograph and the AI score — a value nobody measured is worse than no value at all.');
       return; }
+    // These numbers are plotted on the cervicograph AND fed to the AI model. A slip of the finger
+    // here does not just look wrong, it changes the score. (FHR 0 is allowed — it means no fetal
+    // heart heard, and that is a red flag, not a typo.)
+    if(!checkRanges([['hrs','hours_labour'],['cvx','cervix_cm'],['fhr','fetal_heart'],['ctx','contractions'],
+                     ['sbp','bp_systolic'],['dbp','bp_diastolic'],['pls','pulse'],['tmp','temperature']])){
+      $('#rec').disabled=false; return; }
     const btn=$('#rec'); btn.disabled=true;                         // guard against double-submit
     try{
     const o={hrs:+hrs.value,cvx:+cvx.value,fhr:+fhr.value,ctx:(ctx.value===''?null:+ctx.value),mld:+mld.value,
@@ -2165,6 +2258,9 @@ async function delivery(id){
 
   const MOH_STATUS={well:'stable',near_miss:'stable',referred:'unstable_referred',death:'died'};
   $('#s').onclick=async()=>{
+    // Range check BEFORE the PPH gate — a blood loss typed as 90000 is a slip, and raising a
+    // haemorrhage alert on it would teach the provider that the alert means nothing.
+    if(!checkRanges([['ebl','blood_loss_ml']])) return;
     // A red PPH alert must be SEEN before the delivery can be filed.
     if(pphCheck() && !window._pphAck){ window._pphAck=true; modal('Postpartum haemorrhage','This delivery meets the PPH criteria (blood loss threshold or atonic uterus). Manage the haemorrhage first. Press Save again to confirm you have seen this and to record it.','risk'); return; }
     const btn=$('#s'); btn.disabled=true;
@@ -2557,8 +2653,18 @@ async function ancVisits(id){
     if(g&&g!=='normal') out+=`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">${esc(anaemiaAction(g))}</div>`;
     else if(g==='normal') out+=`<div style="background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">${esc(anaemiaAction(g))}</div>`;
     if(muacFlag(mu)) out+=`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">MUAC ${mu} cm — ACUTE MALNUTRITION (&lt;23 cm). Treat per the national protocol and counsel on nutrition.</div>`;
+    // BMI IS COMPUTED, NEVER TYPED — from THIS visit's weight and the height on her record. Show it
+    // the moment both exist, and say plainly when it cannot be computed. Previously a missing height
+    // just made the BMI box silently absent, so the provider had no idea why, and no idea that the
+    // BMI risk factor was going unassessed at every single contact.
     if(bmi){ const f=bmiFlag(bmi);
-      out+=`<div style="background:${f==='normal'?'#e1f5ee':'#faeeda'};border:1px solid ${f==='normal'?'#5dcaa5':'#ef9f27'};color:${f==='normal'?'#04342c':'#633806'};border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">BMI ${bmi} — ${f}${f!=='normal'?' (a high-risk condition, Guideline Table 4)':''}.</div>`; }
+      out+=`<div style="background:${f==='normal'?'#e1f5ee':'#faeeda'};border:1px solid ${f==='normal'?'#5dcaa5':'#ef9f27'};color:${f==='normal'?'#04342c':'#633806'};border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">BMI <b>${bmi}</b> &mdash; ${f}${f!=='normal'?' (a high-risk condition, Guideline Table 4)':''}. <span class="muted">Calculated from this weight (${wtv} kg) and her recorded height (${e.height_cm} cm).</span></div>`; }
+    else if(wtv && !e.height_cm)
+      out+=`<div style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">BMI cannot be calculated &mdash; <b>her height is not on her record</b>. BMI is a high-risk condition (Guideline Table 4) and is going unassessed at every contact. Add her height on her record (Edit her details).</div>`;
+    else if(wtv && e.height_cm && rangeError('height_cm', e.height_cm))
+      // Her stored height is impossible (there are such rows in the live data). Say so, rather than
+      // printing a BMI of 198 as though it were a finding.
+      out+=`<div style="background:#fcebeb;border:1px solid #d13b3b;color:#791f1f;border-radius:10px;padding:8px 12px;margin:6px 0;font-size:13px">BMI cannot be calculated &mdash; <b>her recorded height of ${esc(e.height_cm)} cm is not possible</b>, so it was almost certainly mistyped. Please correct it on her record (Edit her details). Until then her BMI risk factor cannot be assessed.</div>`;
     // ---- THE ALERTS THIS SCREEN NEVER HAD ----
     // Until now the ANC contact screen warned about anaemia, MUAC and BMI and NOTHING ELSE.
     // A blood pressure of 170/115 with ++ proteinuria was written to the database in silence:
@@ -2626,6 +2732,12 @@ async function ancVisits(id){
       modal('Contact incomplete','These required fields are missing: '+miss.map(m=>m[1]).join(', ')+'.\n\nThe National ANC Guideline requires blood pressure, weight and MUAC to be measured at every contact.','risk');
       return; }
     $('#ancreqbox').style.display='none';
+    // RANGE CHECK BEFORE THE CLINICAL ALERTS. A mistyped number must not be allowed to raise a red
+    // flag — a BP of 1480/96 is a slip, not severe hypertension, and alerting on it teaches the
+    // provider to dismiss alerts.
+    if(!checkRanges([['ga','ga_weeks'],['wt','weight_kg'],['bps','bp_systolic'],['bpd','bp_diastolic'],
+                     ['fh','fundal_height'],['fhr','fetal_heart'],['hb','hgb'],['muac','muac'],
+                     ['ift','ifa_tabs'],['ifc2','ifa_tabs'],['tdn','td_dose']])) return;
     // A RED FLAG MUST BE SEEN. This contact used to save silently, whatever the numbers were.
     // The record still saves — refusing to save clinical data would be worse — but the provider
     // cannot get past it without reading it.
@@ -2802,6 +2914,8 @@ async function pncVisits(id){
     if(pod||dob) await api('PATCH','episodes/'+id,{place_of_delivery:pod,infant_dob:dob}).catch(()=>{});
   };
   $('#psave').onclick=async()=>{
+    // Range check first: a mistyped number must not raise a clinical alert.
+    if(!checkRanges([['bps','bp_systolic'],['bpd','bp_diastolic'],['pl','pulse'],['mt','temperature'],['nt','temperature']])) return;
     // A RED FLAG MUST BE SEEN. The visit still saves — refusing to store clinical data would be
     // worse — but the provider cannot walk past a newborn danger sign without reading it.
     const reds=pncAlerts().filter(a=>a[0]==='red');
@@ -2960,6 +3074,9 @@ async function babiesScreen(id){
   showNb();
 
   $('#bsave').onclick=async()=>{
+    // APGAR 0 and a blood loss of 0 are REAL values and must pass — the ranges start at 0 for exactly
+    // that reason. What is rejected is a birth weight of 40 g or an APGAR of 80.
+    if(!checkRanges([['wg','birth_weight_g'],['a1','apgar'],['a5','apgar']])) return;
     const blocking=nbIssues().filter(i=>i.block);
     if(blocking.length){ modal('Check the newborn record',blocking.map(i=>i.t).join('\n\n'),'risk'); return; }
     const b=$('#bsave'); b.disabled=true; try{
@@ -3031,7 +3148,9 @@ async function vitalsScreen(id){
     $('#meows').innerHTML=vitalAlerts().map(a=>alertBox(a[0],a[1],a[2])).join('')
       +'<div style="border-top:0.5px solid #eee;padding-top:8px"><b class="muted">MEOWS early-warning</b> <span class="pill '+ms.band+'">score '+ms.total+'</span> <span class="muted">'+esc(act)+'</span>'+(ms.parts.length?('<div class="muted" style="font-size:12px;margin-top:3px">Triggers: '+ms.parts.map(x=>esc(x.label)+' (+'+x.pts+')').join(' &middot; ')+'</div>'):'')+'</div>'; };
   ['bps','bpd','pl','tp','rr','sp'].forEach(x=>{ const e=$('#'+x); if(e) e.oninput=showMeows; }); showMeows();
-  $('#vsave').onclick=async()=>{ const b=$('#vsave'); b.disabled=true; try{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:numOrNull(bps.value),bp_diastolic:numOrNull(bpd.value),pulse:numOrNull(pl.value),temperature:numOrNull(tp.value),resp_rate:numOrNull(rr.value),spo2:numOrNull(sp.value),note:ntt.value});
+  $('#vsave').onclick=async()=>{
+    if(!checkRanges([['bps','bp_systolic'],['bpd','bp_diastolic'],['pl','pulse'],['tp','temperature'],['rr','resp_rate'],['sp','spo2']])) return;
+    const b=$('#vsave'); b.disabled=true; try{ const r=await api('POST','maternal_vitals',{episode_id:+id,obs_datetime:nowStr(),bp_systolic:numOrNull(bps.value),bp_diastolic:numOrNull(bpd.value),pulse:numOrNull(pl.value),temperature:numOrNull(tp.value),resp_rate:numOrNull(rr.value),spo2:numOrNull(sp.value),note:ntt.value});
     $('#vm').textContent=(r&&(r.ids||r.queued))?' recorded':' '+((r&&r.error)||'error'); if(r&&r.ids) setTimeout(()=>vitalsScreen(id),400); } finally{ b.disabled=false; } };
 }
 
@@ -3066,7 +3185,7 @@ async function editWoman(wid){
     <label>Kebele<input id="kb" value="${esc(w.kebele||'')}"></label>
     <label>Gravida<input id="gr" type="number" value="${esc(w.gravida||'')}"></label>
     <label>Para<input id="pa" type="number" value="${esc(w.para||'')}"></label>
-    <label>Height (cm)<input id="ht" type="number" value="${esc(w.height_cm||'')}"></label>
+    <label>Height (cm) <span class="muted" style="font-weight:400">&mdash; drives BMI at every ANC contact</span><input id="ht" type="number" min="120" max="200" value="${esc(w.height_cm||'')}"></label>
     <label>Woreda<input id="wo" value="${esc(w.woreda||'')}"></label>
     <label>GA at first ANC contact (weeks)<input id="gafc" type="number" min="4" max="42" value="${esc(w.ga_first_contact||'')}"></label>
     <label>Blood group<select id="bg">${selOpts([['A','A'],['B','B'],['AB','AB'],['O','O']],w.blood_group)}</select></label>
@@ -3110,6 +3229,9 @@ async function editWoman(wid){
     // Age drives the high-risk flag (<19 or >35). It was validated at registration and NOT here,
     // so a typo on this screen silently corrupted the flag — or cleared it altogether.
     const ea=ageError(age.value); if(age.value && ea){ modal('Check the age',ea); return; }
+    // Height had NO bounds at all on this screen (registration at least had the HTML hints), and it
+    // is the one number that follows her through every antenatal contact via BMI.
+    if(!checkRanges([['ht','height_cm'],['gr','gravida'],['pa','para']])) return;
     // LNMP: this screen is the ONLY writer of LNMP and EDD in the whole application, and it used
     // to write NULL over them on every save — even a phone-number correction destroyed her dates.
     // The picker is now pre-filled (above); belt and braces, never send an empty one over a
@@ -3727,7 +3849,7 @@ function pmtctNewForm(){
 
   // Linking her maternity record fills in what we already know, rather than asking twice.
   let wfound=[];
-  $('#pmq').addEventListener('input',async()=>{ const q=pmq.value.trim(); if(q.length<2) return;
+  $('#pmq').addEventListener('input',async()=>{ const q=pmq.value.trim(); if(q.length<1) return;
     wfound=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
     pmw.innerHTML='<option value="">— not linked / not registered —</option>'+(wfound||[]).map(w=>
       `<option value="${w.id}">${esc(w.mrn||'')} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
@@ -4143,7 +4265,7 @@ async function pregTest(){
    </table></div>`;
 
   let found=[];
-  ptq.addEventListener('input',async()=>{ const q=ptq.value.trim(); if(q.length<2) return;
+  ptq.addEventListener('input',async()=>{ const q=ptq.value.trim(); if(q.length<1) return;
     found=await api('GET','women?q='+encodeURIComponent(q)).catch(()=>[]);
     ptw.innerHTML='<option value="">— select the woman —</option>'+(found||[]).map(w=>`<option value="${w.id}">${esc(w.mrn)} — ${esc((w.first_name||'')+' '+(w.father_name||''))} (${esc(w.age||'?')})</option>`).join(''); });
   ptr.addEventListener('change',()=>{
