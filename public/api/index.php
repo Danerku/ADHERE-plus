@@ -293,7 +293,24 @@ try {
   // ---- women (registration) ----
   if ($r==='women'){
     if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=?"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }
-    if($m==='GET'){ $u=user(); $q='%'.($_GET['q']??'').'%'; $st=db()->prepare("SELECT * FROM women WHERE facility_id=? AND (mrn LIKE ? OR first_name LIKE ?) ORDER BY id DESC LIMIT 100"); $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll()); }
+    // SEARCH BY THE NAME SHE IS ACTUALLY KNOWN BY.
+    // This used to match `mrn` and `first_name` only. In Ethiopia a woman is identified by her own
+    // name AND her father's — so a provider searching "Desta" (the father's name she was told at the
+    // door) got NOTHING back, and reasonably concluded the search was broken or case-sensitive.
+    // It never was case-sensitive: the column collation (utf8mb4_*_ci) already ignores case.
+    // Match the MRN, or any part of her full name, in any order of the words she typed.
+    if($m==='GET'){ $u=user();
+      $raw=trim((string)($_GET['q']??''));
+      $st=db()->prepare(
+        "SELECT * FROM women
+          WHERE facility_id=?
+            AND (mrn LIKE ?
+                 OR CONCAT_WS(' ', first_name, father_name, grandfather_name) LIKE ?)
+          ORDER BY id DESC LIMIT 100");
+      $like='%'.$raw.'%';
+      $st->execute([$u['facility_id'], $like, $like]);
+      out($st->fetchAll());
+    }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body(); $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       if(empty($b['mrn'])) err('MRN is required');
       // MRN length follows the facility's paper numbering: 5 digits at a health centre, 6 at a hospital.
