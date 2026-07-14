@@ -20,8 +20,14 @@ function sms_send_stub($phone, $message){
 }
 
 // Generate due reminders + send any pending ones. Returns a small summary.
-function reminders_run($db, $windowDays = 2){
+//
+// $facilityIds SCOPES THE RUN. Passed the caller's own facility (or a supervisor's woreda), the manual
+// "run" only generates and sends for that scope — one facility admin no longer flushes the national
+// queue. Null = all facilities (the cron job's default).
+function reminders_run($db, $windowDays = 2, $facilityIds = null){
   $generated = 0; $sent = 0; $failed = 0; $skipped = 0;
+  $scope = (is_array($facilityIds) && $facilityIds) ? array_values(array_map('intval',$facilityIds)) : null;
+  $inList = $scope ? implode(',', $scope) : null;   // ints only, safe to inline
 
   // 1) Generate — ANC visits with a next_appointment inside the window,
   //    that don't already have a reminder for that woman + date.
@@ -33,7 +39,8 @@ function reminders_run($db, $windowDays = 2){
        JOIN women   w ON w.voided = 0 AND w.id = e.woman_id
        LEFT JOIN facilities f ON f.id = e.facility_id
       WHERE av.next_appointment IS NOT NULL
-        AND av.next_appointment BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 DAY) AND DATE_ADD(CURDATE(), INTERVAL ? DAY)");
+        AND av.next_appointment BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 DAY) AND DATE_ADD(CURDATE(), INTERVAL ? DAY)"
+      . ($inList ? " AND e.facility_id IN ($inList)" : ""));
   $due->execute([$windowDays]);
   foreach($due->fetchAll() as $r){
     $ex = $db->prepare("SELECT id FROM reminders WHERE woman_id=? AND due_date=? AND kind='anc'");
@@ -67,9 +74,16 @@ function reminders_run($db, $windowDays = 2){
   // Without this filter, the very next scheduler tick would have texted a woman that she may conceive
   // now — three months before it is true, and about the one thing the module exists to get right.
   // A reminder is sent when it is DUE. Not when it is written.
+  // A ROW WITH NO PHONE IS NOT A FAILED SEND. A provider recall for a woman who did not consent to SMS
+  // is stored 'pending' with phone=null so it shows on the facility's recall list (someone tells her
+  // when she comes). The send loop must not pick it up and mark it 'failed' — that flips it off the
+  // pending list and dresses a deliberate no-SMS as a delivery failure. Only rows WITH a phone are
+  // sent; and the run is scoped to the caller's facilities.
   $pend = $db->query("SELECT id, phone, message FROM reminders
-                       WHERE status='pending' AND (due_date IS NULL OR due_date <= CURDATE())
-                       ORDER BY id LIMIT 500")->fetchAll();
+                       WHERE status='pending' AND phone IS NOT NULL AND phone<>''
+                         AND (due_date IS NULL OR due_date <= CURDATE())"
+                     . ($inList ? " AND facility_id IN ($inList)" : "")
+                     . " ORDER BY id LIMIT 500")->fetchAll();
   foreach($pend as $p){
     if(sms_send_stub($p['phone'], $p['message'])){
       $db->prepare("UPDATE reminders SET status='sent', sent_at=NOW() WHERE id=?")->execute([$p['id']]); $sent++;

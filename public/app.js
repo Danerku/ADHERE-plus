@@ -2272,13 +2272,23 @@ async function intrapartum(id){
         $('#drv').textContent='The risk score is not available on this device.';
         $('#why').innerHTML='';
         $('#cover').textContent='Her assessment is recorded, and the alert thresholds above still apply. Reopen the app while online to restore the score.';
-      } else if(haveCore<2){
+      } else if(!activeDx || haveCore<2){
+        // THE SCORE IS WITHHELD IN THE LATENT PHASE, NOT FABRICATED.
+        // The model was trained on active labour and half its signal is dystocia — how long she has
+        // stood still relative to the lag time allowed. Before active labour is diagnosed there is no
+        // clock (hrs is null), and scoring anyway makes the model apply its own default for the
+        // active-labour duration — i.e. it invents the very input it most depends on. With cervix +
+        // FHR alone, haveCore==2 and the old gate (<2) let it through. A fabricated green in latent
+        // phase is exactly the "no model is not a green light" failure the panel exists to prevent.
         aiBox.style.display='block';
         $('#prob').textContent='—'; $('#prob').className='';
         $('#band').textContent=''; $('#band').className='pill';
-        $('#drv').textContent='Not enough recorded to score this assessment.';
+        $('#drv').textContent = activeDx ? 'Not enough recorded to score this assessment.'
+                                         : 'The risk score starts once active labour is diagnosed.';
         $('#why').innerHTML='';
-        $('#cover').textContent='A score needs at least the hours in active labour, the cervix and the fetal heart. Nothing is guessed.';
+        $('#cover').textContent = activeDx
+          ? 'A score needs at least the hours in active labour, the cervix and the fetal heart. Nothing is guessed.'
+          : 'This assessment is recorded, and the alert thresholds above apply. The intrapartum risk model is defined for active labour (≥5 cm) — it is not scored in the latent phase.';
       } else {
         const r=RM.predict(feat);
         const cfIn={sbp:o.bp_systolic,dbp:o.bp_diastolic,fhr:o.fhr_baseline,mld:mldN,tmp:o.temperature,hrs:hrs,cvx:o.cervix_cm};
@@ -4899,6 +4909,7 @@ async function immClient(id){
   const prog=c.programme||'Td';
   const maxDose=(prog==='Td')?5:2;
   const given={}; (doses||[]).forEach(d=>given[d.dose_no]=d.dose_date);
+  window.__immGiven=given;   // so the dose dropdown can seed the date picker with the recorded date on a correction
   const n=Object.keys(given).length;
   const nextDose=[...Array(maxDose)].map((_,i)=>i+1).find(i=>!given[i]);
   app().innerHTML=nav()+`<div class="card"><h3>${esc(c.name||'Client')} <span class="muted" style="font-size:13px;font-weight:400">— ${esc(prog)} · ${esc(c.mrn||'')}</span></h3>
@@ -4922,8 +4933,8 @@ async function immClient(id){
          a "(correct)" marker; re-recording one updates its date rather than duplicating it (the server
          de-dupes on client_id + dose_no). Default to the next dose due, or dose 1 if all are given. -->
     <div class="grid" style="margin-top:12px">
-      <label>Record${nextDose?'':' / correct a'} dose<select id="dno">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (correct)':'')]),nextDose||1)}</select></label>
-      ${ecPicker('ddt','Date given',true)}
+      <label>Record${nextDose?'':' / correct a'} dose<select id="dno" onchange="ecSet('ddt', (window.__immGiven||{})[+this.value]||null)">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (correct)':'')]),nextDose||1)}</select></label>
+      ${ecPicker('ddt','Date given',true, (nextDose?null:(given[nextDose||1]||null)))}
      </div>
      <button class="act" id="dsave" style="margin-top:10px">Save dose</button> <span class="muted" id="dm"></span>
    </div>`;
@@ -6365,7 +6376,7 @@ async function deathScreen(id){
 // facility and the woreda office actually use.
 async function exportScreen(){
   if(!(ME.role==='provider'||ME.role==='supervisor'||ADMIN())){ app().innerHTML=nav()+'<div class="card">Providers, supervisors and admins only.</div>'; return; }
-  const today=new Date().toISOString().slice(0,10);
+  const today=localDate();                              // zone-correct — toISOString() would give yesterday overnight in UTC+3, dropping today's records on the 1st
   const first=today.slice(0,8)+'01';
   const T=[['women','Patients registered'],['anc','ANC contacts'],['labour','Labour monitoring (LCG)'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals'],['loss','Pregnancy loss / abortion care'],['deaths','Maternal deaths'],
     ['pcc','Preconception care'],['pcc_uptake','PCC uptake at ANC']];
@@ -6460,7 +6471,9 @@ async function letterScreen(id){
   // her name, her blood group and a referral reason, and NOTHING under what we found: no haemoglobin,
   // no blood loss, no procedure already attempted, no antibiotics already given, no anti-D. They start
   // again from nothing, and she is bleeding.
-  const ab0=(C.abortion_care||[])[0]||null;
+  // Newest first — NOT trusted from the server. The referral letter must carry her MOST RECENT loss,
+  // not the oldest on file; the other PCC consumers already sort, this one was the exception.
+  const ab0=(C.abortion_care||[]).slice().sort((a,b)=>String(b.care_date||'').localeCompare(String(a.care_date||'')) || (b.id-a.id))[0]||null;
   const abortionBlock = ab0 ? `<div class="rec-b"><h5>Her pregnancy loss / abortion care <span class="muted" style="font-weight:400">(${esc(String(ab0.care_date||'').slice(0,10))})</span></h5>
       <div class="rec-g">
         ${lrow('What happened', {spontaneous:'Miscarriage',induced:'Safe abortion care',unsafe:'Complications of an unsafe abortion',ectopic:'ECTOPIC PREGNANCY',molar:'Molar pregnancy',unknown:'Pregnancy loss'}[ab0.loss_type]||ab0.loss_type)}
@@ -6475,7 +6488,9 @@ async function letterScreen(id){
         ? `<p style="font-size:13px;margin:6px 0 0"><b>She presented with:</b> <span class="rec-alarm">${esc([ab0.comp_shock==1?'shock':'',ab0.comp_haemorrhage==1?'haemorrhage':'',ab0.comp_sepsis==1?'SEPSIS':'',ab0.comp_perforation==1?'uterine perforation':'',ab0.comp_anaemia==1?'severe anaemia':''].filter(Boolean).join(', '))}</span></p>` : ''}
     </div>` : '';
 
-  const pc0=(C.pcc||[])[0]||null;
+  // Her LATEST preconception assessment, not her oldest — a defer verdict since resolved, or a missing
+  // recent teratogenic/GBV/creatinine finding, is exactly what must not go stale on a referral.
+  const pc0=(C.pcc||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')) || (b.id-a.id))[0]||null;
   const pccBlock = pc0 ? `<div class="rec-b"><h5>Her preconception assessment <span class="muted" style="font-weight:400">(${esc(String(pc0.contact_date||'').slice(0,10))})</span></h5>
       <div class="rec-g">
         ${lrow('Plans pregnancy', {within_3m:'Within 3 months',within_1y:'Within a year',no:'No',unsure:'Unsure'}[pc0.plans_pregnancy]||'')}
@@ -6494,7 +6509,7 @@ async function letterScreen(id){
   app().innerHTML=nav()+`<div class="card rec letter">
     <div style="text-align:center;margin-bottom:10px">
       <h3 style="margin-bottom:2px">Referral letter</h3>
-      <div class="muted">${esc(ME.facility_name||'')}${ME.facility_name?' &middot; ':''}${esc(new Date().toISOString().slice(0,10))}</div>
+      <div class="muted">${esc(ME.facility_name||'')}${ME.facility_name?' &middot; ':''}${esc(localDate())}</div>
     </div>
     <div class="rec-b"><h5>The patient</h5><div class="rec-g">
       ${line('Name',name)}${line('MRN',W.mrn)}${line('Age',W.age)}
@@ -6551,7 +6566,7 @@ async function letterScreen(id){
     ${gaps.length?`<div class="rec-b"><h5>Still outstanding at the time of referral</h5>
       <ul style="margin:4px 0 0 18px;font-size:13px">${gaps.map(g=>`<li>${esc(g[0])}</li>`).join('')}</ul></div>`:''}
     <div class="rec-b"><h5>Referring provider</h5>
-      <p style="font-size:13px;margin:2px 0">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')} &middot; ${esc(new Date().toISOString().slice(0,10))}</p>
+      <p style="font-size:13px;margin:2px 0">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')} &middot; ${esc(localDate())}</p>
       <p class="muted sigline" style="font-size:12px">Signature: ______________________________ &nbsp;&nbsp; Phone: ______________________</p>
     </div>
     <div style="margin-top:12px">
@@ -7231,7 +7246,7 @@ async function patientHub(id){
       // creatinine of 3) and she conceived anyway: nobody in the antenatal room knew. She is on
       // valproate: nobody knew. She needs 5 mg folate through the first trimester, not 0.4: nobody
       // knew. She disclosed violence: nobody knew, and she will not volunteer it twice.
-      const pcc0=(C.pcc||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')))[0]||null;
+      const pcc0=(C.pcc||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')) || (b.id-a.id))[0]||null;
       const pccBanner = (pcc0 && pcc0.readiness==='defer')
         ? `<div style="background:#fdf2f2;border:1px solid #e9bcbc;color:#7f1d1d;border-radius:10px;padding:10px 12px;margin:8px 0;font-size:13px">
              <b>At her preconception assessment she was advised NOT to conceive yet</b>${pcc0.contact_date?(' ('+esc(String(pcc0.contact_date).slice(0,10))+')'):''}.

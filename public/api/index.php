@@ -1089,7 +1089,12 @@ try {
 
   if ($r==='pcc'){
     if($m==='GET'){
-      $u=require_auth();
+      // A PRECONCEPTION RECORD CARRIES HER HIV STATUS, A GBV DISCLOSURE AND HER MENTAL-HEALTH FINDINGS.
+      // It was gated to require_auth() only — so a clerical `recorder` or a read-only `observer` could
+      // pull the whole facility's PCC line list, which is the most sensitive table in the tool. PMTCT
+      // and the registers were tightened to clinicians for exactly this reason; PCC was missed. A
+      // clinician reads it, or the supervisor rolling up the facility does. Nobody else.
+      $u=require_role(['provider','admin','supervisor']);
       if($id){                                              // one assessment
         $st=db()->prepare("SELECT p.* FROM pcc_assessments p JOIN women w ON w.id=p.woman_id
                             WHERE p.id=? AND w.facility_id=? AND w.voided=0 AND p.voided=0");
@@ -1168,7 +1173,7 @@ try {
   }
 
   if ($r==='pcc-uptake'){
-    if($m==='GET'){ require_auth(); $eid=(int)($_GET['episode']??0); require_ep($eid);
+    if($m==='GET'){ require_role(['provider','admin','supervisor']); $eid=(int)($_GET['episode']??0); require_ep($eid);
       $st=db()->prepare("SELECT * FROM pcc_uptake WHERE episode_id=? AND voided=0"); $st->execute([$eid]);
       out($st->fetch()?:[]); }
     if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0);
@@ -1196,6 +1201,10 @@ try {
         db()->beginTransaction();
         try{
           foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+          // Re-recording UN-VOIDS the row. If the checklist was voided in error, correcting it is the
+          // provider saying it is real again — otherwise the correction saves "successfully" and stays
+          // invisible to every count, because the row is still flagged voided.
+          if((int)($old['voided']??0)===1) db()->prepare("UPDATE pcc_uptake SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$old['id']]);
           db()->commit();
         }catch(Throwable $ex2){ db()->rollBack(); throw $ex2; }
         audit('update','pcc_uptake',$old['id'],['status'=>$b['status']]);
@@ -1368,6 +1377,10 @@ try {
       if($tbl==='anc_visits' && !empty($f['td_dose_no'])){
         td_to_register($eid,(int)$f['td_dose_no'], ($f['visit_date'] ?? $row['visit_date'] ?? null), $u);
       }
+      // The post-abortion contraception is very often decided AFTER the loss is first recorded — i.e.
+      // on this correction, not the original POST. It was wired to POST only, so a method added on the
+      // PATCH never reached the FP register. abortion_to_fp() dedups, so re-firing it is safe.
+      if($tbl==='abortion_care'){ abortion_to_fp(array_merge($row,$f), $u); }
 
       audit('update',$tbl,$id,array_keys($f)); out(['ok'=>true]); }
 
@@ -1432,20 +1445,7 @@ try {
       // there is to give contraception, and the tool was recording it as if it had never happened.
       // (The negative-pregnancy-test path already does exactly this — see pregtest_link().)
       if($tbl==='abortion_care'){
-        foreach($rows as $row){
-          $meth=$row['pac_fp_method']??null;
-          if(!$meth || $meth==='none') continue;
-          $wid=woman_of_episode((int)$row['episode_id']); if(!$wid) continue;
-          $w=db()->prepare("SELECT mrn, TRIM(CONCAT_WS(' ',first_name,father_name)) nm, age FROM women WHERE id=?");
-          $w->execute([$wid]); $wr=$w->fetch(); if(!$wr) continue;
-          $c=db()->prepare("SELECT id FROM fp_clients WHERE woman_id=? AND facility_id=?");
-          $c->execute([$wid,(int)$u['facility_id']]); $cr=$c->fetch();
-          $cid = $cr ? (int)$cr['id'] : (int)insert('fp_clients',[
-            'facility_id'=>(int)$u['facility_id'],'woman_id'=>$wid,'mrn'=>$wr['mrn'],'name'=>$wr['nm'],
-            'age'=>$wr['age'],'sex'=>'F','reg_date'=>($row['care_date']??date('Y-m-d')),'acceptor'=>'new']);
-          insert('fp_visits',['fp_client_id'=>$cid,'visit_date'=>($row['care_date']??date('Y-m-d')),
-            'method'=>$meth,'remark'=>'accepted after a pregnancy loss (post-abortion care)','recorded_by'=>$u['id']]);
-        }
+        foreach($rows as $row){ abortion_to_fp($row, $u); }
       }
       if($tx) db()->commit();
       } catch (Throwable $e) {
@@ -1845,12 +1845,12 @@ try {
        // join it stayed in the numerator while its episode dropped out of the denominator, so the
        // "asked at ANC" percentage could exceed 100% — and the export, the chart and this screen gave
        // three different answers for the same facility.
-       'asked'        =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'uptake_none'  =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.status='none'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'uptake_partial'=>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.status='partial'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'uptake_optimal'=>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.status='optimal'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'planned_preg' =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.planned_pregnancy=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 2
-       'ifa_before'   =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.i3_folic_acid=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 3
+       'asked'        =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 AND ep.service_category='anc' WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_none'  =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 AND ep.service_category='anc' WHERE e.facility_id=? AND e.voided=0 AND e.status='none'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_partial'=>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 AND ep.service_category='anc' WHERE e.facility_id=? AND e.voided=0 AND e.status='partial'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_optimal'=>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 AND ep.service_category='anc' WHERE e.facility_id=? AND e.voided=0 AND e.status='optimal'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'planned_preg' =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 AND ep.service_category='anc' WHERE e.facility_id=? AND e.voided=0 AND e.planned_pregnancy=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 2
+       'ifa_before'   =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 AND ep.service_category='anc' WHERE e.facility_id=? AND e.voided=0 AND e.i3_folic_acid=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 3
      ],
     ]);
   }
@@ -2130,8 +2130,16 @@ try {
         $p['status']=pcc_uptake_status(array_merge($old?:[], $p));
         $row=array_intersect_key($p,array_flip($PCC_UPTAKE_FIELDS));
         if($old){
-          foreach(array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by'])) as $k=>$v){
-            db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+          // ALL COLUMNS OR NONE — the online POST/PATCH wrap this loop in a transaction so a constraint
+          // tripped on a late column cannot leave `status` inconsistent with its items. The replay path
+          // must do the same, or a half-updated row is the one thing worse than a rejected one.
+          db()->beginTransaction();
+          try{
+            foreach(array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by'])) as $k=>$v){
+              db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+            if((int)($old['voided']??0)===1) db()->prepare("UPDATE pcc_uptake SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$old['id']]);
+            db()->commit();
+          }catch(Throwable $ex4){ db()->rollBack(); throw $ex4; }
           $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>(int)$old['id']];
         } else {
           $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_uptake',$row)];
@@ -2193,13 +2201,17 @@ try {
     // The episode join is NOT optional. The denominator ($ancEp) already excludes voided episodes; if
     // the numerator does not, voiding an ANC episode removes it from the bottom of the fraction and
     // leaves it at the top — and pcc_asked_pct reports more than 100%.
+    // e2.service_category='anc' IS REQUIRED. The denominator ($ancEp) counts ANC episodes only, so the
+    // numerator must too — the checklist is "PCC uptake AT ANC". An uptake row saved against a labour,
+    // PNC or abortion episode was counted here but not in the denominator, so pcc_asked_pct could
+    // climb past 100%. (POST /pcc-uptake accepts any episode; the indicator is defined on ANC.)
     $asked    = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x
                         JOIN women w    ON w.id=x.woman_id  AND w.voided=0
-                        JOIN episodes e2 ON e2.id=x.episode_id AND e2.voided=0
+                        JOIN episodes e2 ON e2.id=x.episode_id AND e2.voided=0 AND e2.service_category='anc'
                        WHERE x.voided=0 AND x.facility_id IN ($in)".$dc('x.asked_date')." GROUP BY x.facility_id");
     $optimal  = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x
                         JOIN women w    ON w.id=x.woman_id  AND w.voided=0
-                        JOIN episodes e2 ON e2.id=x.episode_id AND e2.voided=0
+                        JOIN episodes e2 ON e2.id=x.episode_id AND e2.voided=0 AND e2.service_category='anc'
                        WHERE x.voided=0 AND x.status='optimal' AND x.facility_id IN ($in)".$dc('x.asked_date')." GROUP BY x.facility_id");
     $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
       $anc=$ancEp[$fid]??0; $ak=$asked[$fid]??0;
@@ -2220,7 +2232,11 @@ try {
       $in=implode(',',array_fill(0,count($ids),'?'));
       $st=db()->prepare("SELECT r.*, w.first_name, w.father_name FROM reminders r LEFT JOIN women w ON w.id=r.woman_id WHERE r.facility_id IN ($in) ORDER BY r.id DESC LIMIT 300");
       $st->execute($ids); out($st->fetchAll()); }
-    if($m==='POST' && $id==='run'){ require_role(['admin']); require __DIR__.'/reminders_lib.php'; out(reminders_run(db()), 200); }
+    if($m==='POST' && $id==='run'){ $u=require_role(['admin']); require __DIR__.'/reminders_lib.php';
+      // Scope the run to the caller's own facility. A facility admin pressing "run" used to generate
+      // and send for EVERY facility in the database; now it touches only theirs. (The cron job calls
+      // reminders_run() with no scope, which is the all-facilities nightly pass.)
+      out(reminders_run(db(), 2, [(int)$u['facility_id']]), 200); }
     // A RECALL A PROVIDER CAN SET.
     //
     // Until now a reminder could only be created by the scheduler. The folic-acid clock needs one it

@@ -250,6 +250,32 @@ function woman_facility_ok($wid){
 }
 function require_woman($wid){ if(!woman_facility_ok($wid)) err('not found',404); }
 
+// THE CONTRACEPTION SHE ACCEPTED AFTER A PREGNANCY LOSS MUST REACH THE FAMILY PLANNING REGISTER.
+// Otherwise the implant she is walking out with is invisible to the FP room and she cannot be followed
+// up or removed from. Called from BOTH the abortion POST and the PATCH — the method is often decided as
+// a correction after the loss is first recorded, and the PATCH path used to drop it on the floor.
+// Dedup: fp_visits has no unique key, so a second save / a replay would double-count the method mix.
+// One post-abortion FP visit per abortion care_date is the guard.
+function abortion_to_fp(array $row, array $u): void {
+  $meth = $row['pac_fp_method'] ?? null;
+  if(!$meth || $meth==='none') return;
+  $wid = woman_of_episode((int)($row['episode_id']??0)); if(!$wid) return;
+  $w = db()->prepare("SELECT mrn, TRIM(CONCAT_WS(' ',first_name,father_name)) nm, age FROM women WHERE id=?");
+  $w->execute([$wid]); $wr = $w->fetch(); if(!$wr) return;
+  $care = $row['care_date'] ?? date('Y-m-d');
+  $c = db()->prepare("SELECT id FROM fp_clients WHERE woman_id=? AND facility_id=?");
+  $c->execute([$wid,(int)$u['facility_id']]); $cr = $c->fetch();
+  $cid = $cr ? (int)$cr['id'] : (int)insert('fp_clients',[
+    'facility_id'=>(int)$u['facility_id'],'woman_id'=>$wid,'mrn'=>$wr['mrn'],'name'=>$wr['nm'],
+    'age'=>$wr['age'],'sex'=>'F','reg_date'=>$care,'acceptor'=>'new']);
+  // Already recorded this post-abortion visit? Update the method rather than add a second row.
+  $ex = db()->prepare("SELECT id FROM fp_visits WHERE fp_client_id=? AND visit_date=? AND remark LIKE 'accepted after a pregnancy loss%'");
+  $ex->execute([$cid,$care]); $old = $ex->fetch();
+  if($old){ db()->prepare("UPDATE fp_visits SET method=? WHERE id=?")->execute([$meth,(int)$old['id']]); return; }
+  insert('fp_visits',['fp_client_id'=>$cid,'visit_date'=>$care,'method'=>$meth,
+    'remark'=>'accepted after a pregnancy loss (post-abortion care)','recorded_by'=>$u['id']]);
+}
+
 // PCC uptake status (MoH PCC guideline, Table 8), derived on the server whatever the client sent:
 //   none    = none of the fifteen components
 //   partial = at least one
