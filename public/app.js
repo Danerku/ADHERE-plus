@@ -847,6 +847,7 @@ function route(){
   // woman's record, with no warning and nothing on screen to say so.
   //
   // Every Correct button calls its screen function DIRECTLY (never via the hash), so clearing the
+  // flags here — on a real navigation — cancels a stale edit without ever cancelling a live one.
   EDIT_ANC=null; EDIT_PNC=null; EDIT_BABY=null; EDIT_VITAL=null; EDIT_DEL=null;
   $('#who').textContent = ME?(' — '+ME.full_name+' ['+ME.role+']'+(ME.facility_name?' · '+ME.facility_name:'')+(ME._offline?' · offline':'')):'';
   $('#logout').style.display = ME?'inline-block':'none';
