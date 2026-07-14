@@ -2280,9 +2280,16 @@ async function intrapartum(id){
       // ---- the AI layer. It reads what she recorded — and only what she recorded. ----------------
       // Missing inputs are NOT quietly replaced with reassuring population values: the coverage is
       // shown, and if the core of the assessment is absent the score is withheld rather than invented.
-      const mldN = {'0':0,'+':1,'++':2,'+++':3}[o.moulding];
-      const mecon = (o.amniotic_fluid==='M+'||o.amniotic_fluid==='M++'||o.amniotic_fluid==='M+++') ? 1 : 0;
-      const upN = {'+':1,'++':2,'+++':3,'++++':3}[o.urine_protein] || 0;
+      //
+      // THE FEATURE CONTRACT IS THE GUIDE'S, NOT THE PARTOGRAPH'S. `cvx_rate` is gone — it was
+      // (cervix - 4) / hours, anchored on a 4 cm start the guideline abolished. In its place the
+      // model gets what the guideline reasons about: how long she has stood still at this
+      // centimetre (stall_h) and how that compares with the lag time allowed for it (lag_ratio).
+      const mldN  = {'0':0,'+':1,'++':2,'+++':3}[o.moulding];
+      const capN  = {'0':0,'+':1,'++':2,'+++':3}[o.caput];
+      const mecon = {'M+':1,'M++':2,'M+++':3}[o.amniotic_fluid] || 0;   // graded, not yes/no
+      const upN   = {'+':1,'++':2,'+++':3,'++++':4}[o.urine_protein] || 0;
+      const stall = LCG.stallInfo(series, now);
       const DS=await api('GET','danger_signs?episode='+id).catch(()=>[]);
       const ds=(DS||[]).slice(-1)[0]||{};
       const sym={ headache:(ds.headache==='yes'||ds.headache==1)?1:0, blurred:(ds.blurred_vision==='yes'||ds.blurred_vision==1)?1:0,
@@ -2290,14 +2297,23 @@ async function intrapartum(id){
         clonus:(String(ds.dtr_grade||'').match(/3|4|clonus/i))?1:0,
         bleeding:(ds.vaginal_bleeding==='yes'||ds.vaginal_bleeding==1)?1:0, urine_prot:upN };
       const romH=romHrs(W.ruptured_datetime);
-      const cvxRate = (hrs>0 && o.cervix_cm!=null) ? (o.cervix_cm-4)/hrs : null;
-      const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:hrs,cvx:o.cervix_cm,cvx_rate:cvxRate,fhr:o.fhr_baseline,
-        ctx:o.contractions_per10, mld:mldN, meconium:mecon, sbp:o.bp_systolic, dbp:o.bp_diastolic,
-        pulse:o.pulse, temp:o.temperature, rom_hours:romH});
+      const feat=Object.assign({}, MF, sym, {
+        hrs:hrs, cvx:o.cervix_cm, stall_h:stall.stall_h, lag_ratio:stall.lag_ratio,
+        descent:o.descent_fifths,
+        fhr:o.fhr_baseline, decel_late:(o.fhr_decel==='L'?1:(o.fhr_decel?0:null)),
+        decel_any:(o.fhr_decel?((o.fhr_decel==='N')?0:1):null),
+        meconium:(o.amniotic_fluid?mecon:null), mld:mldN, caput:capN,
+        malposition:(o.fetal_position?((o.fetal_position==='P'||o.fetal_position==='T')?1:0):null),
+        ctx:o.contractions_per10, ctx_dur:o.contraction_dur_sec,
+        sbp:o.bp_systolic, dbp:o.bp_diastolic, pulse:o.pulse, temp:o.temperature,
+        rom_hours:romH});
+      // Anything NOT recorded is deleted, never defaulted here — the scorer applies the model's own
+      // default, and the coverage line below tells the provider how much of the score is real.
       Object.keys(feat).forEach(k=>{ if(feat[k]==null||Number.isNaN(feat[k])) delete feat[k]; });
 
       const CORE=['hrs','cvx','fhr'];
-      const observed=['hrs','cvx','fhr','ctx','mld','meconium','sbp','dbp','pulse','temp','urine_prot'].filter(k=>feat[k]!=null);
+      const OBSERVABLE=['hrs','cvx','stall_h','lag_ratio','descent','fhr','decel_late','meconium','mld','caput','malposition','ctx','ctx_dur','sbp','dbp','pulse','temp','urine_prot'];
+      const observed=OBSERVABLE.filter(k=>feat[k]!=null);
       const haveCore=CORE.filter(k=>feat[k]!=null).length;
       const aiBox=$('#ai');
       if(haveCore<2){
@@ -2319,11 +2335,17 @@ async function intrapartum(id){
         $('#prob').textContent=Math.round(r.probability*100)+'%'; $('#prob').className=finalBand;
         const bd=$('#band'); bd.textContent=finalBand.toUpperCase()+(finalBand!==r.band?' (clinical override)':''); bd.className='pill '+finalBand;
         $('#drv').textContent=(cf.reasons.length?('red flags: '+cf.reasons.join(', ')):'model band '+r.band);
-        const drv=riskDrivers(cfIn,feat);
-        const lcgReasons=fired.map(a=>a.label+(a.value?(' '+a.value):''));
-        const allWhy=lcgReasons.concat(drv.filter(d=>!lcgReasons.some(l=>l.indexOf(d.split(' ')[0])>=0)));
-        $('#why').innerHTML=allWhy.length?('<b>What is driving it:</b> '+allWhy.map(esc).join(' · ')):'No abnormal intrapartum findings recorded.';
-        $('#cover').textContent='Scored on '+observed.length+' of 11 recorded inputs.'+(observed.length<8?' The fewer that are recorded, the less this score is worth.':'');
+        // What is driving it: the guideline's own alerts first — they are the findings, not a
+        // black box — then the few things the model weighs that the alert column does not carry.
+        const why=fired.map(a=>a.label+(a.value?(' '+a.value):''));
+        if(feat.lag_ratio!=null && feat.lag_ratio>=0.7 && !draft.alerts.includes('CERVIX_LAG'))
+          why.push('Approaching the lag time for '+stall.cm+' cm ('+stall.stall_h+' h of '+LCG.lagLimit(stall.cm)+' h)');
+        if(mecon>=2) why.push('Meconium '+o.amniotic_fluid);
+        if(feat.prior_cs==1) why.push('Previous caesarean');
+        if(feat.rom_hours!=null && feat.rom_hours>=18) why.push('Membranes ruptured '+Math.round(feat.rom_hours)+' h');
+        if(capN>=2) why.push('Caput '+o.caput);
+        $('#why').innerHTML=why.length?('<b>What is driving it:</b> '+why.map(esc).join(' · ')):'No abnormal intrapartum findings recorded.';
+        $('#cover').textContent='Scored on '+observed.length+' of '+OBSERVABLE.length+' recorded inputs.'+(observed.length<8?' The fewer that are recorded, the less this score is worth.':'');
         try{
           const sc=await api('POST','risk_scores',{episode_id:+id,lcg_obs_id:(res&&res.id)||null,model_version:MODEL&&MODEL.version,
             probability:r.probability.toFixed(4),band:finalBand,
@@ -2331,7 +2353,10 @@ async function intrapartum(id){
           lastScoreId[id]=sc&&sc.id; lastAI[id]={p:r.probability,band:finalBand};
         }catch(e){ /* the assessment is saved; the score is advisory and must not claim otherwise */ }
         if(NRM){
-          const nbf={ga:feat.ga,meconium:mecon,fhr:o.fhr_baseline,mld:mldN,cvx:o.cervix_cm,hrs:hrs,ctx:o.contractions_per10,
+          // The newborn model's contract is the guide's too: graded meconium, late decelerations,
+          // and the lag ratio rather than the old cervical-rate anchor.
+          const nbf={ga:feat.ga,meconium:feat.meconium,fhr:o.fhr_baseline,decel_late:feat.decel_late,mld:mldN,
+            cvx:o.cervix_cm,lag_ratio:feat.lag_ratio,hrs:hrs,ctx:o.contractions_per10,
             sbp:o.bp_systolic,temp:o.temperature,prior_cs:feat.prior_cs,age:feat.age,parity:feat.parity,rom_hours:feat.rom_hours};
           Object.keys(nbf).forEach(k=>{ if(nbf[k]==null||Number.isNaN(nbf[k])) delete nbf[k]; });
           const nb=NRM.predict(nbf); const nel=$('#nbrisk'); nel.style.display='block';

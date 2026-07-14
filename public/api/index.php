@@ -614,6 +614,10 @@ try {
       'babies'     => ["SELECT $W, b.* FROM babies b ".sprintf($EP,'b.episode_id')." WHERE e.facility_id=? AND DATE(b.recorded_at) BETWEEN ? AND ? ORDER BY b.id", 'newborns'],
       'pnc'        => ["SELECT $W, p.* FROM pnc_visits p ".sprintf($EP,'p.episode_id')." WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY p.visit_date, p.id", 'pnc_visits'],
       'referrals'  => ["SELECT $W, rf.* FROM referrals rf ".sprintf($EP,'rf.episode_id')." WHERE e.facility_id=? AND DATE(rf.recorded_at) BETWEEN ? AND ? ORDER BY rf.id", 'referrals'],
+      // Labour monitoring, one row per assessment — the Labour Care Guide as data, with the alerts
+      // that fired at the time. A facility auditing its own intrapartum care needs this, and the
+      // record belongs to the facility, not to this software.
+      'labour'     => ["SELECT $W, g.* FROM lcg_obs g ".sprintf($EP,'g.episode_id')." WHERE e.facility_id=? AND DATE(g.obs_datetime) BETWEEN ? AND ? ORDER BY g.episode_id, g.obs_datetime", 'labour_care_guide'],
       'loss'       => ["SELECT $W, a.* FROM abortion_care a ".sprintf($EP,'a.episode_id')." WHERE e.facility_id=? AND a.care_date BETWEEN ? AND ? ORDER BY a.care_date, a.id", 'pregnancy_loss'],
       'deaths'     => ["SELECT w.mrn, TRIM(CONCAT_WS(' ',w.first_name,w.father_name)) AS name, w.age, d.*
                           FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id
