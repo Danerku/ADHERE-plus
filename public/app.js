@@ -838,6 +838,16 @@ $('#logout').onclick=async()=>{
 window.addEventListener('hashchange', route);
 
 function route(){
+  // A CORRECTION IN PROGRESS DOES NOT SURVIVE LEAVING THE SCREEN.
+  //
+  // EDIT_ANC / EDIT_PNC / EDIT_BABY / EDIT_VITAL / EDIT_DEL hold the ROW BEING CORRECTED, including
+  // its id. Nothing cleared them on navigation. So: press Correct on Almaz's ANC contact, get called
+  // away, tap Home, open Fatuma's ANC screen — the form comes up pre-filled with ALMAZ's readings,
+  // and pressing Save PATCHes ALMAZ's row with them. A correction to one woman written into another
+  // woman's record, with no warning and nothing on screen to say so.
+  //
+  // Every Correct button calls its screen function DIRECTLY (never via the hash), so clearing the
+  EDIT_ANC=null; EDIT_PNC=null; EDIT_BABY=null; EDIT_VITAL=null; EDIT_DEL=null;
   $('#who').textContent = ME?(' — '+ME.full_name+' ['+ME.role+']'+(ME.facility_name?' · '+ME.facility_name:'')+(ME._offline?' · offline':'')):'';
   $('#logout').style.display = ME?'inline-block':'none';
   if(!ME) return login();
@@ -1047,6 +1057,21 @@ function fillTicks(row, map){
 }
 function fillEcs(row, map){
   Object.keys(map).forEach(id=>{ const iso=row[map[id]]; if(iso) ecSet(id, String(iso).slice(0,10)); });
+}
+// RESTORE A COMMA-SEPARATED TICK GROUP ON A CORRECTION.
+//
+// The MoH multi-code fields (newborn problems 1-11, newborn treatments 1-6, substance use) are saved
+// as a CSV of the codes ticked: `csv('np',[1..11])`. Nothing put them BACK when the provider pressed
+// Correct, so the boxes re-rendered empty — and because the save sends the whole row, correcting a
+// mistyped temperature silently overwrote nb_problems and nb_treatment with NULL. On a visit where a
+// baby had died, it erased the recorded cause of death.
+// map: { prefix: ['column_name', [codes...]] }  e.g. { np:['nb_problems',[1..11]] }
+function fillCsvTicks(row, map){
+  Object.keys(map).forEach(pre=>{
+    const [col,codes]=map[pre];
+    const have=String(row[col]==null?'':row[col]).split(',').map(s=>s.trim()).filter(Boolean);
+    codes.forEach(c=>{ const el=document.getElementById(pre+c); if(el) el.checked = have.indexOf(String(c))>=0; });
+  });
 }
 
 // Targeted population category — the 9-code list (A-I) from the MoH instruction page.
@@ -2297,6 +2322,25 @@ async function danger(id){
     } catch(e){ b.disabled=false; toast(e.message||'error'); } };
 }
 
+// CORRECTING A DELIVERY.
+//
+// The delivery screen refuses to open once a delivery exists — rightly, because saving it twice
+// double-counts the birth, the AMTSL rate and every newborn in the MoH register. But that left the
+// record PERMANENT: a blood loss typed as 50 instead of 500, a mode recorded as SVD when she had a
+// caesarean, a cause of maternal death picked from the wrong line — none of it could ever be put
+// right, in the one record the facility is audited on. The API has always supported the PATCH; no
+// screen ever called it.
+//
+// So: the guard stays (you cannot save a second delivery), and CORRECT is a separate, explicit act.
+let EDIT_DEL=null;
+const DEL_VALS={ md:'mode', mot:'mode_other_text', mo:'maternal_outcome', mdc:'maternal_death_cause',
+  ut1:'amtsl_uterotonic', utt:'amtsl_uterotonic_type', cct:'amtsl_cct', utn:'amtsl_uterine_tone',
+  umsg:'amtsl_massage', plc:'amtsl_placenta', ebl:'blood_loss_ml',
+  dhtr:'hiv_test_result', dacc:'ippfp_acceptor', dmth:'ippfp_method', dtim:'ippfp_timing', drmk:'remark' };
+const DEL_TICKS={ epis:'episiotomy', cpe:'comp_preeclampsia', cec:'comp_eclampsia', cap:'comp_aph',
+  cpp:'comp_pph', cot:'comp_other', cref:'referred', dhta:'hiv_test_accepted', dhrt:'hiv_retest_accepted',
+  dcfo:'cnsl_feeding_options' };
+
 async function delivery(id){
   window._pphAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
   // MoH item 7 (Partograph used) is derived, not asked: Y only if maternal condition,
@@ -2311,22 +2355,30 @@ async function delivery(id){
   const rhNegD=String(W.rh_factor||'').toLowerCase()==='neg';
   // Guard against saving the delivery twice — it double-counts deliveries, AMTSL and the
   // partograph rate, and duplicates every newborn row in the MoH register.
-  if(prevDel&&prevDel.length){
+  if(prevDel&&prevDel.length && !EDIT_DEL){
+    const D=prevDel[0];
+    const canFix = (ME.role==='provider'||ADMIN());
     app().innerHTML=nav()+`<div class="card"><h3>Delivery already recorded — episode ${esc(id)}</h3>
-      <p class="muted">A delivery has already been saved for this episode (${esc((prevDel[0].delivery_datetime||'').slice(0,16))}, mode ${esc(prevDel[0].mode||'?')}). Saving it again would double-count it.</p>
+      <p class="muted">A delivery has already been saved for this episode (${esc((D.delivery_datetime||'').slice(0,16))}, mode ${esc(D.mode||'?')}${D.blood_loss_ml!=null?(', blood loss '+esc(D.blood_loss_ml)+' ml'):''}). Saving it again would double-count it.</p>
+      ${canFix?`<p style="margin:10px 0"><button id="delfix" class="sm">Correct this delivery record</button>
+        <span class="muted" style="font-size:12px;margin-left:6px">If something was entered wrongly &mdash; the mode, the blood loss, the time of birth. It corrects the record; it does not create a second one.</span></p>`:''}
       <a class="nav" href="#baby/${id}">Record / view the newborn</a> &middot;
       <a class="nav" href="#pncvisit/${id}">PNC follow-up</a> &middot;
       <a class="nav" href="#report/${id}">Care summary</a></div>`;
+    const fb=$('#delfix'); if(fb) fb.onclick=()=>{ EDIT_DEL=D; delivery(id); };
     return;
   }
-  app().innerHTML=nav()+`<div class="card"><h3>Delivery summary — episode ${esc(id)}</h3>
+  const DBORN = EDIT_DEL && EDIT_DEL.delivery_datetime ? String(EDIT_DEL.delivery_datetime) : null;
+  app().innerHTML=nav()+`<div class="card"><h3>${EDIT_DEL?'Correcting the delivery record':'Delivery summary'} — episode ${esc(id)}</h3>
+   ${EDIT_DEL?`<div class="alert amber" style="margin-bottom:10px"><b>You are correcting the delivery that is already recorded.</b> Saving updates that record &mdash; it does not create a second delivery, and it does not touch the newborn records.
+     <button id="dcancel" class="sm" style="margin-left:8px">Cancel</button></div>`:''}
    ${carryForward(W,rhNegD)}
 
    <details class="moh" open><summary>Date &amp; time of birth</summary>
-   <div class="muted" style="font-size:12px;margin-bottom:6px">This is the time <b>the baby was born</b>, not the time this form is filled in. It is pre-filled with now &mdash; change it if you are writing the birth up later.</div>
+   <div class="muted" style="font-size:12px;margin-bottom:6px">This is the time <b>the baby was born</b>, not the time this form is filled in. ${EDIT_DEL?'It is filled in from the record you are correcting.':'It is pre-filled with now &mdash; change it if you are writing the birth up later.'}</div>
    <div class="grid">
-    ${ecPicker('dd','Date of birth',true)}
-    <label>Time of birth<input id="dt" type="time" value="${esc(localDateTime().slice(11,16))}"></label>
+    ${ecPicker('dd','Date of birth',!DBORN, DBORN?DBORN.slice(0,10):undefined)}
+    <label>Time of birth<input id="dt" type="time" value="${esc(DBORN?DBORN.slice(11,16):localDateTime().slice(11,16))}"></label>
    </div>
    <div id="dtwarn"></div></details>
 
@@ -2425,6 +2477,16 @@ async function delivery(id){
   [ebl_el, utn, md].forEach(el=>{ if(el){ el.addEventListener('input',pphCheck); el.addEventListener('change',pphCheck); } });
 
   const MOH_STATUS={well:'stable',near_miss:'stable',referred:'unstable_referred',death:'died'};
+
+  // Prefill when correcting. (Done AFTER the listeners are wired above, so the PPH check and the
+  // alerts reflect the values being corrected rather than an empty form.)
+  const dcb=$('#dcancel'); if(dcb) dcb.onclick=()=>{ EDIT_DEL=null; delivery(id); };
+  if(EDIT_DEL){
+    fillVals(EDIT_DEL, DEL_VALS);
+    fillTicks(EDIT_DEL, DEL_TICKS);
+    if(typeof pphCheck==='function') pphCheck();
+  }
+
   $('#s').onclick=async()=>{
     // Range check BEFORE the PPH gate — a blood loss typed as 90000 is a slip, and raising a
     // haemorrhage alert on it would teach the provider that the alert means nothing.
@@ -2439,12 +2501,23 @@ async function delivery(id){
       // Newborn data goes ONLY to the babies table (created just below) — it is the single
       // source of truth and the only one that supports twins. delivery_summary no longer
       // carries a shadow copy of weight/sex/APGAR/outcome.
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:birthDT(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:numOrNull(ebl.value),
+      const _edD = EDIT_DEL && EDIT_DEL.id;
+      await api(_edD?'PATCH':'POST', _edD?('delivery/'+EDIT_DEL.id):'delivery',
+        {episode_id:+id,delivery_datetime:birthDT(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:numOrNull(ebl.value),
         partograph_used:pUsed,episiotomy:tk('epis'),mode_other_text:(md.value==='other'?mot.value:null),
         maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
         comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
         hiv_test_accepted:tk('dhta'),hiv_retest_accepted:tk('dhrt'),hiv_test_result:(dhtr.value||null),cnsl_feeding_options:tk('dcfo'),
         ippfp_acceptor:(dacc.value||null),ippfp_method:(dmth.value||null),ippfp_timing:(dtim.value||null),remark:drmk.value});
+      // A CORRECTION ENDS HERE. She is already 'delivered', her newborns are already recorded, and
+      // sending her back to the newborn screen would invite a phantom twin. Go back to her record.
+      if(_edD){
+        EDIT_DEL=null; window._pphAck=false;
+        $('#m').textContent=' corrected'; toast('The delivery record was corrected','ok');
+        setTimeout(()=>location.hash='#patient/'+id,700);
+        $('#s').disabled=false;
+        return;
+      }
       await api('PATCH','episodes/'+id,{status:'delivered'});
       // The newborn is NOT created here. Previously this screen half-created baby #1 with only
       // weight/sex/APGAR — fields it could never complete (there is no babies PATCH), and if the
@@ -2698,6 +2771,9 @@ const ANC_TICKS={ syt:'syphilis_treated', hbt:'hepb_treated', hbp:'hepb_prophyla
   cal:'calcium_given', and:'anti_d_given', c1:'cnsl_danger_signs', c2:'cnsl_nutrition', cl:'cnsl_lifestyle',
   cb:'cnsl_bpcr', c3:'cnsl_ecd', c4:'cnsl_infant_feeding', c5:'cnsl_family_planning' };
 const ANC_ECS={ vd:'visit_date', na:'next_appointment', vld:'viral_load_date' };
+// The one CSV tick group on the ANC contact. Saved as e.g. "alcohol,khat"; the ids are su_alcohol etc,
+// so the "codes" here are the words, not numbers.
+const ANC_CSVS={ su_:['substance_use',['none','alcohol','tobacco','khat','caffeine','other']] };
 
 async function ancVisits(id){
   window._ancAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
@@ -2830,6 +2906,9 @@ async function ancVisits(id){
     fillVals(EDIT_ANC, ANC_VALS);
     fillTicks(EDIT_ANC, ANC_TICKS);
     fillEcs(EDIT_ANC, ANC_ECS);
+    // substance_use is a CSV tick group and was NOT restored — so correcting any other field on the
+    // contact silently erased a recorded alcohol / tobacco / khat disclosure.
+    fillCsvTicks(EDIT_ANC, ANC_CSVS);
     const box=$('#ancreqbox');
     if(box){ box.style.display=''; box.style.background='#fff8e6'; box.style.borderColor='#ef9f27'; box.style.color='#633806';
       box.innerHTML='<b>Correcting the contact of '+esc(EDIT_ANC.visit_date||'')+'.</b> Saving will UPDATE that contact, not add a new one.'; }
@@ -2998,11 +3077,18 @@ const PNC_VALS={ mt:'m_temp', bps:'m_bp_systolic', bpd:'m_bp_diastolic', pl:'m_p
   nfb:'nb_fast_breathing', nci:'nb_chest_indrawing', nlt:'nb_lethargy', njd:'nb_jaundice',
   nkmc:'nb_kmc', nimm:'nb_immunization', neid:'nb_eid', dn:'danger_note', pbaby:'baby_id',
   vp:'visit_period', mc:'maternal_condition', ooc:'other_obs_complication', phtr:'hiv_test_result',
-  nwt:'nb_weight_g', npo:'nb_problem_other', nto:'nb_treatment_outcome' };
+  nwt:'nb_weight_g', npo:'nb_problem_other', nto:'nb_treatment_outcome',
+  // THESE FIVE WERE MISSING, AND THE SAVE SENDS THE WHOLE ROW. So pressing Correct to fix a mistyped
+  // temperature re-rendered them blank and wrote NULL over them — including, on a visit where the
+  // baby had died, the recorded cause of death. Correcting a record must never destroy the rest of it.
+  ndd:'nb_death_age_days', ndc:'nb_death_cause',
+  pacc:'ippfp_acceptor', pmth:'ippfp_method', prmk:'remark' };
 const PNC_TICKS={ ppph:'pph', phta:'hiv_test_accepted', phrt:'hiv_retest_accepted',
   pc1:'cnsl_danger_signs', pc2:'cnsl_breastfeeding', pc3:'cnsl_newborn_care',
   pc4:'cnsl_family_planning', pc5:'cnsl_epi', pc6:'cnsl_ecd' };
 const PNC_ECS={ vd:'visit_date' };
+// The comma-separated MoH tick groups, which a correction also used to wipe.
+const PNC_CSVS={ np:['nb_problems',[1,2,3,4,5,6,7,8,9,10,11]], nt:['nb_treatment',[1,2,3,4,5,6]] };
 
 async function pncVisits(id){
   window._pncAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
@@ -3018,7 +3104,7 @@ async function pncVisits(id){
     <div class="muted" style="font-size:12px;margin-bottom:6px">${dv?'She delivered in this facility — both are filled in from the delivery record. Change them only if she delivered elsewhere.':'No delivery recorded here — record where she gave birth and the infant&rsquo;s date of birth.'}</div>
     <div class="grid">
      <label>Place of delivery<select id="pod">${selOpts([['1','1. Same facility'],['2','2. Other facility'],['3','3. Home']], WP.place_of_delivery || (dv?'1':''))}</select></label>
-     ${ecPicker('idob','Infant&rsquo;s date of birth')}
+     ${ecPicker('idob','Infant&rsquo;s date of birth', false, (WP.infant_dob || (dv&&dv.delivery_datetime ? String(dv.delivery_datetime).slice(0,10) : null)) || undefined)}
     </div></details>
 
    <h4>Mother</h4><div class="grid">
@@ -3107,7 +3193,9 @@ async function pncVisits(id){
     fillVals(EDIT_PNC, PNC_VALS);
     fillTicks(EDIT_PNC, PNC_TICKS);
     fillEcs(EDIT_PNC, PNC_ECS);
-  }
+    fillCsvTicks(EDIT_PNC, PNC_CSVS);      // newborn problems + treatments — a correction used to erase both
+  }                                        // (paintPnc() runs below, after the listeners, so the alerts
+                                           //  already reflect the values we have just restored)
 
   // ---- THE ALERTS THIS SCREEN NEVER HAD ----
   // PNC used to collect newborn convulsions, fast breathing, chest indrawing, lethargy and
@@ -3158,10 +3246,23 @@ async function pncVisits(id){
   // MoH PNC items 6 & 7 live on the episode, not the visit. Derive them from the delivery
   // record when she delivered here; otherwise take what the provider entered. Without this
   // both columns came out permanently blank in the PNC register.
+  // NEVER SEND A NULL OVER A VALUE THAT IS ALREADY THERE.
+  //
+  // The date-of-birth picker was rendered with no prefill, so it was EMPTY on every visit after the
+  // first. `pod` is prefilled and therefore truthy, so this PATCH fired on visit 2 with
+  // infant_dob: null — and the episodes PATCH wrote that null straight through. For a woman who gave
+  // birth at HOME there is no delivery record to fall back on, so the infant's date of birth, entered
+  // carefully at visit 1, was silently erased at visit 2 and every visit after it.
+  //
+  // Now: the picker is prefilled from the episode (see ecPicker below), and we only send a field we
+  // actually have a value for. A blank box means "I did not touch this", never "delete it".
   const savePncId=async()=>{
     const pod=(+($('#pod')||{}).value||null);
-    const dob=ecGet('idob') || (dv&&dv.delivery_datetime ? String(dv.delivery_datetime).slice(0,10) : null);
-    if(pod||dob) await api('PATCH','episodes/'+id,{place_of_delivery:pod,infant_dob:dob}).catch(()=>{});
+    const dob=ecGet('idob') || (dv&&dv.delivery_datetime ? String(dv.delivery_datetime).slice(0,10) : null) || WP.infant_dob || null;
+    const body={};
+    if(pod) body.place_of_delivery=pod;
+    if(dob) body.infant_dob=String(dob).slice(0,10);
+    if(Object.keys(body).length) await api('PATCH','episodes/'+id,body).catch(()=>{});
   };
   $('#psave').onclick=async()=>{
     // Range check first: a mistyped number must not raise a clinical alert.
