@@ -63,7 +63,17 @@ function audit($action,$entity=null,$entity_id=null,$detail=null){
   $st->execute([$u['id']??null,$action,$entity,$entity_id,$detail?json_encode($detail):null,$_SERVER['REMOTE_ADDR']??null]);
 }
 // Generic insert helper (whitelisted columns per table done by caller)
-function ep_facility_ok($eid){ $u=user(); if(!$u)return false; $st=db()->prepare("SELECT facility_id FROM episodes WHERE id=?"); $st->execute([$eid]); $r=$st->fetch(); return $r && $r['facility_id']==$u['facility_id']; }
+// THE CHOKE POINT FOR EVERY CLINICAL WRITE. Every POST/PATCH of an observation, visit, delivery,
+// baby, referral, checklist item or vital passes through require_ep(). Rejecting a VOIDED episode
+// here means a voided record cannot be written to from anywhere — including a device that was
+// offline when it was voided and replays its queue afterwards. It reads as "not found", which is
+// exactly what it is now.
+function ep_facility_ok($eid){
+  $u=user(); if(!$u) return false;
+  $st=db()->prepare("SELECT facility_id, voided FROM episodes WHERE id=?");
+  $st->execute([$eid]); $r=$st->fetch();
+  return $r && $r['facility_id']==$u['facility_id'] && (int)($r['voided']??0)===0;
+}
 function require_ep($eid){ if(!ep_facility_ok($eid)) err('not found',404); }
 // Facilities this user may READ across (aggregate). Supervisors widen by scope; others = own facility.
 function scoped_facility_ids($u){

@@ -29,8 +29,8 @@ function reminders_run($db, $windowDays = 2){
     "SELECT av.next_appointment AS due, e.id AS episode_id, e.woman_id, e.facility_id,
             w.first_name, w.father_name, w.phone, w.sms_consent, f.name AS fac
        FROM anc_visits av
-       JOIN episodes e ON e.id = av.episode_id
-       JOIN women   w ON w.id = e.woman_id
+       JOIN episodes e ON e.voided = 0 AND e.id = av.episode_id
+       JOIN women   w ON w.voided = 0 AND w.id = e.woman_id
        LEFT JOIN facilities f ON f.id = e.facility_id
       WHERE av.next_appointment IS NOT NULL
         AND av.next_appointment BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 DAY) AND DATE_ADD(CURDATE(), INTERVAL ? DAY)");

@@ -1,0 +1,25 @@
+ADHERE+ v6.3 — tranche 3 (soft delete / void)
+
+STEP 1 — commit + push in GitHub Desktop (do NOT deploy yet).
+
+STEP 2 — on the server, RUN THE MIGRATION FIRST.
+   The new code reads women.voided / episodes.voided. If the code ships before the columns exist,
+   every API call fails. The columns are additive, so running them BEFORE the deploy is safe for the
+   version that is live right now — the old code simply ignores them.
+
+     cd /root/ADHERE-plus && git pull
+     cd /root/ADHERE-plus/deploy
+     set -a; . .env; set +a
+     docker compose --env-file .env -f docker-compose.prod.yml -f /root/epic-hub/compose.hub.yml \
+       exec -T db mysql -u root -p"$DB_ROOT_PASS" "$DB_NAME" < migration_v27.sql
+
+   Expect: the voided columns listed for `women` and `episodes`, the `void_notices` table, and
+           women_voided = 0, episodes_voided = 0.
+
+STEP 3 — deploy.
+     sudo cp /root/ADHERE-plus/deploy/deploy-adhere.sh /root/deploy-adhere.sh
+     sudo chmod +x /root/deploy-adhere.sh
+     /root/deploy-adhere.sh
+
+   The deploy script now also lints the PHP inside the container it just built and checks that
+   /api/me really answers, and rolls back if either fails.

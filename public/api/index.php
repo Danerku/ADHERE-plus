@@ -99,7 +99,7 @@ function td_to_register(int $eid, int $dose, ?string $when, array $u): void {
 // the delivery room already recorded. If the mother is NOT enrolled, we flag her as positive
 // so the ANC/PMTCT prompt fires — an exposed baby with nobody enrolled is how infants are lost.
 function sync_hiv_from_baby(int $babyId): void {
-  $q=db()->prepare("SELECT b.*, e.woman_id, e.facility_id FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE b.id=?");
+  $q=db()->prepare("SELECT b.*, e.woman_id, e.facility_id FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE b.id=?");
   $q->execute([$babyId]); $b=$q->fetch();
   if(!$b || (int)($b['hiv_exposed']??0)!==1) return;
   $wid=(int)$b['woman_id'];
@@ -128,7 +128,7 @@ function pregtest_link(int $pid, int $wid, string $res, array $b, array $u): arr
   if($res==='positive' && !empty($b['link_to_anc'])){
     // Never open a SECOND ANC episode for a woman who already has one open — that splits her
     // contacts across two charts.
-    $ex=db()->prepare("SELECT id FROM episodes WHERE woman_id=? AND service_category='anc' AND status='active' ORDER BY id DESC LIMIT 1");
+    $ex=db()->prepare("SELECT id FROM episodes WHERE voided=0 AND woman_id=? AND service_category='anc' AND status='active' ORDER BY id DESC LIMIT 1");
     $ex->execute([$wid]); $row=$ex->fetch();
     $eid = $row ? (int)$row['id']
                 : insert('episodes',['woman_id'=>$wid,'service_category'=>'anc','status'=>'active',
@@ -292,7 +292,10 @@ try {
 
   // ---- women (registration) ----
   if ($r==='women'){
-    if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=?"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }
+    // A VOIDED WOMAN IS GONE — from every read. See VOID below: the row survives and is auditable,
+    // but she does not appear in a search, a worklist, a register, a count or an export. `voided=0`
+    // is the default on every existing row, so nothing already recorded changes.
+    if($m==='GET' && $id){ $u=user(); $st=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=? AND voided=0"); $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]); }
     // SEARCH BY THE NAME SHE IS ACTUALLY KNOWN BY.
     // This used to match `mrn` and `first_name` only. In Ethiopia a woman is identified by her own
     // name AND her father's — so a provider searching "Desta" (the father's name she was told at the
@@ -303,7 +306,7 @@ try {
       $raw=trim((string)($_GET['q']??''));
       $st=db()->prepare(
         "SELECT * FROM women
-          WHERE facility_id=?
+          WHERE facility_id=? AND voided=0
             AND (mrn LIKE ?
                  OR CONCAT_WS(' ', first_name, father_name, grandfather_name) LIKE ?)
           ORDER BY id DESC LIMIT 100");
@@ -323,12 +326,22 @@ try {
       if($len<5 || $len>6) err('MRN must be 5 or 6 digits');
       if(isset($b['age'])&& $b['age']!==null && $b['age']!==''){ $ag=(int)$b['age'];
         if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
-      $dup=db()->prepare("SELECT id FROM women WHERE mrn=? AND facility_id=?"); $dup->execute([$b['mrn'],$u['facility_id']]); if($dup->fetch()) err('This MRN already exists at your facility',409);
+      // The MRN is unique per facility, and VOIDING DOES NOT FREE IT — the row still holds the number,
+      // because destroying the identifier would destroy the audit trail of what was removed. Say so
+      // plainly, otherwise the app offers to "open her existing record" for a woman who no longer has
+      // one. An admin can restore her, or the facility can use a different MRN.
+      $dup=db()->prepare("SELECT id, voided FROM women WHERE mrn=? AND facility_id=?");
+      $dup->execute([$b['mrn'],$u['facility_id']]);
+      if($d=$dup->fetch()){
+        if((int)($d['voided']??0)===1)
+          err('This MRN belongs to a record that was removed. It cannot be reused — please use a different MRN, or ask an admin to restore the removed record.',409);
+        err('This MRN already exists at your facility',409);
+      }
       $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
         'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation','facility_id','created_by'],MOH_PERSON_FIELDS))));
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
-      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
+      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=? AND voided=0"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
       // Age was validated on CREATE and not on UPDATE. Age <19 or >35 is a high-risk trigger, so
       // a typo here silently corrupted the flag — and a blank cleared it.
       if(array_key_exists('age',$b) && $b['age']!==null && $b['age']!==''){
@@ -337,6 +350,120 @@ try {
         'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation',
         'prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal'],MOH_PERSON_FIELDS)));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE women SET `$k`=? WHERE id=?")->execute([$v,$id]); } audit('update','women',$id,array_keys($fields)); out(['ok'=>true]); }
+  }
+
+  // ==========================================================================================
+  // VOID — the soft delete.
+  //
+  // Nothing in ADHERE+ could ever be removed: not a woman registered twice by mistake, not an
+  // episode opened on the wrong patient. A clinical record is still NEVER DESTROYED — it is voided:
+  // it disappears from every worklist, search, register, count and export, but the row survives with
+  // WHO voided it, WHEN and WHY, and an admin can restore it.
+  //
+  // Providers, admins and super-admins may void. When a PROVIDER voids something, a notice is left
+  // for the admins of that facility (see /void_notices) — a provider deleting a patient record is
+  // exactly the thing a supervisor should be told about, without blocking the provider from doing it.
+  //
+  // Voiding a WOMAN voids her episodes with her; otherwise they would sit in the labour ward with no
+  // patient attached.
+  // ==========================================================================================
+  if ($r==='void' && $m==='POST'){
+    $u=require_role(['provider','admin']);              // super_admin passes via require_role's admin fallback
+    $b=body();
+    $what=$b['entity']??''; $eid=(int)($b['id']??0); $reason=trim((string)($b['reason']??''));
+    if(!in_array($what,['woman','episode'],true)) err('entity must be woman or episode');
+    if(!$eid) err('id is required');
+    if($reason==='') err('A reason is required. It is the only record of why this was removed.');
+
+    if($what==='woman'){
+      $q=db()->prepare("SELECT * FROM women WHERE id=? AND facility_id=? AND voided=0");
+      $q->execute([$eid,$u['facility_id']]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      db()->prepare("UPDATE women SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
+          ->execute([$u['id'],$reason,$eid]);
+      // her episodes go with her
+      db()->prepare("UPDATE episodes SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE woman_id=? AND voided=0")
+          ->execute([$u['id'],'the patient record was voided: '.$reason,$eid]);
+      // ...and so do her queued SMS reminders. A removed patient must not be texted about an
+      // appointment for a pregnancy the facility has just said it recorded by mistake.
+      db()->prepare("UPDATE reminders SET status='skipped' WHERE woman_id=? AND status='pending'")->execute([$eid]);
+      $label=trim(($row['first_name']??'').' '.($row['father_name']??'')).' ('.($row['mrn']??'').')';
+    } else {
+      $q=db()->prepare("SELECT e.*, w.first_name, w.father_name, w.mrn
+                          FROM episodes e JOIN women w ON w.id=e.woman_id
+                         WHERE e.id=? AND e.facility_id=? AND e.voided=0");
+      $q->execute([$eid,$u['facility_id']]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      db()->prepare("UPDATE episodes SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
+          ->execute([$u['id'],$reason,$eid]);
+      $label=trim(($row['first_name']??'').' '.($row['father_name']??'')).' ('.($row['mrn']??'').') — '.($row['service_category']??'');
+    }
+
+    // Tell the admins, but ONLY when a provider did it. An admin voiding something does not need to
+    // notify themselves.
+    if(($u['role']??'')==='provider'){
+      insert('void_notices',[ 'facility_id'=>$u['facility_id'], 'entity'=>$what, 'entity_id'=>$eid,
+        'label'=>$label, 'reason'=>$reason, 'voided_by'=>$u['id'], 'voided_at'=>date('Y-m-d H:i:s') ]);
+    }
+    audit('void',$what==='woman'?'women':'episodes',$eid,['reason'=>$reason]);
+    out(['ok'=>true,'entity'=>$what,'id'=>$eid]);
+  }
+
+  // Restore something that was voided in error. Admins and super-admins only — a provider who voided
+  // a record by mistake asks an admin, which is the point of the notice.
+  if ($r==='unvoid' && $m==='POST'){
+    $u=require_role(['admin']);
+    $b=body(); $what=$b['entity']??''; $eid=(int)($b['id']??0);
+    if(!in_array($what,['woman','episode'],true)) err('entity must be woman or episode');
+    if($what==='woman'){
+      $q=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $q->execute([$eid,$u['facility_id']]);
+      if(!$q->fetch()) err('not found',404);
+      db()->prepare("UPDATE women SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$eid]);
+      db()->prepare("UPDATE episodes SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE woman_id=?")->execute([$eid]);
+      // Put back the appointment reminders that were skipped when she was removed — but only the ones
+      // still in the future. (The generator dedupes on woman+date, so without this she would silently
+      // never be reminded again about an appointment that was already in the queue.)
+      db()->prepare("UPDATE reminders SET status='pending' WHERE woman_id=? AND status='skipped' AND due_date >= CURDATE()")->execute([$eid]);
+    } else {
+      $q=db()->prepare("SELECT id FROM episodes WHERE id=? AND facility_id=?"); $q->execute([$eid,$u['facility_id']]);
+      if(!$q->fetch()) err('not found',404);
+      db()->prepare("UPDATE episodes SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$eid]);
+    }
+    audit('unvoid',$what==='woman'?'women':'episodes',$eid,[]);
+    out(['ok'=>true]);
+  }
+
+  // Everything that has been voided at this facility — the admin's review list.
+  if ($r==='voided' && $m==='GET'){
+    $u=require_role(['admin']);
+    $w=db()->prepare("SELECT w.id, w.mrn, w.first_name, w.father_name, w.voided_at, w.void_reason,
+                             u.full_name AS voided_by_name, u.role AS voided_by_role
+                        FROM women w LEFT JOIN users u ON u.id=w.voided_by
+                       WHERE w.facility_id=? AND w.voided=1 ORDER BY w.voided_at DESC LIMIT 200");
+    $w->execute([$u['facility_id']]);
+    $e=db()->prepare("SELECT e.id, e.service_category, e.status, e.voided_at, e.void_reason,
+                             w.mrn, w.first_name, w.father_name,
+                             u.full_name AS voided_by_name, u.role AS voided_by_role
+                        FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users u ON u.id=e.voided_by
+                       WHERE e.facility_id=? AND e.voided=1 AND w.voided=0 ORDER BY e.voided_at DESC LIMIT 200");
+    $e->execute([$u['facility_id']]);
+    out(['women'=>$w->fetchAll(), 'episodes'=>$e->fetchAll()]);
+  }
+
+  // The notices raised when a PROVIDER voided something. The admin acknowledges them.
+  if ($r==='void_notices'){
+    $u=require_role(['admin']);
+    if($m==='GET'){
+      $st=db()->prepare("SELECT n.*, u.full_name AS by_name FROM void_notices n
+                           LEFT JOIN users u ON u.id=n.voided_by
+                          WHERE n.facility_id=? ORDER BY n.acknowledged, n.voided_at DESC LIMIT 200");
+      $st->execute([$u['facility_id']]); out($st->fetchAll());
+    }
+    if($m==='POST' && $id){                                  // acknowledge one
+      db()->prepare("UPDATE void_notices SET acknowledged=1, ack_by=?, ack_at=NOW() WHERE id=? AND facility_id=?")
+          ->execute([$u['id'],$id,$u['facility_id']]);
+      out(['ok'=>true]);
+    }
   }
 
   // ---- providers list (for handover picker; any logged-in user) ----
@@ -360,8 +487,10 @@ try {
       // Build FULLY CLOSED EXISTS clauses. (An earlier version of this left the parentheses
       // unbalanced, which made /api/episodes throw a SQL error and every worklist came back
       // empty — the app looked like it had lost every patient.)
-      $ancEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.id=av.episode_id WHERE e2.woman_id=w.id AND ($cond))"; };
-      $scrEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.id=a.episode_id WHERE e3.woman_id=w.id AND ($cond))"; };
+      // voided=0 throughout: care recorded on a REMOVED episode must not go on driving her risk flags,
+      // her anaemia grade or her gestational age. The episode was removed because it should not exist.
+      $ancEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.voided=0 AND e2.id=av.episode_id WHERE e2.woman_id=w.id AND ($cond))"; };
+      $scrEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.voided=0 AND e3.id=a.episode_id WHERE e3.woman_id=w.id AND ($cond))"; };
       // Severe hypertension recorded at ANC (guideline: >=160/110 is severe, and it is an
       // emergency). This was absent entirely: a BP of 170/115 at an ANC contact flagged nothing.
       $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes'"
@@ -391,9 +520,9 @@ try {
              CASE WHEN w.hiv_known_positive=1 THEN 'HIV_POS' END
            )";
       // Screening and ANC results resolve by WOMAN, so they follow her from ANC into labour.
-      $sc="(SELECT GROUP_CONCAT(DISTINCT a.item_code) FROM anc_risk_screening a JOIN episodes e4 ON e4.id=a.episode_id WHERE e4.woman_id=w.id AND a.response='yes')";
-      $an="(SELECT av.anaemia_grade FROM anc_visits av JOIN episodes e5 ON e5.id=av.episode_id WHERE e5.woman_id=w.id AND av.anaemia_grade IS NOT NULL AND av.anaemia_grade<>'normal' ORDER BY av.id DESC LIMIT 1)";
-      $mf="(SELECT av.muac_flag FROM anc_visits av JOIN episodes e6 ON e6.id=av.episode_id WHERE e6.woman_id=w.id AND av.muac_flag=1 ORDER BY av.id DESC LIMIT 1)";
+      $sc="(SELECT GROUP_CONCAT(DISTINCT a.item_code) FROM anc_risk_screening a JOIN episodes e4 ON e4.voided=0 AND e4.id=a.episode_id WHERE e4.woman_id=w.id AND a.response='yes')";
+      $an="(SELECT av.anaemia_grade FROM anc_visits av JOIN episodes e5 ON e5.voided=0 AND e5.id=av.episode_id WHERE e5.woman_id=w.id AND av.anaemia_grade IS NOT NULL AND av.anaemia_grade<>'normal' ORDER BY av.id DESC LIMIT 1)";
+      $mf="(SELECT av.muac_flag FROM anc_visits av JOIN episodes e6 ON e6.voided=0 AND e6.id=av.episode_id WHERE e6.woman_id=w.id AND av.muac_flag=1 ORDER BY av.id DESC LIMIT 1)";
       // Person-level items are carried forward here so Delivery and PNC can SHOW what ANC
       // already established (blood group, Rh, HIV, target population) instead of re-asking.
       // The prior_* columns are here because THE RISK MODEL CONSUMES THEM. They were absent, so
@@ -406,9 +535,9 @@ try {
       // back to the raw BOOKING GA, floored at 24 weeks, and a term labour was scored as if it were
       // extremely preterm. Resolve her latest ANC-contact GA (and its date) BY WOMAN, right here on the
       // episode row, so every screen gets it — and carry first_contact_date so it can be advanced.
-      $gaw = "(SELECT av.ga_weeks FROM anc_visits av JOIN episodes ex ON ex.id=av.episode_id
+      $gaw = "(SELECT av.ga_weeks FROM anc_visits av JOIN episodes ex ON ex.voided=0 AND ex.id=av.episode_id
                 WHERE ex.woman_id=w.id AND av.ga_weeks IS NOT NULL ORDER BY av.visit_date DESC, av.id DESC LIMIT 1)";
-      $gad = "(SELECT av.visit_date FROM anc_visits av JOIN episodes ex ON ex.id=av.episode_id
+      $gad = "(SELECT av.visit_date FROM anc_visits av JOIN episodes ex ON ex.voided=0 AND ex.id=av.episode_id
                 WHERE ex.woman_id=w.id AND av.ga_weeks IS NOT NULL ORDER BY av.visit_date DESC, av.id DESC LIMIT 1)";
       $sql="SELECT e.*, w.first_name,w.father_name,w.mrn,w.gravida,w.para,w.age,w.height_cm,w.lnmp,w.edd, w.ga_first_contact,w.first_contact_date,w.late_anc_initiation,
               w.blood_group,w.rh_factor,w.pregnancy_planned,w.target_pop_code,w.hiv_known_positive,w.hiv_linked_art,w.art_regimen,
@@ -416,7 +545,12 @@ try {
               pu.full_name AS provider_name, $hr AS high_risk,
               $gaw AS anc_ga_weeks, $gad AS anc_ga_date,
               $rc AS risk_codes, $sc AS screen_codes, $an AS anaemia, $mf AS muac_low
-            FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id WHERE e.facility_id=?";
+            FROM episodes e JOIN women w ON w.id=e.woman_id LEFT JOIN users pu ON pu.id=e.provider_id
+            WHERE e.facility_id=? AND e.voided=0 AND w.voided=0";
+      // ^ THIS is the query behind EVERY worklist (antenatal, labour, postnatal, high-risk, the
+      //   patient hub, and the single-episode lookup). Filtering voided here covers all of them at
+      //   once. A voided woman also takes her episodes with her: w.voided=0 excludes them even if,
+      //   somehow, the episode row itself was never marked.
       $args=[$u['facility_id']]; if($cat){ $sql.=" AND e.service_category=?"; $args[]=$cat; }
       // Filter to ONE woman, or ONE episode, server-side. Without this, callers had to pull the
       // LIMIT-200 list and pick their record out of it in the browser — so once a facility passed
@@ -449,7 +583,9 @@ try {
       $sql.=" ORDER BY e.id DESC LIMIT 200";
       $st=db()->prepare($sql); $st->execute($args); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
-      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
+      // voided=0: no new episode of care may be opened on a REMOVED patient. (If she was removed by
+      // mistake, an admin restores her — that is what the restore screen is for.)
+      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=? AND voided=0"); $wc->execute([$b['woman_id']??0,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
       $wid=(int)$b['woman_id']; $cat=$b['service_category']??'';
 
       // ---- ONE EPISODE PER EPISODE OF CARE ---------------------------------------------------
@@ -458,8 +594,10 @@ try {
       // it every time she came back: contact 1 sat on the old episode, and the new episode counted
       // its own visits from 1 again, so the MoH ANC register printed TWO "contact 1" rows for her
       // and her risk screening was invisible from the new chart.
+      // voided=0: a VOIDED episode must never be handed back and re-used. It is a removed record —
+      // reusing it would silently resurrect it, with all the care that was recorded on it.
       $open=db()->prepare("SELECT id,status FROM episodes
-                            WHERE woman_id=? AND facility_id=? AND service_category=? AND status<>'closed'
+                            WHERE voided=0 AND woman_id=? AND facility_id=? AND service_category=? AND status<>'closed'
                             ORDER BY id DESC LIMIT 1");
       $open->execute([$wid,$u['facility_id'],$cat]);
       if($ex=$open->fetch()){ out(['id'=>(int)$ex['id'],'reused'=>true],200); }   // hand back the one she already has
@@ -470,7 +608,7 @@ try {
       // left the newborn dropdown empty so her baby's assessment was tied to no infant at all.
       if($cat==='pnc'){
         $dl=db()->prepare("SELECT e.id FROM episodes e JOIN delivery_summary d ON d.episode_id=e.id
-                            WHERE e.woman_id=? AND e.facility_id=? AND e.status<>'closed'
+                            WHERE e.voided=0 AND e.woman_id=? AND e.facility_id=? AND e.status<>'closed'
                             ORDER BY e.id DESC LIMIT 1");
         $dl->execute([$wid,$u['facility_id']]);
         if($d=$dl->fetch()) out(['id'=>(int)$d['id'],'reused'=>true,'on_delivery'=>true],200);
@@ -478,7 +616,7 @@ try {
 
       // Admitting her in labour ENDS her antenatal care. It does not run alongside it.
       if($cat==='labour'){
-        $anc=db()->prepare("SELECT id FROM episodes WHERE woman_id=? AND facility_id=? AND service_category='anc' AND status<>'closed'");
+        $anc=db()->prepare("SELECT id FROM episodes WHERE voided=0 AND woman_id=? AND facility_id=? AND service_category='anc' AND status<>'closed'");
         $anc->execute([$wid,$u['facility_id']]);
         foreach($anc->fetchAll() as $r){ close_episode((int)$r['id'],'admitted in labour'); }
       }
@@ -680,19 +818,19 @@ try {
     $months=[]; for($i=5;$i>=0;$i--){ $months[]=date('Y-m', strtotime("-$i month")); }
     $series=function($sql) use($months,$ids){ $out=[]; foreach($months as $mo){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$mo])); $out[]=(int)($st->fetch()['c']??0);} return $out; };
     $ind=[
-      'labour'=>$series("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id IN ($in) AND e.service_category='labour' AND DATE_FORMAT(e.admission_datetime,'%Y-%m')=?"),
-      'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
-      'partographs'=>$series("SELECT COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?"),
-      'checklists'=>$series("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.id=c.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(c.recorded_at,'%Y-%m')=?"),
-      'amtsl'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND d.amtsl_uterotonic='done' AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
-      'referrals'=>$series("SELECT COUNT(*) c FROM referrals r JOIN episodes e ON e.id=r.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(r.recorded_at,'%Y-%m')=?"),
-      'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
-      'births'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),
+      'labour'=>$series("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id IN ($in) AND e.service_category='labour' AND DATE_FORMAT(e.admission_datetime,'%Y-%m')=?"),
+      'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
+      'partographs'=>$series("SELECT COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.voided=0 AND e.id=o.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?"),
+      'checklists'=>$series("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.voided=0 AND e.id=c.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(c.recorded_at,'%Y-%m')=?"),
+      'amtsl'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in) AND d.amtsl_uterotonic='done' AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
+      'referrals'=>$series("SELECT COUNT(*) c FROM referrals r JOIN episodes e ON e.voided=0 AND e.id=r.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(r.recorded_at,'%Y-%m')=?"),
+      'red_alerts'=>$series("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?"),
+      'births'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),
       // BOTH kinds of stillbirth. This counted only 'fresh_stillbirth', so every macerated stillbirth
       // — a death that occurred before labour, and the one a facility most needs to see — was missing
       // from the stillbirth rate entirely. The newborn screen has always offered both.
-      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome IN ('fresh_stillbirth','macerated_stillbirth') AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
-      'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
+      'stillbirths'=>$series("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome IN ('fresh_stillbirth','macerated_stillbirth') AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?"),  // newborn record = source of truth
+      'pnc'=>$series("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.voided=0 AND e.id=p.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(p.recorded_at,'%Y-%m')=?"),
     ];
     out(['months'=>$months,'indicators'=>$ind]);
   }
@@ -872,31 +1010,31 @@ try {
     out([
      'days'=>$days,
      'caseload'=>[
-       'anc'      =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id=? AND e.service_category='anc'$since"),
-       'labour'   =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id=? AND e.service_category='labour'$since"),
-       'pnc'      =>$one("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.id=p.episode_id WHERE e.facility_id=?$since"),
-       'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=?$since"),
-       'high_risk'=>$one("SELECT COUNT(*) c FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.facility_id=? AND $hrx$since"),
-       'total'    =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.facility_id=?$since"),
+       'anc'      =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id=? AND e.service_category='anc'$since"),
+       'labour'   =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id=? AND e.service_category='labour'$since"),
+       'pnc'      =>$one("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.voided=0 AND e.id=p.episode_id WHERE e.facility_id=?$since"),
+       'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=?$since"),
+       'high_risk'=>$one("SELECT COUNT(*) c FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.voided=0 AND w.voided=0 AND e.facility_id=? AND $hrx$since"),
+       'total'    =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id=?$since"),
      ],
-     'mode_of_delivery'=>$grp("SELECT d.mode k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.mode IS NOT NULL$since GROUP BY d.mode"),
-     'birth_outcome'  =>$grp("SELECT b.outcome k, COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.outcome IS NOT NULL$since GROUP BY b.outcome"),
-     'maternal_outcome'=>$grp("SELECT d.maternal_status k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.maternal_status IS NOT NULL$since GROUP BY d.maternal_status"),
+     'mode_of_delivery'=>$grp("SELECT d.mode k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.mode IS NOT NULL$since GROUP BY d.mode"),
+     'birth_outcome'  =>$grp("SELECT b.outcome k, COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.outcome IS NOT NULL$since GROUP BY b.outcome"),
+     'maternal_outcome'=>$grp("SELECT d.maternal_status k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.maternal_status IS NOT NULL$since GROUP BY d.maternal_status"),
      'complications'=>[
-       'pre_eclampsia'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_preeclampsia=1$since"),
-       'eclampsia'    =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_eclampsia=1$since"),
-       'aph'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_aph=1$since"),
-       'pph'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_pph=1$since"),
-       'other'        =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.comp_other=1$since"),
+       'pre_eclampsia'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.comp_preeclampsia=1$since"),
+       'eclampsia'    =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.comp_eclampsia=1$since"),
+       'aph'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.comp_aph=1$since"),
+       'pph'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.comp_pph=1$since"),
+       'other'        =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.comp_other=1$since"),
      ],
      'process'=>[
-       'partograph_used'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.partograph_used='Y'$since"),
-       'amtsl'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.amtsl_uterotonic='done'$since"),
-       'checklist'      =>$one("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.id=c.episode_id WHERE e.facility_id=?$since"),
-       'referred'       =>$one("SELECT COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id=?$since"),
-       'red_alerts'     =>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id=? AND s.band='red'$since"),
+       'partograph_used'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.partograph_used='Y'$since"),
+       'amtsl'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.amtsl_uterotonic='done'$since"),
+       'checklist'      =>$one("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.voided=0 AND e.id=c.episode_id WHERE e.facility_id=?$since"),
+       'referred'       =>$one("SELECT COUNT(*) c FROM referrals rf JOIN episodes e ON e.voided=0 AND e.id=rf.episode_id WHERE e.facility_id=?$since"),
+       'red_alerts'     =>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE e.facility_id=? AND s.band='red'$since"),
      ],
-     'ippfp'=>$grp("SELECT d.ippfp_method k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id=? AND d.ippfp_method IS NOT NULL$since GROUP BY d.ippfp_method"),
+     'ippfp'=>$grp("SELECT d.ippfp_method k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.ippfp_method IS NOT NULL$since GROUP BY d.ippfp_method"),
      // ---- Family planning ----
      'fp'=>[
        'clients'      =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
@@ -957,13 +1095,13 @@ try {
      'pmtct_feeding'=>$grp("SELECT e.feeding_option k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.feeding_option IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.feeding_option"),
 
      'newborn_care'=>[
-       'lbw'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.prob_lbw=1$since"),
-       'kmc'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.kmc='initiated'$since"),
-       'phototherapy'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.phototherapy='given'$since"),
-       'nicu'        =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.nicu IN ('admitted','referred_out')$since"),
-       'hiv_exposed' =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.hiv_exposed=1$since"),
-       'dbs_sent'    =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.dbs_sample='sent'$since"),
-       'low_apgar'   =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id=? AND b.apgar_flag='low'$since"),
+       'lbw'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.prob_lbw=1$since"),
+       'kmc'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.kmc='initiated'$since"),
+       'phototherapy'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.phototherapy='given'$since"),
+       'nicu'        =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.nicu IN ('admitted','referred_out')$since"),
+       'hiv_exposed' =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.hiv_exposed=1$since"),
+       'dbs_sent'    =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.dbs_sample='sent'$since"),
+       'low_apgar'   =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.apgar_flag='low'$since"),
      ],
     ]);
   }
@@ -974,13 +1112,15 @@ try {
   //  handoff is recorded rather than relying on her walking down the corridor.
   if ($r==='pregnancy_tests'){
     if($m==='GET'){ $u=require_auth();
+      // A removed patient carries her pregnancy test off this list with her (w.voided=0). A test with
+      // no woman attached at all is still shown — the LEFT JOIN is deliberate.
       $st=db()->prepare("SELECT p.*, w.mrn, w.first_name, w.father_name, w.age
                            FROM pregnancy_tests p LEFT JOIN women w ON w.id=p.woman_id
-                          WHERE p.facility_id=? ORDER BY p.id DESC LIMIT 200");
+                          WHERE p.facility_id=? AND (w.id IS NULL OR w.voided=0) ORDER BY p.id DESC LIMIT 200");
       $st->execute([$u['facility_id']]); out($st->fetchAll()); }
     if($m==='POST'){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wid=(int)($b['woman_id']??0);
-      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $wc->execute([$wid,$u['facility_id']]);
+      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=? AND voided=0"); $wc->execute([$wid,$u['facility_id']]);
       if(!$wc->fetch()) err('woman not in your facility',404);
       // 'pending' is the NORMAL state. She is registered at the desk, walks to the lab, and the
       // strip is read later. The tool used to refuse to save a test without a result, so she
@@ -1028,7 +1168,7 @@ try {
         w.partner_hiv_accepted,w.partner_hiv_result,w.partner_target_pop_code,w.partner_linked_art";
     if($type==='anc'){
       $st=db()->prepare("SELECT a.*, $W FROM anc_visits a
-        JOIN episodes e ON e.id=a.episode_id JOIN women w ON w.id=e.woman_id
+        JOIN episodes e ON e.voided=0 AND e.id=a.episode_id JOIN women w ON w.id=e.woman_id
         WHERE e.facility_id=? AND a.visit_date BETWEEN ? AND ? ORDER BY w.mrn, a.contact_no, a.visit_date");
     } elseif($type==='delivery'){
       // one row per newborn — the register says "use consecutive rows for each newborn"
@@ -1055,21 +1195,21 @@ try {
       $st=db()->prepare(
         "SELECT b.*, b.mrn AS mrn_baby, w.mrn AS mrn_mother, $DCOLS, $W
            FROM delivery_summary d
-           JOIN episodes e ON e.id=d.episode_id
+           JOIN episodes e ON e.voided=0 AND e.id=d.episode_id
            JOIN women   w ON w.id=e.woman_id
            LEFT JOIN babies b ON b.episode_id=d.episode_id
           WHERE e.facility_id=? AND DATE(d.delivery_datetime) BETWEEN ? AND ?
          UNION ALL
          SELECT b.*, b.mrn AS mrn_baby, w.mrn AS mrn_mother, $DCOLS, $W
            FROM babies b
-           JOIN episodes e ON e.id=b.episode_id
+           JOIN episodes e ON e.voided=0 AND e.id=b.episode_id
            JOIN women   w ON w.id=e.woman_id
            LEFT JOIN delivery_summary d ON d.episode_id=b.episode_id
           WHERE e.facility_id=? AND d.id IS NULL AND DATE(b.recorded_at) BETWEEN ? AND ?
          ORDER BY delivery_datetime, mrn_mother, birth_order");
     } elseif($type==='pnc'){
       $st=db()->prepare("SELECT p.*, e.place_of_delivery, e.infant_dob, $W FROM pnc_visits p
-        JOIN episodes e ON e.id=p.episode_id JOIN women w ON w.id=e.woman_id
+        JOIN episodes e ON e.voided=0 AND e.id=p.episode_id JOIN women w ON w.id=e.woman_id
         WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY w.mrn, p.visit_date");
     } elseif($type==='fp'){
       // One row per FP visit (the paper register gives each client up to 5 visit rows).
@@ -1117,7 +1257,7 @@ try {
           SUM(p.result='negative' AND p.fp_offered=1) AS negative_offered_fp,
           SUM(p.linked_episode_id IS NOT NULL) AS linked_to_anc,
           SUM(p.linked_fp_client_id IS NOT NULL) AS linked_to_fp
-        FROM pregnancy_tests p JOIN women w ON w.id=p.woman_id
+        FROM pregnancy_tests p JOIN women w ON w.voided=0 AND w.id=p.woman_id
        WHERE p.facility_id=? AND p.test_date BETWEEN ? AND ?
        GROUP BY band ORDER BY band");
     } else err('unknown register type');
@@ -1133,13 +1273,13 @@ try {
     $fac=$_GET['facility']??$u['facility_id']; $period=$_GET['period']??date('Y-m');
     $one=function($sql,$p) use($ids){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$p])); return (int)($st->fetch()['c']??0); };
     $ind=[
-      'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?",$period),
+      'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?",$period),
       // DHIS2 reports fresh and macerated stillbirths as SEPARATE data elements, so they stay split
       // here — but macerated was simply never exported at all, which under-reported the facility's
       // stillbirths to the national system.
-      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
-      'macerated_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='macerated_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),
-      'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?",$period),
+      'fresh_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='fresh_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),  // newborn record = source of truth
+      'macerated_stillbirths'=>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id IN ($in) AND b.outcome='macerated_stillbirth' AND DATE_FORMAT(b.recorded_at,'%Y-%m')=?",$period),
+      'red_alerts'=>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE e.facility_id IN ($in) AND s.band='red' AND DATE_FORMAT(s.scored_at,'%Y-%m')=?",$period),
     ];
     out(['facility'=>$fac,'period'=>$period,'indicators'=>$ind]);
   }
@@ -1171,10 +1311,10 @@ try {
     $dc=function($col) use($days){ return $days>0 ? " AND $col >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : ""; };
     $grp=function($sql) use($ids){ $st=db()->prepare($sql); $st->execute($ids); $o=[]; foreach($st->fetchAll() as $x){ $o[(int)$x['fid']]=(int)$x['c']; } return $o; };
     $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE service_category='labour' AND facility_id IN ($in)".$dc('created_at')." GROUP BY facility_id");
-    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.id=o.episode_id WHERE e.facility_id IN ($in)".$dc('o.recorded_at')." GROUP BY e.facility_id");
-    $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
-    $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
-    $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.id=rf.episode_id WHERE e.facility_id IN ($in)".$dc('rf.recorded_at')." GROUP BY e.facility_id");
+    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.voided=0 AND e.id=o.episode_id WHERE e.facility_id IN ($in)".$dc('o.recorded_at')." GROUP BY e.facility_id");
+    $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
+    $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
+    $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.voided=0 AND e.id=rf.episode_id WHERE e.facility_id IN ($in)".$dc('rf.recorded_at')." GROUP BY e.facility_id");
     $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
       $rows[]=['id'=>$fid,'name'=>$f['name'],'woreda'=>$f['woreda'],'zone'=>$f['zone'],
         'labour_episodes'=>$lab,'partographs_started'=>$ps,'partograph_completion'=>$lab?(int)round(100*$ps/$lab):0,

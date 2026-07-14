@@ -473,6 +473,14 @@ function isAuthPath(p){
   const base=String(p==null?'':p).split('?')[0].replace(/^\/+/,'');
   return base==='login' || base==='logout' || base==='change_password';
 }
+// REMOVING A RECORD IS NOT SOMETHING TO DO LATER. If a void were queued offline, the app would say
+// "removed" while she was still sitting in the worklist, the local cache and every count on the
+// device — and the removal would only really happen hours later. A void goes to the server now, or it
+// fails and says so. (The clinical WRITE path is unaffected: recording care still works offline.)
+function isImmediatePath(p){
+  const base=String(p==null?'':p).split('?')[0].replace(/^\/+/,'');
+  return base==='void' || base==='unvoid';
+}
 
 // AUTHENTICATION IS NOT A CLINICAL RECORD AND MUST NEVER BE QUEUED.
 // `write = method!=='GET'` meant a LOGIN - a POST - was treated like a patient record: if it was slow
@@ -481,9 +489,9 @@ function isAuthPath(p){
 // queued too. The provider was locked out of the tool entirely while the badge reported "3 pending".
 // Replaying a stale password later is also plainly wrong. Auth reaches the network or FAILS LOUDLY.
 async function api(method, path, bodyObj){
-  const auth=isAuthPath(path);
+  const auth=isAuthPath(path) || isImmediatePath(path);  // neither may be deferred to the queue
   const write=method!=='GET';
-  const queueable=write && !auth;                       // auth is NEVER deferred
+  const queueable=write && !auth;
   const cid=queueable?newCid():null;   // stable key: a replay cannot double-commit
 
   // A record that has not synced yet lives only on this device. Never ask the server about it — it
@@ -501,6 +509,7 @@ async function api(method, path, bodyObj){
   }catch(e){
     // No HTTP response at all: airplane mode, DNS failure, connection refused, mobile data with
     // no route. Nothing reached the server, so the entry is safe to queue and replay.
+    if(isImmediatePath(path)) throw new Error('You are offline. A record can only be removed while you are connected — otherwise it would still be on this device and in the counts.');
     if(auth) throw new Error('Could not reach the server to sign you in. Check the connection and try again.');
     if(queueable) return queueWrite(method,path,bodyObj,cid);
     // AND THE READ IS SERVED FROM THE DEVICE. This is what makes the tool usable in a facility with
@@ -517,6 +526,8 @@ async function api(method, path, bodyObj){
   if(res.status===401){
     // On a LOGIN, 401 means "wrong username or password" - NOT "your session expired". Signing the user
     // out here (and queueing the attempt) is what created the lock-out loop.
+    // ...but a 401 on a VOID really is an expired session — it is not a login attempt.
+    if(isImmediatePath(path)){ sessionLost(); throw new Error('Your session has expired — please sign in again.'); }
     if(auth){ const d=await res.json().catch(()=>({})); throw new Error((d&&d.error)||'Incorrect username or password.'); }
     if(queueable){ const r=queueWrite(method,path,bodyObj,cid); sessionLost(); return r; }
     sessionLost(); throw new Error('Your session has expired — please sign in again.');
@@ -840,7 +851,7 @@ function route(){
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
-    find:findWoman,failed:failedScreen,
+    find:findWoman,failed:failedScreen,voided:voidedScreen,
     account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
@@ -976,6 +987,7 @@ async function home(){
       (isAdmin?tileHtml('#facilities','&#127973;','Facilities','','plain'):'')+
       (isAdmin?tileHtml('#users','&#128101;','Users','','plain'):'')+
       (isAdmin?tileHtml('#reminders','&#128276;','Reminders','','plain'):'')+
+      (isAdmin?tileHtml('#voided','&#128465;&#65039;','Removed records','Review · restore','plain'):'')+
       tileHtml('#account','&#9881;&#65039;','My account','Profile · password','plain')
     )}
   </div>`;
@@ -1848,6 +1860,62 @@ async function facilities(){
   $('#fadd').onclick=async()=>{ const r=await api('POST','facilities',{name:fnm.value,facility_type:fty.value,kebele:fke.value,woreda:fwo.value,zone:fzo.value,region:fre.value,dhis2_org_unit:fdh.value}); if(r.id){ facilities(); } else $('#fm').textContent=' '+(r.error||'error'); };
   $('#fcsvbtn').onclick=async()=>{ const fl=$('#fcsv').files[0]; if(!fl){ $('#fcsvm').textContent=' choose a CSV file first'; return; } const rows=parseCSV(await fl.text()).filter(r=>r.name); if(!rows.length){ $('#fcsvm').textContent=' no rows with a name found'; return; } $('#fcsvm').textContent=' uploading '+rows.length+'…'; try{ const r=await api('POST','facilities',rows); const n=(r.created||[]).length, e=(r.errors||[]).length; $('#fcsvm').textContent=' added '+n+(e?(', '+e+' skipped'):''); setTimeout(()=>facilities(),1000); }catch(err){ $('#fcsvm').textContent=' '+(err.message||'error'); } };
   document.querySelectorAll('#app button[data-del]').forEach(b=>b.onclick=async()=>{ if(confirm('Delete facility "'+b.dataset.nm+'"? This only works if it has no users or patients.')){ const r=await api('DELETE','facilities/'+b.dataset.del); if(r&&r.ok){ facilities(); } else alert((r&&r.error)||'error'); } });
+}
+
+// ---- REMOVED RECORDS — the admin's review screen -------------------------------------------
+// Everything that has been voided, who did it and why, with a way to put it back. And, separately,
+// the notices raised when a PROVIDER removed something: a provider deleting a patient record is
+// exactly what a supervisor should be told about, without blocking them from doing it.
+async function voidedScreen(){
+  if(!ADMIN()){ app().innerHTML=nav()+'<div class="card">Admins only.</div>'; return; }
+  const [v,notices]=await Promise.all([
+    api('GET','voided').catch(()=>({women:[],episodes:[]})),
+    api('GET','void_notices').catch(()=>[])
+  ]);
+  const women=(v&&v.women)||[], episodes=(v&&v.episodes)||[];
+  const unack=(notices||[]).filter(n=>n.acknowledged!=1);
+  const who=r=>esc((r.voided_by_name||'')+(r.voided_by_role?(' ('+r.voided_by_role+')'):''));
+  const when=r=>esc(String(r.voided_at||'').slice(0,16));
+
+  app().innerHTML=nav()+`
+   ${unack.length?`<div class="card" style="border-left:4px solid #a32d2d">
+     <h3>${unack.length} record${unack.length===1?'':'s'} removed by a provider</h3>
+     <p class="muted">A provider removed these. Check that each was right, then acknowledge it.</p>
+     <table><tr><th>When</th><th>Who</th><th>What</th><th>Reason</th><th></th></tr>
+     ${unack.map(n=>`<tr><td>${esc(String(n.voided_at||'').slice(0,16))}</td><td>${esc(n.by_name||'')}</td>
+        <td>${esc(n.entity)} &mdash; ${esc(n.label||'')}</td><td>${esc(n.reason||'')}</td>
+        <td><button class="sm" data-ack="${n.id}">Acknowledge</button></td></tr>`).join('')}
+     </table></div>`:''}
+
+   <div class="card"><h3>Removed patients</h3>
+    <p class="muted">Their records are kept in full. They appear on no worklist, register, count or export. Restoring puts everything back exactly as it was.</p>
+    <table><tr><th>MRN</th><th>Name</th><th>Removed</th><th>By</th><th>Reason</th><th></th></tr>
+    ${women.map(w=>`<tr><td>${esc(w.mrn||'')}</td><td>${esc(((w.first_name||'')+' '+(w.father_name||'')).trim())}</td>
+      <td>${when(w)}</td><td>${who(w)}</td><td>${esc(w.void_reason||'')}</td>
+      <td><button class="sm" data-restore="woman" data-id="${w.id}">Restore</button></td></tr>`).join('')
+      ||'<tr><td colspan=6 class=muted>No patient records have been removed.</td></tr>'}
+    </table></div>
+
+   <div class="card"><h3>Removed episodes</h3>
+    <p class="muted">The patient is still on file &mdash; only this episode of care was removed.</p>
+    <table><tr><th>MRN</th><th>Name</th><th>Episode</th><th>Removed</th><th>By</th><th>Reason</th><th></th></tr>
+    ${episodes.map(e=>`<tr><td>${esc(e.mrn||'')}</td><td>${esc(((e.first_name||'')+' '+(e.father_name||'')).trim())}</td>
+      <td>${esc(e.service_category||'')} &middot; ${esc(e.status||'')}</td>
+      <td>${when(e)}</td><td>${who(e)}</td><td>${esc(e.void_reason||'')}</td>
+      <td><button class="sm" data-restore="episode" data-id="${e.id}">Restore</button></td></tr>`).join('')
+      ||'<tr><td colspan=7 class=muted>No episodes have been removed.</td></tr>'}
+    </table></div>`;
+
+  document.querySelectorAll('[data-restore]').forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    const r=await api('POST','unvoid',{entity:b.dataset.restore, id:+b.dataset.id}).catch(e=>({error:e.message}));
+    if(r&&r.ok){ toast('Restored','ok'); voidedScreen(); } else { b.disabled=false; toast((r&&r.error)||'Could not restore it'); }
+  });
+  document.querySelectorAll('[data-ack]').forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    const r=await api('POST','void_notices/'+b.dataset.ack,{}).catch(()=>null);
+    if(r&&r.ok) voidedScreen(); else b.disabled=false;
+  });
 }
 
 async function users(){
@@ -4662,7 +4730,55 @@ async function patientHub(id){
            <button id="epreopen" class="sm" style="margin-left:8px">She has come back &mdash; reopen</button>`
         : `<button id="epclose" class="sm">Close this episode of care</button>
            <span class="muted" style="font-size:12px">Takes her off the worklist. The record stays, and can be reopened.</span>`}
+     </div>`:''}
+    ${(ME.role==='provider'||ADMIN())?`<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+      <button id="epvoid" class="sm" style="background:#a32d2d">Remove this episode&hellip;</button>
+      <button id="wvoid" class="sm" style="background:#a32d2d;margin-left:6px">Remove this patient&hellip;</button>
+      <div class="muted" style="font-size:12px;margin-top:4px">For a record that should never have existed &mdash; the wrong patient, a duplicate, a test entry. It is taken off every worklist, register and count, but <b>nothing is destroyed</b>: the record is kept with your name and your reason, and an admin can restore it.
+      ${ME.role==='provider'?' An admin is told when a provider removes a record.':''}</div>
      </div>`:''}</div>`;
+
+  // ---- VOID (soft delete) -------------------------------------------------------------------
+  // Nothing could ever be removed: not a woman registered twice by mistake, not an episode opened on
+  // the wrong patient. Closing an episode only takes it off the worklist — the record is still real,
+  // still counted, still in the register. This is for a record that should NEVER HAVE EXISTED.
+  const askVoid=(what, targetId, name)=>{
+    // A record created offline has no server id yet — only a local placeholder. The server cannot be
+    // asked to remove something it has never seen, so say so plainly instead of failing with a 404.
+    if(isLocalId(targetId)){
+      toast('This record has not reached the server yet. Let it sync first, then remove it.');
+      return;
+    }
+    const old=document.getElementById('mdl'); if(old) old.remove();
+    const d=document.createElement('div'); d.id='mdl';
+    d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
+    d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:440px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25)">
+      <h3 style="margin:0 0 8px;color:#a32d2d;font-size:16px">Remove ${what==='woman'?'this patient':'this episode'}?</h3>
+      <p style="margin:0 0 10px;font-size:14px;line-height:1.5;color:#334155">${esc(name)}<br>
+      ${what==='woman'?'<b>Her whole record, and every episode of care on it,</b> will be taken off every worklist, register and count.':'This episode, and everything recorded on it, will be taken off every worklist, register and count.'}
+      Nothing is destroyed &mdash; it is kept with your name and your reason, and an admin can restore it.</p>
+      <label style="font-size:13px;color:#334155">Why is this being removed? <span style="color:#a32d2d">(required)</span>
+        <input id="vreason" placeholder="e.g. registered twice by mistake" style="width:100%;margin-top:4px"></label>
+      <div id="verr" style="color:#a32d2d;font-size:13px;margin-top:6px"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="sec" id="vcancelbtn" style="flex:1">Cancel</button>
+        <button class="act" id="vok" style="flex:1;background:#a32d2d">Remove</button>
+      </div></div>`;
+    document.body.appendChild(d);
+    $('#vcancelbtn').onclick=()=>d.remove();
+    $('#vok').onclick=async()=>{
+      const reason=($('#vreason').value||'').trim();
+      if(reason.length<3){ $('#verr').textContent='Please say why. It is the only record of what happened to this patient.'; return; }
+      $('#vok').disabled=true;
+      const r=await api('POST','void',{entity:what, id:+targetId, reason}).catch(e=>({error:e.message}));
+      if(r&&r.ok){ d.remove(); toast(what==='woman'?'The patient record was removed':'The episode was removed','ok'); location.hash='#home'; }
+      else { $('#vok').disabled=false; $('#verr').textContent=(r&&r.error)||'Could not remove it.'; }
+    };
+  };
+  const _vname=((e.first_name||'')+' '+(e.father_name||'')).trim()+' — MRN '+(e.mrn||'');
+  const evb=$('#epvoid'); if(evb) evb.onclick=()=>askVoid('episode', id, _vname+' · '+(cat||'')+' episode');
+  const wvb=$('#wvoid');  if(wvb) wvb.onclick=()=>askVoid('woman', e.woman_id, _vname);
+
   // CLOSING AN EPISODE. Nothing in ADHERE+ ever ended one — the enum had 'closed', the schema had
   // closed_datetime, and no code touched either. So every woman ever registered stayed on a
   // worklist for ever, and a woman moved from ANC to labour sat on both at once.

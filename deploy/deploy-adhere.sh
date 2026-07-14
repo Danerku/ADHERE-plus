@@ -84,6 +84,28 @@ info "Checking both sites ..."
 check_site "ADHERE" "$ADHERE_URL"
 check_site "HUB   " "$HUB_URL"        # the Hub must survive an ADHERE deploy. If it doesn't, we roll back.
 
+# The API is the part that actually matters, and a single PHP parse error takes ALL of it out — every
+# save, every worklist, every register — while index.html keeps returning a cheerful 200. So: lint the
+# PHP inside the container we just built, and then prove the API really answers.
+info "Linting the PHP we just shipped ..."
+if $DC exec -T web php -l /var/www/html/api/index.php >/dev/null 2>&1 \
+   && $DC exec -T web php -l /var/www/html/api/lib.php >/dev/null 2>&1; then
+  grn "  php syntax ok"
+else
+  red "  PHP SYNTAX ERROR in the API:"
+  $DC exec -T web php -l /var/www/html/api/index.php || true
+  $DC exec -T web php -l /var/www/html/api/lib.php   || true
+  FAILED="$FAILED php-syntax"
+fi
+
+# A signed-out call to /api/me must return 401 (JSON), not 500 and not 000. 401 here is HEALTH.
+info "Checking the API answers ..."
+API_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${ADHERE_URL}api/me" || echo 000)
+case "$API_CODE" in
+  200|401) grn "  api  $API_CODE" ;;
+  *)       red "  api  $API_CODE  <-- NOT OK"; FAILED="$FAILED api" ;;
+esac
+
 # The file-integrity check that would have caught BOTH app.js truncations.
 info "Checking the shipped app.js is intact ..."
 APP=$(curl -s --max-time 30 "${ADHERE_URL}app.js?cb=$STAMP" || true)
