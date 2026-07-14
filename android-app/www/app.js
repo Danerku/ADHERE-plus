@@ -2105,19 +2105,58 @@ const CHK={admission:['Referral needed?','Partograph started (≥4cm)?','Start a
  after_birth:['Uterotonic given <1min?','Bleeding controlled?','Baby breathing/warm/skin-to-skin?','Early breastfeeding started?'],
  before_discharge:['Bleeding controlled?','Danger signs counselled?','Follow-up scheduled?','Family planning discussed?']};
 async function checklist(id){
+  // THE CHECKLIST NEVER LOADED WHAT WAS SAVED.
+  // It never called GET, so every item re-rendered as "No" each time the screen was opened, and
+  // saving again inserted a SECOND full set of rows (the table had no unique key). A checklist done
+  // at 02:00 could not be reviewed at 08:00 — so it was done again, and the record then held two
+  // contradictory sets. In the live database this screen has ZERO rows: it has never once been used
+  // successfully. Now it loads, it pre-fills, it shows what is still outstanding, and re-saving a
+  // pause point CORRECTS it instead of duplicating it.
+  const past=await api('GET','checklist?episode='+id).catch(()=>[]);
+  const prev={};                                    // item_code -> the response already recorded
+  (past||[]).forEach(r=>{ if(r&&r.item_code) prev[r.item_code]=r.response; });
+
+  const done=k=>CHK[k].filter((_,i)=>prev[k+'_'+i]!==undefined).length;
+  const tabLabel=k=>{ const d=done(k), n=CHK[k].length;
+    return k.replace('_',' ')+(d? ' <span class="muted" style="font-size:11px">'+(d===n?'&#10003;':d+'/'+n)+'</span>' : ''); };
+
   app().innerHTML=nav()+`<div class="card"><h3>WHO Safe Childbirth Checklist — episode ${esc(id)}</h3>
-    <div class="tabs" id="tabs">${Object.keys(CHK).map((k,i)=>`<button class="${i==0?'on':''}" data-k="${k}">${k.replace('_',' ')}</button>`).join('')}</div>
-    <div id="items"></div><button class="act" id="save" style="margin-top:10px">Save pause point</button><span class="muted" id="m"></span></div>`;
+    <p class="muted">Each pause point can be re-opened and corrected. What was already recorded is shown below — it is no longer re-asked from a blank sheet.</p>
+    <div class="tabs" id="tabs">${Object.keys(CHK).map((k,i)=>`<button class="${i==0?'on':''}" data-k="${k}">${tabLabel(k)}</button>`).join('')}</div>
+    <div id="items"></div>
+    <div id="chknote" class="muted" style="font-size:12px;margin-top:6px"></div>
+    <button class="act" id="save" style="margin-top:10px">Save pause point</button><span class="muted" id="m"></span></div>`;
   let cur='admission';
-  const renderItems=()=>{$('#items').innerHTML=CHK[cur].map((t,i)=>`<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center">${t}
-    <select data-i="${i}" style="width:120px"><option value="no">No</option><option value="yes">Yes</option><option value="na">N/A</option></select></label></div>`).join('');};
+  const renderItems=()=>{
+    $('#items').innerHTML=CHK[cur].map((t,i)=>{
+      const code=cur+'_'+i, v=prev[code];            // pre-fill from what is on the record
+      const opt=(val,lab)=>`<option value="${val}"${v===val?' selected':''}>${lab}</option>`;
+      return `<div style="padding:6px 0;border-bottom:0.5px solid #eee"><label style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>${t}</span>
+      <select data-i="${i}" style="width:120px">${v===undefined?'<option value="" selected>— not asked —</option>':''}${opt('no','No')}${opt('yes','Yes')}${opt('na','N/A')}</select></label></div>`;
+    }).join('');
+    const d=done(cur), n=CHK[cur].length;
+    $('#chknote').textContent = d===0 ? 'Nothing recorded at this pause point yet.'
+                    : (d===n ? 'All '+n+' items recorded. Re-saving will correct them, not duplicate them.'
+                             : d+' of '+n+' recorded — '+(n-d)+' still outstanding.');
+  };
   renderItems();
-  $('#tabs').onclick=e=>{ if(!e.target.dataset.k)return; cur=e.target.dataset.k; [...$('#tabs').children].forEach(b=>b.className=b.dataset.k===cur?'on':''); renderItems(); };
-  // Guard against a double-click writing the rows twice (every api() call mints a fresh
-  // idempotency key, so two clicks = two inserts = inflated counts).
+  $('#tabs').onclick=e=>{ const b=e.target.closest('button'); if(!b||!b.dataset.k) return; cur=b.dataset.k;
+    [...$('#tabs').children].forEach(x=>x.className=x.dataset.k===cur?'on':''); renderItems(); };
+
   $('#save').onclick=async()=>{ const b=$('#save'); if(b.disabled) return; b.disabled=true;
-    try{ const rows=[...document.querySelectorAll('#items select')].map((s,i)=>({episode_id:+id,pause_point:cur,item_code:cur+'_'+i,response:s.value}));
-      await api('POST','checklist',rows); $('#m').textContent=' saved';
+    try{
+      // Only send items the provider actually answered. An untouched "— not asked —" is not a "No".
+      const rows=[...document.querySelectorAll('#items select')]
+        .map((s,i)=>({episode_id:+id,pause_point:cur,item_code:cur+'_'+i,response:s.value}))
+        .filter(r=>r.response);
+      if(!rows.length){ $('#m').textContent=' nothing to save'; return; }
+      const r=await api('POST','checklist',rows);
+      if(r&&(r.ids||r.queued)){
+        rows.forEach(x=>{ prev[x.item_code]=x.response; });   // reflect it immediately
+        $('#m').textContent=' saved';
+        [...$('#tabs').children].forEach(x=>{ x.innerHTML=tabLabel(x.dataset.k); });
+        renderItems();
+      } else { $('#m').textContent=' '+((r&&r.error)||'error'); }
     } finally{ b.disabled=false; } };
 }
 
@@ -2189,6 +2228,15 @@ async function delivery(id){
   }
   app().innerHTML=nav()+`<div class="card"><h3>Delivery summary — episode ${esc(id)}</h3>
    ${carryForward(W,rhNegD)}
+
+   <details class="moh" open><summary>Date &amp; time of birth</summary>
+   <div class="muted" style="font-size:12px;margin-bottom:6px">This is the time <b>the baby was born</b>, not the time this form is filled in. It is pre-filled with now &mdash; change it if you are writing the birth up later.</div>
+   <div class="grid">
+    ${ecPicker('dd','Date of birth',true)}
+    <label>Time of birth<input id="dt" type="time" value="${esc(localDateTime().slice(11,16))}"></label>
+   </div>
+   <div id="dtwarn"></div></details>
+
    <div class="grid">
    <label>Mode<select id="md"><option value="svd">SVD — spontaneous vaginal</option><option value="assisted">Forceps / vacuum assisted</option><option value="caesarean">Caesarean section</option><option value="other">Other</option></select></label>
    <label>If other, specify<input id="mot" placeholder="assisted breech, destructive…"></label>
@@ -2232,6 +2280,33 @@ async function delivery(id){
   const syncDeath=()=>{ $('#mdcw').style.display=(mo.value==='death')?'':'none'; };
   mo.addEventListener('change',syncDeath); syncDeath();
 
+  // TIME OF BIRTH — recorded, not assumed.
+  // `delivery_datetime` used to be localDateTime() at the moment Save was pressed. So a 04:00 birth
+  // written up at 07:30 was stamped 07:30, and a birth written up after midnight landed on the WRONG
+  // DAY — and therefore in the wrong month of the MoH delivery register, the dashboard and DHIS2.
+  const birthDT=()=>{
+    const d=ecGet('dd');                                  // Ethiopian picker -> Gregorian ISO date
+    const t=($('#dt')&&$('#dt').value)||'00:00';
+    return d ? (d+' '+t+':00') : null;
+  };
+  const checkBirthTime=()=>{
+    const s=birthDT(); const box=$('#dtwarn'); if(!box) return true;
+    if(!s){ box.innerHTML=''; return true; }
+    const when=parseLocal(s); const now=Date.now();
+    if(!when){ box.innerHTML=''; return true; }
+    if(when.getTime() > now + 60*60*1000){          // an hour's grace for a clock that is slightly off
+      box.innerHTML=alertBox('red','The time of birth is in the future','You have entered '+esc(s.slice(0,16))+', which is later than now. Please check the date and the time.');
+      return false;
+    }
+    const hrs=(now-when.getTime())/36e5;
+    box.innerHTML = hrs>24
+      ? alertBox('amber','This birth is recorded as '+Math.round(hrs/24)+' day(s) ago','Please confirm the date is right &mdash; a wrong date puts her in the wrong month of the MoH register.')
+      : '';
+    return true;
+  };
+  ['dd_d','dd_m','dd_y','dt'].forEach(k=>{ const el=$('#'+k); if(el){ el.addEventListener('change',checkBirthTime); el.addEventListener('input',checkBirthTime); } });
+  checkBirthTime();
+
   // POSTPARTUM HAEMORRHAGE — the leading cause of maternal death, and until now the one emergency
   // the tool could not see. Blood loss >=500 ml (>=1000 for caesarean) OR an atonic uterus is PPH.
   // It fires a red banner, ticks the MoH complication automatically, and — like the ANC, PNC and
@@ -2261,6 +2336,9 @@ async function delivery(id){
     // Range check BEFORE the PPH gate — a blood loss typed as 90000 is a slip, and raising a
     // haemorrhage alert on it would teach the provider that the alert means nothing.
     if(!checkRanges([['ebl','blood_loss_ml']])) return;
+    // The birth cannot have happened in the future.
+    if(!checkBirthTime()){ modal('Check the time of birth','The date and time of birth you have entered is in the future. A delivery cannot be recorded before it has happened.','risk'); return; }
+    if(!birthDT()){ modal('Date of birth is missing','Please enter the date the baby was born. It is what puts her on the right line of the MoH delivery register.','risk'); return; }
     // A red PPH alert must be SEEN before the delivery can be filed.
     if(pphCheck() && !window._pphAck){ window._pphAck=true; modal('Postpartum haemorrhage','This delivery meets the PPH criteria (blood loss threshold or atonic uterus). Manage the haemorrhage first. Press Save again to confirm you have seen this and to record it.','risk'); return; }
     const btn=$('#s'); btn.disabled=true;
@@ -2268,7 +2346,7 @@ async function delivery(id){
       // Newborn data goes ONLY to the babies table (created just below) — it is the single
       // source of truth and the only one that supports twins. delivery_summary no longer
       // carries a shadow copy of weight/sex/APGAR/outcome.
-      await api('POST','delivery',{episode_id:+id,delivery_datetime:localDateTime(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:numOrNull(ebl.value),
+      await api('POST','delivery',{episode_id:+id,delivery_datetime:birthDT(),mode:md.value,maternal_outcome:mo.value,amtsl_uterotonic:(ut1.value||null),amtsl_uterotonic_type:(utt.value||null),amtsl_cct:(cct.value||null),amtsl_uterine_tone:(utn.value||null),amtsl_massage:(umsg.value||null),amtsl_placenta:(plc.value||null),blood_loss_ml:numOrNull(ebl.value),
         partograph_used:pUsed,episiotomy:tk('epis'),mode_other_text:(md.value==='other'?mot.value:null),
         maternal_status:MOH_STATUS[mo.value]||null,maternal_death_cause:(mo.value==='death'?(+mdc.value||null):null),
         comp_preeclampsia:tk('cpe'),comp_eclampsia:tk('cec'),comp_aph:tk('cap'),comp_pph:tk('cpp'),comp_other:tk('cot'),referred:tk('cref'),
@@ -3194,6 +3272,22 @@ async function editWoman(wid){
     <label>Abortion<input id="ab" type="number" min="0" value="${esc(w.abortions??'')}"></label>
     <label>Ectopic<input id="ecp" type="number" min="0" value="${esc(w.ectopic??'')}"></label>
     <label>GTD<input id="gtd" type="number" min="0" value="${esc(w.gtd??'')}"></label>
+   </div>
+
+   <details class="moh" open><summary>Permanent history &amp; chronic conditions <span class="muted">&mdash; correctable here</span></summary>
+   <div class="muted" style="font-size:12px;margin-bottom:8px">These follow her into <b>every future pregnancy</b>: they drive the high-risk worklist and are fed to the AI model. The screening screen deliberately will not let a &ldquo;no&rdquo; erase a recorded &ldquo;yes&rdquo; &mdash; so until now a <b>mis-tapped answer could never be taken back</b>, and she stayed flagged for life. This is the one place they can be corrected. Change one only if you are sure it was recorded in error.</div>
+   <div class="grid">
+    <label>Previous caesarean section<select id="hprcs">${selOpts([['yes','Yes'],['no','No']],w.prior_cs)}</select></label>
+    <label>Previous stillbirth<select id="hprsb">${selOpts([['yes','Yes'],['no','No']],w.prior_stillbirth)}</select></label>
+    <label>Previous postpartum haemorrhage<select id="hprpph">${selOpts([['yes','Yes'],['no','No']],w.prior_pph)}</select></label>
+    <label>Previous pre-eclampsia / eclampsia<select id="hprpe">${selOpts([['yes','Yes'],['no','No']],w.prior_preeclampsia)}</select></label>
+    <label>Previous obstructed labour<select id="hprob">${selOpts([['yes','Yes'],['no','No']],w.prior_obstructed)}</select></label>
+    <label>Chronic hypertension<select id="hchtn">${selOpts([['yes','Yes'],['no','No']],w.chronic_htn)}</select></label>
+    <label>Diabetes<select id="hdm">${selOpts([['yes','Yes'],['no','No']],w.diabetes)}</select></label>
+    <label>Cardiac or renal disease<select id="hcr">${selOpts([['yes','Yes'],['no','No']],w.cardiac_renal)}</select></label>
+   </div></details>
+
+   <div class="grid">
     <label>Residence<select id="res">${selOpts([['urban','Urban'],['rural','Rural']],w.residence)}</select></label>
     <label>Occupation<input id="occ" value="${esc(w.occupation||'')}"></label>
     ${ecPicker('lnmp','Last menstrual period',false,w.lnmp)}
@@ -3242,6 +3336,14 @@ async function editWoman(wid){
     blood_group:(bg.value||null),rh_factor:(rh.value||null),pregnancy_planned:(pp.value===''?null:+pp.value),
     abortions:(ab.value===''?null:+ab.value),ectopic:(ecp.value===''?null:+ecp.value),gtd:(gtd.value===''?null:+gtd.value),
     residence:(res.value||null),occupation:(occ.value||null),
+    // THE EIGHT PERMANENT FLAGS. The server has always accepted them on PATCH /women — NOTHING SENT
+    // THEM. Combined with the deliberate "an explicit no must not erase a recorded yes" rule on the
+    // screening screen, that made a mis-tapped answer PERMANENT: she was flagged high-risk for life,
+    // in every future pregnancy, and prior_cs=1 was handed to the intrapartum model for ever, with no
+    // screen anywhere able to take it back. This is the correction path.
+    prior_cs:(hprcs.value||null), prior_stillbirth:(hprsb.value||null), prior_pph:(hprpph.value||null),
+    prior_preeclampsia:(hprpe.value||null), prior_obstructed:(hprob.value||null),
+    chronic_htn:(hchtn.value||null), diabetes:(hdm.value||null), cardiac_renal:(hcr.value||null),
     target_pop_code:(tp.value||null),hiv_known_positive:tk('hkp'),hiv_linked_pmtct:tk('lpm'),hiv_linked_pmtct_facility:(+lpf.value||null),hiv_linked_art:tk('lar'),art_regimen:(artr.value||null),
     partner_hiv_accepted:tk('pha'),partner_hiv_result:(phr.value||null),partner_target_pop_code:(ptp.value||null),partner_linked_art:tk('pla')});
     $('#wm').textContent=(r&&(r.ok||r.queued))?' saved':' '+((r&&r.error)||'error'); };
