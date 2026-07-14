@@ -338,6 +338,7 @@ try {
           err('This MRN belongs to a record that was removed. It cannot be reused — please use a different MRN, or ask an admin to restore the removed record.',409);
         err('This MRN already exists at your facility',409);
       }
+      $b=blank_to_null($b);
       $wid=insert('women',array_intersect_key($b,array_flip(array_merge(['mrn','first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
         'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation','facility_id','created_by'],MOH_PERSON_FIELDS))));
       audit('create','women',$wid); out(['id'=>$wid],201); }
@@ -346,6 +347,7 @@ try {
       // Age <19 or >35 is a high-risk trigger, so a typo here silently corrupted the flag — and a
       // blank cleared it. Height, gravida and para are held to the same standard on a correction.
       check_ranges($b);
+      $b=blank_to_null($b);
       $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
         'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation',
         'prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal'],MOH_PERSON_FIELDS)));
@@ -753,6 +755,7 @@ try {
       // THE USER TYPED, not the merged row: a record that already holds a legacy bad value (this is
       // exactly the situation with the three impossible heights) must still be correctable, and
       // validating the merge would refuse the very edit that fixes it.
+      $f=blank_to_null($f);
       check_ranges($f,['age']);
       foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
 
@@ -781,6 +784,7 @@ try {
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
       // Impossible readings are refused HERE, not only in the browser. `age` is skipped: on an
       // immunization client it means a child (0, or 9-14 for HPV), not a mother.
+      $rows = array_map('blank_to_null',$rows);
       foreach($rows as $row){ require_ep($row['episode_id']??0); check_ranges($row,['age']); }
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id'];
         if($tbl==='handovers') $row['from_provider_id']=$u['id'];   // sender identity from the session, never caller-supplied
@@ -937,7 +941,7 @@ try {
       $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll());
     }
     if($m==='POST'){ $u=require_role($writeRoles); $b=body();
-      $row=array_intersect_key($b,array_flip($allow));
+      $row=blank_to_null(array_intersect_key($b,array_flip($allow)));
       // Same guard as the maternal tables (viral load, CD4, BP). `age` is skipped on purpose: here it
       // is an immunization client's age — an infant, or a 9-14 year old girl for HPV.
       check_ranges($row,['age']);
