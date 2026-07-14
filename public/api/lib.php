@@ -134,6 +134,30 @@ function idem_guard(){
   }catch(\PDOException $e){ return; }              // table missing pre-migration -> behave as before
 }
 // ================================================================================================
+// HIGH RISK — ONE DEFINITION, IN ONE PLACE.
+//
+// There were two. The worklist (/episodes?flag=highrisk) resolved risk BY WOMAN and included severe
+// hypertension (>=160/110) and any positive proteinuria. The dashboard (/overview) resolved it BY
+// EPISODE and had neither arm. So the two disagreed in production — the dashboard said 12 high-risk
+// women and the worklist listed 8 — and a provider had no way to tell which number was the lie.
+//
+// Resolving by WOMAN is the correct one: her risk follows her from her ANC episode into labour, and
+// an episode-scoped rule loses it at exactly the moment it matters most. Both callers now use this.
+//
+// The expression assumes the query has `women w` in scope. It contains no user input.
+function hr_sql(){
+  $ancEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.voided=0 AND e2.id=av.episode_id WHERE e2.woman_id=w.id AND ($cond))"; };
+  $scrEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.voided=0 AND e3.id=a.episode_id WHERE e3.woman_id=w.id AND ($cond))"; };
+  return "(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes'"
+    ." OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1"
+    ." OR ".$ancEx("av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1")
+    ." OR ".$ancEx("av.bp_systolic>=160 OR av.bp_diastolic>=110")
+    ." OR ".$ancEx("av.urine_protein IN ('+','++','+++')")
+    ." OR ".$scrEx("a.response='yes'")
+    .")";
+}
+
+// ================================================================================================
 // MEASUREMENT RANGES — ENFORCED HERE, NOT ONLY IN THE BROWSER.
 //
 // A clinician typed a height of 1700000. The browser now stops that; the SERVER did not, and the
@@ -150,6 +174,12 @@ function idem_guard(){
 // the floor is 0 where that is clinically true, and empty/NULL always passes: "not measured" is a
 // legitimate answer and must never be blocked.
 // ================================================================================================
+// EVERY KEY BELOW MUST BE A REAL COLUMN NAME. check_ranges() looks the key up in the row it was given,
+// so a key that matches no column is a bound that can never fire — and it is invisible, because the
+// browser maps its own field ids onto these names and validates locally, so the form looks protected.
+// Four of them were wrong (`fundal_height` vs fundal_height_cm, `fetal_heart` vs fetal_heart_rate,
+// `contractions` vs contractions_per10, `cd4` vs cd4_count) and one (`hours_labour`) named no column at
+// all: on the server, none of those five had ever rejected anything.
 function ranges(){
   return [
     'height_cm'=>[120,200,'Height (cm)'],        'weight_kg'=>[30,200,'Weight (kg)'],
@@ -157,14 +187,24 @@ function ranges(){
     'bp_systolic'=>[60,250,'Systolic BP'],       'bp_diastolic'=>[30,160,'Diastolic BP'],
     'pulse'=>[30,200,'Pulse'],                   'temperature'=>[30,43,'Temperature (°C)'],
     'resp_rate'=>[6,60,'Respiratory rate'],      'spo2'=>[50,100,'SpO2 (%)'],
-    'fundal_height'=>[10,45,'Fundal height (cm)'],'fetal_heart'=>[0,220,'Fetal heart rate'],
+    'fundal_height_cm'=>[10,45,'Fundal height (cm)'], 'fetal_heart_rate'=>[0,220,'Fetal heart rate'],
     'hgb'=>[3,20,'Haemoglobin'],                 'muac'=>[10,45,'MUAC (cm)'],
-    'cervix_cm'=>[0,10,'Cervical dilatation'],   'contractions'=>[0,10,'Contractions / 10 min'],
-    'hours_labour'=>[0,48,'Hours in labour'],    'apgar_1min'=>[0,10,'APGAR (1 min)'],
+    // partograph_obs
+    'cervix_cm'=>[0,10,'Cervical dilatation'],   'contractions_per10'=>[0,10,'Contractions / 10 min'],
+    'hours_since_active'=>[0,48,'Hours in active labour'],
+    'oxytocin_units'=>[0,100,'Oxytocin (units)'], 'oxytocin_drops'=>[0,120,'Oxytocin (drops/min)'],
+    'apgar_1min'=>[0,10,'APGAR (1 min)'],
     'apgar_5min'=>[0,10,'APGAR (5 min)'],        'weight_g'=>[300,6000,'Birth weight (g)'],
     'blood_loss_ml'=>[0,5000,'Blood loss (ml)'], 'td_dose_no'=>[1,5,'TD dose'],
     'ifa_tabs'=>[0,200,'IFA tablets'],           'gravida'=>[0,20,'Gravida'],
     'para'=>[0,20,'Para'],
+    // POSTNATAL VITALS. The whole postnatal vitals set — mother and newborn — had no server bound at
+    // all: the columns are prefixed m_/nb_ and nothing in this table matched them. A postnatal
+    // temperature of 400 or a newborn weighing 30 kg would have been stored without complaint, and
+    // puerperal sepsis is diagnosed on exactly these numbers.
+    'm_temp'=>[30,43,'Temperature (°C)'],        'm_pulse'=>[30,200,'Pulse'],
+    'm_bp_systolic'=>[60,250,'Systolic BP'],     'm_bp_diastolic'=>[30,160,'Diastolic BP'],
+    'nb_temp'=>[30,43,'Newborn temperature (°C)'],'nb_weight_g'=>[300,8000,'Newborn weight (g)'],
     // `viral_load` IS NOT A NUMBER and must never be listed here. The ANC contact stores
     // suppressed/unsuppressed/pending/not_done and the PMTCT follow-up stores undetectable/detectable.
     // While it was in this table, check_ranges() refused the whole write with "Viral load must be a
@@ -197,9 +237,12 @@ function check_ranges(array $row, array $skip=[]){
     }
   }
   // A diastolic at or above the systolic is a transposition or a typo, never a reading.
-  if(isset($row['bp_systolic'],$row['bp_diastolic']) && is_numeric($row['bp_systolic']) && is_numeric($row['bp_diastolic'])
-     && $row['bp_systolic']!=='' && $row['bp_diastolic']!=='' && ($row['bp_diastolic']+0) >= ($row['bp_systolic']+0)){
-    err('Diastolic BP must be lower than systolic BP.');
+  // Checked on BOTH BP pairs: the postnatal columns are m_bp_* and were not covered.
+  foreach([['bp_systolic','bp_diastolic'],['m_bp_systolic','m_bp_diastolic']] as [$sys,$dia]){
+    if(isset($row[$sys],$row[$dia]) && is_numeric($row[$sys]) && is_numeric($row[$dia])
+       && $row[$sys]!=='' && $row[$dia]!=='' && ($row[$dia]+0) >= ($row[$sys]+0)){
+      err('Diastolic BP must be lower than systolic BP.');
+    }
   }
 }
 // An empty string is not a measurement — it is "not measured", which is NULL. MySQL in strict mode

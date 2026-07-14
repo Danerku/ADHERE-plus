@@ -2684,7 +2684,14 @@ async function delivery(id){
     if(!birthDT()){ modal('Date of birth is missing','Please enter the date the baby was born. It is what puts her on the right line of the MoH delivery register.','risk'); return; }
     // A red PPH alert must be SEEN before the delivery can be filed.
     if(pphCheck() && !window._pphAck){ window._pphAck=true; modal('Postpartum haemorrhage','This delivery meets the PPH criteria (blood loss threshold or atonic uterus). Manage the haemorrhage first. Press Save again to confirm you have seen this and to record it.','risk'); return; }
-    const btn=$('#s'); btn.disabled=true;
+    // SAVED IS SAVED — the button does not come back until she leaves the screen.
+    // Every form here disabled its Save button, awaited the write, and then re-enabled it in `finally`
+    // — which runs the instant the request resolves, while the screen sits there for another 700 ms
+    // waiting for the navigation timeout. A second tap in that window issued a SECOND POST with a
+    // FRESH idempotency key, so the server could not dedupe it: on this screen that is a duplicate
+    // birth in the MoH register, on the death screen a duplicate maternal death. The button is now
+    // released ONLY when the save failed and there is something to retry.
+    const btn=$('#s'); btn.disabled=true; let saved=false;
     try{
       // Newborn data goes ONLY to the babies table (created just below) — it is the single
       // source of truth and the only one that supports twins. delivery_summary no longer
@@ -2700,10 +2707,9 @@ async function delivery(id){
       // A CORRECTION ENDS HERE. She is already 'delivered', her newborns are already recorded, and
       // sending her back to the newborn screen would invite a phantom twin. Go back to her record.
       if(_edD){
-        EDIT_DEL=null; window._pphAck=false;
+        EDIT_DEL=null; window._pphAck=false; saved=true;
         $('#m').textContent=' corrected'; toast('The delivery record was corrected','ok');
         setTimeout(()=>location.hash='#patient/'+id,700);
-        $('#s').disabled=false;
         return;
       }
       await api('PATCH','episodes/'+id,{status:'delivered'});
@@ -2711,11 +2717,11 @@ async function delivery(id){
       // weight/sex/APGAR — fields it could never complete (there is no babies PATCH), and if the
       // provider then used the Newborn screen it created a PHANTOM TWIN that inflated birth counts
       // and the MoH register. One place records a newborn: the Newborn screen, fully validated.
-      window._pphAck=false;
+      window._pphAck=false; saved=true;
       $('#m').textContent=' saved'; toast('Delivery recorded — now record the newborn','ok');
       setTimeout(()=>location.hash='#baby/'+id,700);
     }catch(e){ toast('Could not save delivery — '+(e.message||'error')+'. Not saved.'); }
-    finally{ $('#s').disabled=false; } };
+    finally{ if(!saved) $('#s').disabled=false; } };
   const note=document.createElement('p'); note.className='muted'; note.style.cssText='font-size:12px;margin-top:6px'; note.textContent='For twins/multiples, save this (baby 1), then add the others on the Newborn screen.'; $('#app').querySelector('.card').appendChild(note);
 }
 
@@ -2844,10 +2850,17 @@ async function ancScreen(id){
     const u=unanswered();
     if(u.length){ modal('Screening incomplete', u.length+' item(s) are still unanswered. The National ANC Guideline requires every risk condition to be assessed — leaving an item blank is not the same as answering "No". Please complete them all.','risk');
       u[0].scrollIntoView({block:'center'}); return; }
-    const rows=sels().map(s=>({episode_id:+id,item_code:s.dataset.code,item_group:s.dataset.group,response:s.value}));
-    const nv=($('#ancnote').value||'').slice(0,255);
-    if(nv) rows.push({episode_id:+id,item_code:'PLAN_NOTE',item_group:'care_plan',response:nv});
-    const r=await api('POST','anc_screening',rows); $('#ancm').textContent=(r&&r.ids)?' saved ('+rows.length+' items)':' '+((r&&r.error)||'saved offline'); };
+    // This save had NO double-submit guard at all — the only clinical form in the app without one.
+    // Two taps posted the whole 31-item screening array twice.
+    const sb=$('#ancsave'); if(sb.disabled) return; sb.disabled=true;
+    try{
+      const rows=sels().map(s=>({episode_id:+id,item_code:s.dataset.code,item_group:s.dataset.group,response:s.value}));
+      const nv=($('#ancnote').value||'').slice(0,255);
+      if(nv) rows.push({episode_id:+id,item_code:'PLAN_NOTE',item_group:'care_plan',response:nv});
+      const r=await api('POST','anc_screening',rows);
+      $('#ancm').textContent=(r&&r.ids)?' saved ('+rows.length+' items)':' '+((r&&r.error)||'saved offline');
+    } finally { sb.disabled=false; }   // the screen does not navigate away, so the button must come back
+  };
 }
 
 async function ancList(){
@@ -3369,7 +3382,7 @@ async function ancVisits(id){
       modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this contact.</i>','risk');
       return; }
     window._ancAck=false;
-    const b=$('#asave'); b.disabled=true;
+    const b=$('#asave'); if(b.disabled) return; b.disabled=true; let _saved=false;
     try{
       const su=['none','alcohol','tobacco','khat','caffeine','other'].filter(s=>tk('su_'+s)).join(',')||null;
       const hbv=+hb_.value||null, muv=+muac.value||null, wtv=+wt.value||null;
@@ -3401,8 +3414,10 @@ async function ancVisits(id){
     // A PATCH returns {ok:true}, a POST returns {ids:[...]} — accept either as success.
     const ok = r && (r.ids || r.ok || r.queued);
     $('#am').textContent = ok ? (editing?' corrected':' saved') : (' '+((r&&r.error)||'error'));
-    if(ok && !r.queued){ EDIT_ANC=null; setTimeout(()=>ancVisits(id),500); }
-    } finally{ b.disabled=false; } };
+    if(ok && !r.queued){ EDIT_ANC=null; _saved=true; setTimeout(()=>ancVisits(id),500); }
+    // The button stays down until the screen re-renders. Releasing it here left a 500 ms window in
+    // which a second tap wrote a SECOND contact for the same visit.
+    } finally{ if(!_saved) b.disabled=false; } };
 }
 
 let EDIT_PNC=null;                         // the PNC visit being corrected, or null when recording a new one
@@ -3620,7 +3635,7 @@ async function pncVisits(id){
       modal(reds[0][1], reds.map(a=>'<b>'+a[1]+'</b><br>'+a[2]).join('<br><br>')+'<br><br><i>Press Save again to record this visit.</i>','risk');
       return; }
     window._pncAck=false;
-    const b=$('#psave'); b.disabled=true; try{ await savePncId();
+    const b=$('#psave'); if(b.disabled) return; b.disabled=true; let _saved=false; try{ await savePncId();
     const editingP = EDIT_PNC && EDIT_PNC.id;
     const r=await api(editingP?'PATCH':'POST', editingP?('pnc_visits/'+EDIT_PNC.id):'pnc_visits',
       {episode_id:+id,visit_date:ecGet('vd'),m_temp:+mt.value||null,m_bp_systolic:+bps.value||null,m_bp_diastolic:+bpd.value||null,m_pulse:+pl.value||null,bleeding:bl.value,breast:br.value,mood:md.value,uterine_tone:(ut.value||null),perineum:(pw.value||null),mother_breastfeeding:(mbf.value||null),pp_fp:(ppf.value||null),ifa_continued:(ifc.value||null),nb_temp:+nt.value||null,nb_feeding:nf.value,cord:cd.value,nb_convulsions:(ncv.value||null),nb_fast_breathing:(nfb.value||null),nb_chest_indrawing:(nci.value||null),nb_lethargy:(nlt.value||null),nb_jaundice:(njd.value||null),nb_kmc:(nkmc.value||null),nb_immunization:(nimm.value||null),nb_eid:(neid.value||null),danger_note:dn.value,
@@ -3633,8 +3648,8 @@ async function pncVisits(id){
     ippfp_acceptor:(pacc.value||null),ippfp_method:(pmth.value||null),remark:prmk.value});
     const okP = r && (r.ids || r.ok || r.queued);
     $('#pm').textContent = okP ? (editingP?' corrected':' saved') : (' '+((r&&r.error)||'error'));
-    if(okP && !r.queued){ EDIT_PNC=null; setTimeout(()=>pncVisits(id),500); }
-    } finally{ b.disabled=false; } };
+    if(okP && !r.queued){ EDIT_PNC=null; _saved=true; setTimeout(()=>pncVisits(id),500); }
+    } finally{ if(!_saved) b.disabled=false; } };
 }
 
 // Which baby (if any) we are EDITING rather than adding. Module-scoped so the Edit button in the
@@ -3857,7 +3872,7 @@ async function babiesScreen(id){
     if(!checkRanges([['wg','birth_weight_g'],['a1','apgar'],['a5','apgar']])) return;
     const blocking=nbIssues().filter(i=>i.block);
     if(blocking.length){ modal('Check the newborn record',blocking.map(i=>i.t).join('\n\n'),'risk'); return; }
-    const b=$('#bsave'); b.disabled=true; try{
+    const b=$('#bsave'); if(b.disabled) return; b.disabled=true; let _saved=false; try{
     // CORRECT the existing baby, or add a new one. Until now the screen could only ADD — so a DBS
     // result that came back a week later could only be recorded by saving the form again, which
     // inserted a SECOND baby at birth_order = past.length + 1. A phantom twin: it inflated births
@@ -3882,8 +3897,9 @@ async function babiesScreen(id){
     death_age_days:numOrNull(bdd.value),death_age_hours:numOrNull(bdh.value),death_cause:(+bdc.value||null)});
     const ok = r && (r.ids || r.ok || r.queued);
     $('#bm').textContent = ok ? (editing?' correction saved':' added') : ' '+((r&&r.error)||'error');
-    if(ok && !r.queued){ EDIT_BABY=null; setTimeout(()=>babiesScreen(id),400); }
-    } finally{ b.disabled=false; } };
+    // Held down until the screen re-renders: the 400 ms window here was a phantom twin.
+    if(ok && !r.queued){ EDIT_BABY=null; _saved=true; setTimeout(()=>babiesScreen(id),400); }
+    } finally{ if(!_saved) b.disabled=false; } };
 }
 
 let EDIT_VITAL=null;                       // the vitals row being corrected, or null when recording new
@@ -3944,7 +3960,7 @@ async function vitalsScreen(id){
   ['bps','bpd','pl','tp','rr','sp'].forEach(x=>{ const e=$('#'+x); if(e) e.oninput=showMeows; }); showMeows();
   $('#vsave').onclick=async()=>{
     if(!checkRanges([['bps','bp_systolic'],['bpd','bp_diastolic'],['pl','pulse'],['tp','temperature'],['rr','resp_rate'],['sp','spo2']])) return;
-    const b=$('#vsave'); b.disabled=true; try{
+    const b=$('#vsave'); if(b.disabled) return; b.disabled=true; let _saved=false; try{
     const editingV = EDIT_VITAL && EDIT_VITAL.id;
     // When correcting, KEEP the original observation time — the reading was taken then, not now.
     const r=await api(editingV?'PATCH':'POST', editingV?('maternal_vitals/'+EDIT_VITAL.id):'maternal_vitals',
@@ -3953,8 +3969,8 @@ async function vitalsScreen(id){
        temperature:numOrNull(tp.value),resp_rate:numOrNull(rr.value),spo2:numOrNull(sp.value),note:ntt.value});
     const okV = r && (r.ids || r.ok || r.queued);
     $('#vm').textContent = okV ? (editingV?' corrected':' recorded') : (' '+((r&&r.error)||'error'));
-    if(okV && !r.queued){ EDIT_VITAL=null; setTimeout(()=>vitalsScreen(id),400); }
-    } finally{ b.disabled=false; } };
+    if(okV && !r.queued){ EDIT_VITAL=null; _saved=true; setTimeout(()=>vitalsScreen(id),400); }
+    } finally{ if(!_saved) b.disabled=false; } };
 }
 
 async function handoverScreen(id){
@@ -5725,7 +5741,7 @@ async function abortionScreen(id){
     if(!$('#actype').value){ modal('What happened?','Record whether this was a miscarriage, safe abortion care, the complications of an unsafe abortion, or an ectopic pregnancy. They are different events and must not be counted as the same thing.','risk'); return; }
     if(!$('#acout').value){ modal('Outcome','Record what happened to her: recovered, referred, or died.','risk'); return; }
     if(!checkRanges([['achb','hgb'],['acbl','blood_loss_ml'],['acga','ga_weeks']])) return;
-    const b=$('#acsave'); b.disabled=true;
+    const b=$('#acsave'); if(b.disabled) return; b.disabled=true; let _saved=false;
     try{
       const body={episode_id:+id, care_date:ecGet('acd'), ga_weeks:numOrNull($('#acga').value),
         loss_type:$('#actype').value, presentation:($('#acpres').value||null),
@@ -5738,6 +5754,7 @@ async function abortionScreen(id){
         remark:($('#acrmk').value||null)};
       const r = rec ? await api('PATCH','abortion/'+rec.id, body) : await api('POST','abortion', body);
       if(r && (r.ids||r.ok||r.id||r.queued)){
+        _saved=true;
         $('#acm').textContent=' saved';
         if($('#acout').value==='died'){ setTimeout(()=>location.hash='#death/'+id, 600); return; }
         // She is no longer pregnant. Her episode of care ends here, not on an antenatal worklist.
@@ -5745,7 +5762,7 @@ async function abortionScreen(id){
         toast('Recorded. Her episode is closed — she is no longer on the antenatal list.','ok');
         setTimeout(()=>location.hash='#patient/'+id, 900);
       } else $('#acm').textContent=' '+((r&&r.error)||'error');
-    } finally { b.disabled=false; }
+    } finally { if(!_saved) b.disabled=false; }
   };
 }
 
@@ -5788,16 +5805,18 @@ async function deathScreen(id){
    <p class="muted" style="font-size:12px;margin-top:8px">Recording this closes her episode of care. Leaving a woman who has died on the labour-ward worklist for the next shift to follow up is its own cruelty.</p>
   </div>`;
   $('#mdsave').onclick=async()=>{
-    const b=$('#mdsave'); b.disabled=true;
+    // A duplicate maternal death is the worst thing this window could produce: it is the number the
+    // facility is reviewed on, and it would be reported twice to MDSR.
+    const b=$('#mdsave'); if(b.disabled) return; b.disabled=true; let _saved=false;
     try{
       const r=await api('POST','maternal_deaths',{woman_id:+W.woman_id, episode_id:+id,
         death_datetime:($('#mdt').value||'').replace('T',' ')+':00',
         phase:$('#mdp').value, ga_weeks:numOrNull($('#mdg').value), place:$('#mdpl').value,
         cause:$('#mdc').value, cause_note:($('#mdcn').value||null), contributing:($('#mdct').value||null),
         reported_mdsr:tk('mdr')});
-      if(r&&(r.id||r.ok||r.queued)){ toast('Recorded. Her episode of care is closed.','ok'); setTimeout(()=>location.hash='#patient/'+id,900); }
+      if(r&&(r.id||r.ok||r.queued)){ _saved=true; toast('Recorded. Her episode of care is closed.','ok'); setTimeout(()=>location.hash='#patient/'+id,900); }
       else $('#mdm').textContent=' '+((r&&r.error)||'error');
-    } finally { b.disabled=false; }
+    } finally { if(!_saved) b.disabled=false; }
   };
 }
 

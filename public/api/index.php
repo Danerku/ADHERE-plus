@@ -388,8 +388,11 @@ try {
   // exactly the thing a supervisor should be told about, without blocking the provider from doing it.
   //
   // Voiding a WOMAN voids her episodes with her; otherwise they would sit in the labour ward with no
-  // patient attached.
+  // patient attached — and RESTORING her must put back exactly those, and nothing else. The cascade
+  // stamps this prefix on the reason so the two cases can be told apart. (The wording is unchanged
+  // from what was already being written, so episodes voided before this change are still recognised.)
   // ==========================================================================================
+  if(!defined('VOID_CASCADE_PREFIX')) define('VOID_CASCADE_PREFIX','the patient record was voided: ');
   if ($r==='void' && $m==='POST'){
     $u=require_role(['provider','admin']);              // super_admin passes via require_role's admin fallback
     $b=body();
@@ -404,9 +407,10 @@ try {
       if(!$row) err('not found',404);
       db()->prepare("UPDATE women SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
           ->execute([$u['id'],$reason,$eid]);
-      // her episodes go with her
+      // her episodes go with her. The reason carries VOID_CASCADE_PREFIX so that restoring her later
+      // restores exactly these, and not an episode that was deliberately removed on its own.
       db()->prepare("UPDATE episodes SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE woman_id=? AND voided=0")
-          ->execute([$u['id'],'the patient record was voided: '.$reason,$eid]);
+          ->execute([$u['id'],VOID_CASCADE_PREFIX.$reason,$eid]);
       // ...and so do her queued SMS reminders. A removed patient must not be texted about an
       // appointment for a pregnancy the facility has just said it recorded by mistake.
       db()->prepare("UPDATE reminders SET status='skipped' WHERE woman_id=? AND status='pending'")->execute([$eid]);
@@ -442,7 +446,15 @@ try {
       $q=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=?"); $q->execute([$eid,$u['facility_id']]);
       if(!$q->fetch()) err('not found',404);
       db()->prepare("UPDATE women SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$eid]);
-      db()->prepare("UPDATE episodes SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE woman_id=?")->execute([$eid]);
+      // RESTORE ONLY WHAT THE WOMAN-VOID TOOK DOWN WITH HER.
+      // This used to restore EVERY episode she has, which quietly undid deliberate, separate deletions:
+      // an episode opened on the wrong patient and voided on its own came back — with all its clinical
+      // rows — onto the worklists, the registers and the MoH counts, the moment someone restored her.
+      // The cascade stamps its own reason (VOID_CASCADE_PREFIX), so it can be told apart from an
+      // episode a clinician removed on purpose. Only the cascaded ones come back.
+      db()->prepare("UPDATE episodes SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL
+                      WHERE woman_id=? AND voided=1 AND void_reason LIKE ?")
+          ->execute([$eid, VOID_CASCADE_PREFIX.'%']);
       // Put back the appointment reminders that were skipped when she was removed — but only the ones
       // still in the future. (The generator dedupes on woman+date, so without this she would silently
       // never be reminded again about an appointment that was already in the queue.)
@@ -685,17 +697,9 @@ try {
       // empty — the app looked like it had lost every patient.)
       // voided=0 throughout: care recorded on a REMOVED episode must not go on driving her risk flags,
       // her anaemia grade or her gestational age. The episode was removed because it should not exist.
-      $ancEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_visits av JOIN episodes e2 ON e2.voided=0 AND e2.id=av.episode_id WHERE e2.woman_id=w.id AND ($cond))"; };
-      $scrEx=function($cond){ return "EXISTS(SELECT 1 FROM anc_risk_screening a JOIN episodes e3 ON e3.voided=0 AND e3.id=a.episode_id WHERE e3.woman_id=w.id AND ($cond))"; };
-      // Severe hypertension recorded at ANC (guideline: >=160/110 is severe, and it is an
-      // emergency). This was absent entirely: a BP of 170/115 at an ANC contact flagged nothing.
-      $hr="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes'"
-        ." OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1"
-        ." OR ".$ancEx("av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1")
-        ." OR ".$ancEx("av.bp_systolic>=160 OR av.bp_diastolic>=110")
-        ." OR ".$ancEx("av.urine_protein IN ('+','++','+++')")   // ANY dipstick positive is proteinuria (was '%++%', which missed 1+)
-        ." OR ".$scrEx("a.response='yes'")
-        .")";
+      // The rule lives in lib.php (hr_sql) and is shared with the dashboard, which used to carry its
+      // own, narrower copy — so the two screens disagreed about who was high risk.
+      $hr = hr_sql();
       // "For client X, what conditions make her high risk?" — a flag with no reason is a dead end.
       // Return the ACTUAL reasons as codes so the worklist can explain itself and state the
       // next intervention, without the provider having to open her record to guess.
@@ -887,7 +891,14 @@ try {
   // ---- partograph observations ----
   if ($r==='observations'){
     if($m==='GET'){ require_ep($_GET['episode']??0); $st=db()->prepare("SELECT * FROM partograph_obs WHERE episode_id=? ORDER BY obs_datetime"); $st->execute([$_GET['episode']]); out($st->fetchAll()); }
-    if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0); $b['recorded_by']=$u['id'];
+    if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0);
+      // THE PARTOGRAPH HAD NO SERVER-SIDE VALIDATION AT ALL — the one screen where the numbers are
+      // taken every half hour under pressure, and the one whose numbers the intrapartum model reads
+      // straight back out. A cervix of 99 cm, a fetal heart of 9999 and a systolic of 900 were all
+      // accepted and stored. The bounds are the same ones every other clinical write has had.
+      $b = blank_to_null($b);
+      check_ranges($b);
+      $b['recorded_by']=$u['id'];
       $oid=insert('partograph_obs',array_intersect_key($b,array_flip(['episode_id','obs_datetime','hours_since_active','fetal_heart_rate','amniotic_fluid','moulding','caput','cervix_cm','descent_head','contractions_per10','contraction_strength','oxytocin_units','oxytocin_drops','drugs_iv_fluids','bp_systolic','bp_diastolic','pulse','temperature','urine_protein','urine_acetone','urine_volume','recorded_by'])));
       audit('create_obs','partograph_obs',$oid); out(['id'=>$oid],201); }
   }
@@ -1200,7 +1211,14 @@ try {
                   (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_status,
                   (SELECT MAX(f.visit_date) FROM pmtct_followup f WHERE f.mother_id=pmtct_mothers.id AND f.subject='mother') AS last_seen";
       }
-      $st=db()->prepare("SELECT $cols FROM `$tbl` WHERE facility_id=?$extra AND (COALESCE(mrn,'') LIKE ? OR COALESCE(name,'') LIKE ?) ORDER BY id DESC LIMIT 300");
+      // THE VOID PROMISE APPLIES HERE TOO. A removed patient "disappears from every worklist, search,
+      // register, count and export" — except she did not, in any of these modules. They filter on
+      // facility_id and never join `women`, so a woman who had been removed as a duplicate stayed fully
+      // searchable in FP, LAFP, Immunization and PMTCT, and I found one in the live immunization
+      // worklist. The link is optional (the FP register includes men, the HPV register schoolgirls), so
+      // a client with NO woman_id is untouched — only a client linked to a REMOVED woman drops out.
+      $notVoided = " AND NOT EXISTS(SELECT 1 FROM women vw WHERE vw.id=`$tbl`.woman_id AND vw.voided=1)";
+      $st=db()->prepare("SELECT $cols FROM `$tbl` WHERE facility_id=?$extra$notVoided AND (COALESCE(mrn,'') LIKE ? OR COALESCE(name,'') LIKE ?) ORDER BY id DESC LIMIT 300");
       $st->execute([$u['facility_id'],$q,$q]); out($st->fetchAll());
     }
     if($m==='POST'){ $u=require_role($writeRoles); $b=body();
@@ -1297,7 +1315,17 @@ try {
     $since = $days>0 ? " AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : "";
     $one=function($sql) use($fid){ $st=db()->prepare($sql); $st->execute([$fid]); $r=$st->fetch(); return (int)($r['c']??0); };
     $grp=function($sql) use($fid){ $st=db()->prepare($sql); $st->execute([$fid]); $o=[]; foreach($st->fetchAll() as $x){ $o[(string)$x['k']]=(int)$x['c']; } return $o; };
-    $hrx="(w.prior_cs='yes' OR w.prior_stillbirth='yes' OR w.prior_pph='yes' OR w.prior_preeclampsia='yes' OR w.prior_obstructed='yes' OR w.chronic_htn='yes' OR w.diabetes='yes' OR w.cardiac_renal='yes' OR (w.age IS NOT NULL AND (w.age<19 OR w.age>35)) OR w.pregnancy_planned=0 OR w.rh_factor='neg' OR w.hiv_known_positive=1 OR EXISTS(SELECT 1 FROM anc_visits av WHERE av.episode_id=e.id AND (av.anaemia_grade IN ('moderate','severe') OR av.muac_flag=1)) OR EXISTS(SELECT 1 FROM anc_risk_screening a WHERE a.episode_id=e.id AND a.response='yes'))";
+    // A REMOVED PATIENT MUST NOT GO ON BEING COUNTED. The maternity blocks all resolve through
+    // episodes/women and were already clean; the FP, LAFP, immunization, pregnancy-test and PMTCT
+    // counts below read their own client tables directly and never joined `women` — so a woman voided
+    // as a duplicate still inflated every one of those tiles. In all of these queries the client table
+    // is aliased `e` and carries an optional woman_id: a client with no linked patient record (a man in
+    // the FP register, a schoolgirl in the HPV register) is untouched.
+    $nvE = " AND NOT EXISTS(SELECT 1 FROM women vw WHERE vw.id=e.woman_id AND vw.voided=1)";
+    // ONE definition, shared with the worklist. This used to be a second, episode-scoped copy that
+    // omitted severe hypertension and proteinuria entirely — so the number on this dashboard and the
+    // list of women the provider actually works from were computed from different rules.
+    $hrx = hr_sql();
     out([
      'days'=>$days,
      'caseload'=>[
@@ -1352,62 +1380,62 @@ try {
      ],
      // ---- Family planning ----
      'fp'=>[
-       'clients'      =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'new_acceptor' =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=? AND e.acceptor='new'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'repeat_acceptor'=>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=? AND e.acceptor='repeat'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'lafp_removals'=>$one("SELECT COUNT(*) c FROM lafp_removals e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'clients'      =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=?".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'new_acceptor' =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=? AND e.acceptor='new'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'repeat_acceptor'=>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=? AND e.acceptor='repeat'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'lafp_removals'=>$one("SELECT COUNT(*) c FROM lafp_removals e WHERE e.facility_id=?".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
      ],
-     'fp_methods'=>$grp("SELECT v.method k, COUNT(*) c FROM fp_visits v JOIN fp_clients e ON e.id=v.fp_client_id WHERE e.facility_id=? AND v.method IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY v.method"),
-     'lafp_reasons'=>$grp("SELECT e.removal_reason k, COUNT(*) c FROM lafp_removals e WHERE e.facility_id=? AND e.removal_reason IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.removal_reason"),
+     'fp_methods'=>$grp("SELECT v.method k, COUNT(*) c FROM fp_visits v JOIN fp_clients e ON e.id=v.fp_client_id WHERE e.facility_id=? AND v.method IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY v.method"),
+     'lafp_reasons'=>$grp("SELECT e.removal_reason k, COUNT(*) c FROM lafp_removals e WHERE e.facility_id=? AND e.removal_reason IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.removal_reason"),
 
      // ---- Immunization ----
      'immunization'=>[
-       'td_clients' =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'td2_plus'   =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td' AND (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=e.id)>=2".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'td_pregnant'=>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td' AND e.pregnant=1".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'hpv_girls'  =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='HPV'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'hpv_complete'=>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='HPV' AND (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=e.id)>=2".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'td_clients' =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'td2_plus'   =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td' AND (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=e.id)>=2".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'td_pregnant'=>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='Td' AND e.pregnant=1".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'hpv_girls'  =>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='HPV'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'hpv_complete'=>$one("SELECT COUNT(*) c FROM immunization_clients e WHERE e.facility_id=? AND e.programme='HPV' AND (SELECT COUNT(*) FROM immunization_doses d WHERE d.client_id=e.id)>=2".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
      ],
 
      // ---- Pregnancy test: the front door, and whether both exits are used ----
      'pregnancy_test'=>[
-       'tested'   =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'positive' =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='positive'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'negative' =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'linked_anc'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.linked_episode_id IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'negative_to_fp'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative' AND e.linked_fp_client_id IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'tested'   =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=?".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'positive' =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='positive'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'negative' =>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'linked_anc'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.linked_episode_id IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'negative_to_fp'=>$one("SELECT COUNT(*) c FROM pregnancy_tests e WHERE e.facility_id=? AND e.result='negative' AND e.linked_fp_client_id IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
      ],
 
      // ---- PMTCT: the cascade, mother and infant ----
      // The only questions that matter: is she on ART and suppressed, and did the infant
      // get tested at ~6 weeks and end up negative?
      'pmtct'=>[
-       'mothers'      =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'newly_diagnosed'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.newly_diagnosed IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'known_positive'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.known_positive IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'on_art'       =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (e.art_start_date IS NOT NULL OR e.known_positive=1)".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'art_in_labour'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.art_during_labour='Y'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'mothers'      =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=?".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'newly_diagnosed'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.newly_diagnosed IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'known_positive'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.known_positive IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'on_art'       =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (e.art_start_date IS NOT NULL OR e.known_positive=1)".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'art_in_labour'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.art_during_labour='Y'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        // These MUST read the LATEST value per mother, not "ever". Counting "ever" meant a woman
        // who suppressed at month 3 and rebounded at month 9 was counted as suppressed AND
        // detectable, and a woman traced back after being lost stayed "lost" forever —
        // systematically overstating suppression, which is the headline PMTCT indicator.
-       'vl_done'      =>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'vl_suppressed'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='undetectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'vl_detectable'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='detectable'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'ltf'          =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='ltf'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_done'      =>$one("SELECT COUNT(DISTINCT f.mother_id) c FROM pmtct_followup f JOIN pmtct_mothers e ON e.id=f.mother_id WHERE e.facility_id=? AND f.subject='mother' AND f.viral_load IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_suppressed'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='undetectable'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'vl_detectable'=>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='detectable'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'ltf'          =>$one("SELECT COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=e.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1)='ltf'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        // Transmission that already happened — the number this module exists to drive to zero.
-       'infant_positive'=>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result='P'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'infants'      =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'infant_arv'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.arv_start_date IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'pcr_done'     =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infant_positive'=>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result='P'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infants'      =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=?".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infant_arv'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.arv_start_date IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'pcr_done'     =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        // EID timeliness: the DNA/PCR is meant to happen at about 6 weeks of age
-       'pcr_by_8wk'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL AND i.pcr_age_weeks<=8".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'pcr_positive' =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result='P'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'infant_cpt'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.cpt_age_weeks IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'discharged_neg'=>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.outcome='discharged_negative'".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'pcr_by_8wk'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result IS NOT NULL AND i.pcr_age_weeks<=8".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'pcr_positive' =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.pcr_result='P'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'infant_cpt'   =>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.cpt_age_weeks IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'discharged_neg'=>$one("SELECT COUNT(*) c FROM pmtct_infants i JOIN pmtct_mothers e ON e.id=i.mother_id WHERE e.facility_id=? AND i.outcome='discharged_negative'".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
      ],
-     'pmtct_entry'=>$grp("SELECT CASE e.newly_diagnosed WHEN 1 THEN 'ANC' WHEN 2 THEN 'Labour & delivery' WHEN 3 THEN 'Postpartum' ELSE 'Known positive' END k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY k"),
-     'pmtct_feeding'=>$grp("SELECT e.feeding_option k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.feeding_option IS NOT NULL".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.feeding_option"),
+     'pmtct_entry'=>$grp("SELECT CASE e.newly_diagnosed WHEN 1 THEN 'ANC' WHEN 2 THEN 'Labour & delivery' WHEN 3 THEN 'Postpartum' ELSE 'Known positive' END k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=?".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY k"),
+     'pmtct_feeding'=>$grp("SELECT e.feeding_option k, COUNT(*) c FROM pmtct_mothers e WHERE e.facility_id=? AND e.feeding_option IS NOT NULL".$nvE.($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")." GROUP BY e.feeding_option"),
 
      'newborn_care'=>[
        'lbw'         =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.prob_lbw=1$since"),
@@ -1527,15 +1555,23 @@ try {
         JOIN episodes e ON e.voided=0 AND e.id=p.episode_id JOIN women w ON w.id=e.woman_id
         WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY w.mrn, p.visit_date");
     } elseif($type==='fp'){
+      // NOT_VOIDED: a removed patient must not print into an MoH register. The ANC, delivery and PNC
+      // registers exclude her (through e.voided=0); these four did not, so she was removed from the
+      // maternity record and went on being reported to the Ministry from the FP, LAFP, immunization
+      // and PMTCT registers. A client with no woman_id (a man in the FP register, a schoolgirl in the
+      // HPV register) is not linked to a patient record and is unaffected.
+      $nv = function($alias){ return " AND NOT EXISTS(SELECT 1 FROM women vw WHERE vw.id=$alias.woman_id AND vw.voided=1)"; };
       // One row per FP visit (the paper register gives each client up to 5 visit rows).
       $st=db()->prepare("SELECT v.*, c.mrn, c.name, c.age, c.sex, c.reg_date, c.acceptor,
              c.hiv_offered, c.hiv_performed, c.hiv_result, c.hiv_counselled, c.hiv_linked_art,
              c.target_pop_code, c.td_checked, c.iud_contraindicated
         FROM fp_visits v JOIN fp_clients c ON c.id=v.fp_client_id
-       WHERE c.facility_id=? AND v.visit_date BETWEEN ? AND ? ORDER BY c.mrn, v.visit_no");
+       WHERE c.facility_id=?".$nv('c')." AND v.visit_date BETWEEN ? AND ? ORDER BY c.mrn, v.visit_no");
     } elseif($type==='lafp'){
-      $st=db()->prepare("SELECT * FROM lafp_removals WHERE facility_id=? AND removal_date BETWEEN ? AND ? ORDER BY removal_date, mrn");
+      $nv = function($alias){ return " AND NOT EXISTS(SELECT 1 FROM women vw WHERE vw.id=$alias.woman_id AND vw.voided=1)"; };
+      $st=db()->prepare("SELECT * FROM lafp_removals l WHERE l.facility_id=?".$nv('l')." AND l.removal_date BETWEEN ? AND ? ORDER BY l.removal_date, l.mrn");
     } elseif($type==='td' || $type==='hpv'){
+      $nv = function($alias){ return " AND NOT EXISTS(SELECT 1 FROM women vw WHERE vw.id=$alias.woman_id AND vw.voided=1)"; };
       $prog = ($type==='td') ? 'Td' : 'HPV';
       $st=db()->prepare("SELECT c.*,
              MAX(CASE WHEN d.dose_no=1 THEN d.dose_date END) AS dose1,
@@ -1544,10 +1580,11 @@ try {
              MAX(CASE WHEN d.dose_no=4 THEN d.dose_date END) AS dose4,
              MAX(CASE WHEN d.dose_no=5 THEN d.dose_date END) AS dose5
         FROM immunization_clients c LEFT JOIN immunization_doses d ON d.client_id=c.id
-       WHERE c.facility_id=? AND c.programme=".db()->quote($prog)."
+       WHERE c.facility_id=? AND c.programme=".db()->quote($prog).$nv('c')."
          AND (c.reg_date BETWEEN ? AND ? OR d.dose_date BETWEEN ".db()->quote($from)." AND ".db()->quote($to).")
        GROUP BY c.id ORDER BY c.mrn");
     } elseif($type==='pmtct'){
+      $nv = function($alias){ return " AND NOT EXISTS(SELECT 1 FROM women vw WHERE vw.id=$alias.woman_id AND vw.voided=1)"; };
       // One row per HIV-exposed infant, falling back to a mother-only row when she has not
       // yet delivered — the paper register works the same way: the mother's line is opened at
       // booking and the infant columns are filled in later.
@@ -1556,7 +1593,7 @@ try {
              (SELECT f.viral_load FROM pmtct_followup f WHERE f.mother_id=p.id AND f.subject='mother' AND f.viral_load IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS last_vl,
              (SELECT f.status FROM pmtct_followup f WHERE f.mother_id=p.id AND f.subject='mother' AND f.status IS NOT NULL ORDER BY f.month_no DESC LIMIT 1) AS mother_status
         FROM pmtct_mothers p LEFT JOIN pmtct_infants i ON i.mother_id=p.id
-       WHERE p.facility_id=? AND COALESCE(p.booking_date, DATE(p.created_at)) BETWEEN ? AND ?
+       WHERE p.facility_id=?".$nv('p')." AND COALESCE(p.booking_date, DATE(p.created_at)) BETWEEN ? AND ?
        ORDER BY p.booking_date, p.id, i.id");
     } elseif($type==='pregtally'){
       // The MoH pregnancy-test artifact is a TALLY SHEET, not a line register:
@@ -1613,7 +1650,14 @@ try {
     foreach($items as $it){ $ep=$it['entity']??''; $payload=$it['payload']??[];
       $map=['observations'=>'partograph_obs','checklist'=>'checklist_responses','danger_signs'=>'danger_signs'];
       $sallow=['partograph_obs'=>['episode_id','obs_datetime','hours_since_active','fetal_heart_rate','moulding','cervix_cm','contractions_per10','bp_systolic','temperature','recorded_by'],'checklist_responses'=>['episode_id','pause_point','item_code','response','recorded_by'],'danger_signs'=>['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']];
-      if(isset($map[$ep])){ require_ep($payload['episode_id']??0); $payload['recorded_by']=$u['id']; $payload=array_intersect_key($payload,array_flip($sallow[$map[$ep]])); $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert($map[$ep],$payload)]; } }
+      // The replay path was the LAST unvalidated door into the record: a queued write from a tablet
+      // running an older build — precisely the case the bounds exist for — went straight to insert().
+      // It is validated exactly like the online write now, and a bad value comes back 400, which is
+      // the status that lands it on the failed-entries screen instead of retrying for ever.
+      if(isset($map[$ep])){ require_ep($payload['episode_id']??0);
+        $payload = blank_to_null($payload);
+        check_ranges($payload);
+        $payload['recorded_by']=$u['id']; $payload=array_intersect_key($payload,array_flip($sallow[$map[$ep]])); $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert($map[$ep],$payload)]; } }
     audit('sync',null,null,['count'=>count($applied)]); out(['applied'=>$applied]);
   }
 
@@ -1625,7 +1669,10 @@ try {
     $days=(int)($_GET['days']??0); if($days<0)$days=0; if($days>3660)$days=3660;   // 0 = all time; sanitized int, safe to inline
     $dc=function($col) use($days){ return $days>0 ? " AND $col >= DATE_SUB(CURDATE(), INTERVAL $days DAY)" : ""; };
     $grp=function($sql) use($ids){ $st=db()->prepare($sql); $st->execute($ids); $o=[]; foreach($st->fetchAll() as $x){ $o[(int)$x['fid']]=(int)$x['c']; } return $o; };
-    $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE service_category='labour' AND facility_id IN ($in)".$dc('created_at')." GROUP BY facility_id");
+    // voided=0 — this was the ONLY rollup on this screen without it, and it is the DENOMINATOR of
+    // partograph_completion. The numerator (partographs_started) excludes voided episodes, so every
+    // removed labour episode quietly dragged the facility's headline quality indicator down.
+    $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE voided=0 AND service_category='labour' AND facility_id IN ($in)".$dc('created_at')." GROUP BY facility_id");
     $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.voided=0 AND e.id=o.episode_id WHERE e.facility_id IN ($in)".$dc('o.recorded_at')." GROUP BY e.facility_id");
     $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
     $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
