@@ -1,8 +1,21 @@
-const CACHE='adhere-v82';
+const CACHE='adhere-v83';
 const SHELL=['./','./index.html','./app.js','./styles.css','./config.js','./manifest.webmanifest',
   './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js','./model/lcg.js',
   './model/risk_model.json','./model/newborn_model.json','./model/mch_rules.json'];
-self.addEventListener('install', e=>{ e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL.filter(u=>u))).then(()=>self.skipWaiting())); });
+
+// A NEW CACHE MUST BE FILLED FROM THE NETWORK, NOT FROM THE BROWSER'S OLD ONE.
+//
+// `cache.addAll(SHELL)` fetches through the browser's ordinary HTTP cache. So a device that already
+// held an old copy of a model file could satisfy the install from that stale copy, and the BRAND NEW
+// service-worker cache would be populated with the OLD MODEL. Caught live: after the retrain, cache
+// adhere-v82 held the retrained intrapartum model and the PREVIOUS newborn model — a tablet was
+// scoring newborns with a model we had replaced, and nothing anywhere said so.
+//
+// `cache:'reload'` bypasses the HTTP cache: a new cache version now means new files, every time.
+self.addEventListener('install', e=>{ e.waitUntil(
+  caches.open(CACHE)
+    .then(c=>c.addAll(SHELL.filter(u=>u).map(u=>new Request(u,{cache:'reload'}))))
+    .then(()=>self.skipWaiting())); });
 self.addEventListener('activate', e=>{ e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())); });
 self.addEventListener('fetch', e=>{
   const url=new URL(e.request.url);
