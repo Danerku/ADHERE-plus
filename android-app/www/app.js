@@ -2006,7 +2006,7 @@ async function intrapartum(id){
   const grid = series.length ? `
    <div class="lcgwrap"><table class="lcg">
      <tr><th class="lcgp">Observation</th><th class="lcga">Alert</th>
-       ${series.map(o=>`<th>${esc(ecClock(parseLocal(o.obs_datetime)))}<div class="muted" style="font-weight:400">h${esc(o.hours_since_active??'')}</div></th>`).join('')}</tr>
+       ${series.map(o=>`<th>${esc(ecClock(parseLocal(o.obs_datetime)))}<div class="muted" style="font-weight:400">${o.stage==='latent'?'latent':('h'+esc(o.hours_since_active??''))}</div></th>`).join('')}</tr>
      ${LCG_GROUPS.map(([g,fields])=>`
        <tr class="lcgg"><td colspan="${series.length+2}">${esc(g)}</td></tr>
        ${fields.map(f=>`<tr><td class="lcgp">${esc(LCG_LABELS[f][0])}</td><td class="lcga">${esc(LCG_LABELS[f][1])}</td>
@@ -2062,8 +2062,8 @@ async function intrapartum(id){
    ${legacyNote}
 
    ${done?'':`
-   <div class="card"><h3>New assessment</h3>
-    ${activeDx?'':'<div class="card" style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;margin-bottom:8px">Record the active-labour diagnosis above first — the guide is timed from it.</div>'}
+   <div class="card"><h3>New assessment${activeDx?'':' <span class="pill amber">latent phase</span>'}</h3>
+    ${activeDx?'':'<div class="card" style="background:#eef6f5;border:1px solid #0f766e;color:#0f5c55;margin-bottom:8px;font-size:13px">She is in the <b>latent first stage</b> — active labour (≥5 cm) has not been diagnosed yet. Record her fetal heart, cervix and observations here; they are saved and the alert thresholds still apply. The lag-time clock starts when you diagnose active labour above.</div>'}
     ${due.length?`<p class="muted" style="font-size:12px">Due now: ${due.map(d=>esc(d.label)+(d.since?(' — last '+d.since+' min ago'):'')).join(' · ')}</p>`:''}
 
     <details class="moh" open><summary>Supportive care</summary><div class="grid">
@@ -2114,7 +2114,7 @@ async function intrapartum(id){
     </details>
 
     <div id="l_alerts"></div>
-    <button class="act" id="l_save" style="margin-top:10px"${activeDx?'':' disabled'}>Save assessment</button> <span class="muted" id="l_m"></span>
+    <button class="act" id="l_save" style="margin-top:10px">Save assessment</button> <span class="muted" id="l_m"></span>
    </div>
 
    <div class="card" id="ai" style="display:none">
@@ -2205,8 +2205,13 @@ async function intrapartum(id){
     try{
       const now=nowStr();
       const hrs = activeDx ? Math.max(0, Math.round(((parseLocal(now) - parseLocal(String(activeDx)))/3600000)*10)/10) : null;
-      const draft=Object.assign({}, o, {obs_datetime:now, hours_since_active:hrs,
-        stage:(o.pushing_started===1 || (+o.cervix_cm>=10))?'second':'first',
+      // BEFORE ACTIVE LABOUR IS DIAGNOSED, THE ASSESSMENT IS LATENT-PHASE.
+      // hours_since_active is null (the lag-time clock has not started) and the stage is 'latent', so
+      // the record does not mislabel normal latent progress as first-stage active labour — and the
+      // cervix lag alerts, which need an active-labour start, correctly do not fire.
+      const stg = !activeDx ? 'latent'
+                  : ((o.pushing_started===1 || (+o.cervix_cm>=10)) ? 'second' : 'first');
+      const draft=Object.assign({}, o, {obs_datetime:now, hours_since_active:hrs, stage:stg,
         guide_no: (hrs!=null && hrs>12) ? (Math.floor(hrs/12)+1) : 1});
       const fired=LCG.alertsFor(draft, series.concat([draft]), {parity:parity, activeStart:activeDx});
       draft.alerts = fired.map(a=>a.code).join(',');
@@ -4911,12 +4916,16 @@ async function immClient(id){
     </tr>`;}).join('')}
     </table>
 
-    ${nextDose?`<div class="grid" style="margin-top:12px">
-      <label>Record dose<select id="dno">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (re-record)':'')]),nextDose)}</select></label>
+    ${nextDose?'':`<p class="muted" style="margin-top:10px">All ${maxDose} doses recorded.</p>`}
+    <!-- THE FORM STAYS EVEN WHEN THE SCHEDULE IS COMPLETE. It used to vanish once the last dose was
+         recorded, so a wrong dose date could never be corrected. The dropdown carries every dose with
+         a "(correct)" marker; re-recording one updates its date rather than duplicating it (the server
+         de-dupes on client_id + dose_no). Default to the next dose due, or dose 1 if all are given. -->
+    <div class="grid" style="margin-top:12px">
+      <label>Record${nextDose?'':' / correct a'} dose<select id="dno">${selOpts([...Array(maxDose)].map((_,i)=>[i+1,prog+'-'+(i+1)+(given[i+1]?' (correct)':'')]),nextDose||1)}</select></label>
       ${ecPicker('ddt','Date given',true)}
      </div>
-     <button class="act" id="dsave" style="margin-top:10px">Save dose</button> <span class="muted" id="dm"></span>`
-     :`<p class="muted" style="margin-top:10px">All ${maxDose} doses recorded.</p>`}
+     <button class="act" id="dsave" style="margin-top:10px">Save dose</button> <span class="muted" id="dm"></span>
    </div>`;
   if($('#dsave')) $('#dsave').onclick=async()=>{ const b=$('#dsave'); if(b.disabled) return; b.disabled=true;
     try{ const r=await api('POST','imm_doses',{client_id:+id,dose_no:+dno.value,dose_date:ecGet('ddt')});
@@ -6305,7 +6314,8 @@ async function deathScreen(id){
      This is reportable through <b>Maternal Death Surveillance and Response</b>. Record it here so that it is counted, reviewed, and acted on. A death recorded nowhere is a death that never happened &mdash; and the next woman dies of the same thing.
    </div>
    <div class="grid">
-     <label>Date and time of death <span style="color:#a32d2d">*</span><input id="mdt" type="datetime-local" value="${esc(localDateTime())}"></label>
+     ${ecPicker('mdd','Date of death', true, null)}
+     <label>Time of death <span style="color:#a32d2d">*</span><input id="mdtime" type="time" value="${esc(localDateTime().slice(11,16))}"></label>
      <label>When in the pregnancy <span style="color:#a32d2d">*</span><select id="mdp">${selOpts([
        ['antenatal','Antenatal — before labour'],
        ['abortion_related','Abortion-related (including ectopic)'],
@@ -6333,10 +6343,13 @@ async function deathScreen(id){
   $('#mdsave').onclick=async()=>{
     // A duplicate maternal death is the worst thing this window could produce: it is the number the
     // facility is reviewed on, and it would be reported twice to MDSR.
-    const b=$('#mdsave'); if(b.disabled) return; b.disabled=true; let _saved=false;
+    const b=$('#mdsave'); if(b.disabled) return;
+    const dd=ecGet('mdd'); const tt=($('#mdtime')||{}).value||'';
+    if(!dd){ modal('Date of death','Record the date she died — check the Ethiopian date is complete.','risk'); return; }
+    b.disabled=true; let _saved=false;
     try{
       const r=await api('POST','maternal_deaths',{woman_id:+W.woman_id, episode_id:+id,
-        death_datetime:($('#mdt').value||'').replace('T',' ')+':00',
+        death_datetime:dd+' '+(tt||'00:00')+':00',
         phase:$('#mdp').value, ga_weeks:numOrNull($('#mdg').value), place:$('#mdpl').value,
         cause:$('#mdc').value, cause_note:($('#mdcn').value||null), contributing:($('#mdct').value||null),
         reported_mdsr:tk('mdr')});
@@ -6617,7 +6630,7 @@ function pccDraft(){
     infertility_screen:v('p_inf')||null, disability:v('p_dis')||null,
     height_cm:n('p_ht'), weight_kg:n('p_wt'), hgb:n('p_hgb'),
     diet_counselled:t('p_diet'), iodized_salt:t('p_iod'), dewormed:t('p_dew'),
-    folate_dose:v('p_fol')||null, folate_start_date:v('p_folst')||null, iron_supplied:t('p_iron'),
+    folate_dose:v('p_fol')||null, iron_supplied:t('p_iron'),
     folate_adherence:v('p_folad')||null,
     dm_known:t('p_dm'), dm_fbs:n('p_fbs'), dm_hba1c:n('p_a1c'),
     htn_known:t('p_htn'), bp_systolic:n('p_sbp'), bp_diastolic:n('p_dbp'),
@@ -6640,8 +6653,9 @@ function pccDraft(){
     exposure_pets:t('p_pets'), exposure_radiation:t('p_rad'), exposure_chemicals:t('p_chem'),
     exposure_counselled:t('p_expc'),
     dental_problem:t('p_dent'), dental_referred:t('p_dentr'),
-    referred_to:v('p_refto')||null, care_plan:v('p_plan_text')||null, next_visit:v('p_next')||null,
-    entry_point:v('p_entry')||'pcc', contact_date:v('p_date')||localDate(),
+    referred_to:v('p_refto')||null, care_plan:v('p_plan_text')||null, next_visit:ecGet('p_next')||null,
+    entry_point:v('p_entry')||'pcc', contact_date:ecGet('p_date')||localDate(),
+    folate_start_date:ecGet('p_folst')||null,
   };
   d.bmi = PCC.bmi(d.height_cm, d.weight_kg);
   // Which components the provider says she actually went through. A negative finding is a finding —
@@ -6780,7 +6794,7 @@ async function pccScreen(wid){
     ${ro?'<p class="muted"><b>VIEW ONLY</b> with your role.</p>':''}
 
     <div class="grid">
-      <label>Date of contact<input id="p_date" type="date" value="${esc(localDate())}"></label>
+      ${ecPicker('p_date','Date of contact', true, null)}
       <label>Where she was seen<select id="p_entry">${opt('entry_point',[['pcc','Preconception clinic / visit'],['fp','Family planning'],['pnc','Postnatal care'],['post_abortion','Post-abortion care'],['ayh','Adolescent &amp; youth'],['anc','Antenatal (asked about before)'],['other','Other']])}</select></label>
     </div>
 
@@ -6814,7 +6828,7 @@ async function pccScreen(wid){
 
     ${sec('folate',`
       <label>Folic acid dose<select id="p_fol">${opt('folate_dose',[['','&mdash;'],['none','Not started'],['0.4mg','0.4 mg (routine)'],['5mg','5 mg (high dose)']])}</select></label>
-      <label>Started on<input id="p_folst" type="date" value="${esc(String(g('folate_start_date')||'').slice(0,10))}"></label>
+      ${ecPicker('p_folst','Started on', false, String(g('folate_start_date')||'').slice(0,10)||null)}
       <label>Adherence<select id="p_folad">${opt('folate_adherence',[['','&mdash;'],['good','Good'],['partial','Partial'],['poor','Poor'],['na','Not applicable']])}</select></label>
       <div style="grid-column:1/-1">${tick('p_iron','Iron supplied (30-60 mg elemental daily)')}</div>
       <div id="p_folwhy" class="muted" style="font-size:12px;grid-column:1/-1"></div>`)}
@@ -6884,7 +6898,7 @@ async function pccScreen(wid){
     <div class="grid" style="margin-top:12px">
       <label style="grid-column:1/-1">Referred to<input id="p_refto" value="${esc(g('referred_to'))}"></label>
       <label style="grid-column:1/-1">Plan agreed with her<textarea id="p_plan_text" rows="2">${esc(g('care_plan'))}</textarea></label>
-      <label>Next visit<input id="p_next" type="date" value="${esc(String(g('next_visit')||'').slice(0,10))}"></label>
+      ${ecPicker('p_next','Next visit', false, String(g('next_visit')||'').slice(0,10)||null)}
     </div>
 
     ${ro?'':'<button class="act" id="p_save" style="margin-top:12px">Save the assessment</button>'}
@@ -7030,7 +7044,7 @@ async function pccUptake(eid){
       <label>Verified against<select id="u_ver">
         ${[['not_verified','Not verified'],['lmp','Checked against her LMP'],['ga','Checked against gestational age']].map(([v,l])=>`<option value="${v}"${(src.verified_against||'not_verified')===v?' selected':''}>${l}</option>`).join('')}
       </select></label>
-      <label>Date asked<input id="u_date" type="date" value="${esc(String(src.asked_date||localDate()).slice(0,10))}"></label>
+      ${ecPicker('u_date','Date asked', true, src.asked_date?String(src.asked_date).slice(0,10):null)}
     </div>
     <div>${tick('u_planned','This pregnancy was planned')}</div>
     <div style="margin-top:10px">
@@ -7070,7 +7084,7 @@ async function pccUptake(eid){
     const b=$('#u_save'); if(b.disabled) return; b.disabled=true;
     try{
       const items=read();
-      const d=Object.assign({episode_id:+eid, asked_date:$('#u_date').value||localDate(),
+      const d=Object.assign({episode_id:+eid, asked_date:ecGet('u_date')||localDate(),
         verified_against:$('#u_ver').value, planned_pregnancy:tk('u_planned'), remark:$('#u_rem').value||null,
         status:PCC.uptakeStatus(items)}, items);
       // A CORRECTION IS A PATCH. Re-POSTing sent a partial body, and the status is derived from the
