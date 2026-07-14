@@ -1,41 +1,416 @@
-{"version":"mch-rules-1.1","note":"Representative FMOH/WHO MCH protocol rule set. Not the complete, signed-off national protocol — the full rule set requires clinical authoring and FMOH sign-off before clinical use.",
- "rules":[
-  {"id":"FANC_BP","phase":"fanc","when":{"encounter":"anc"},"require":"bp","msg":"Measure blood pressure","sev":"high"},
-  {"id":"FANC_URINE","phase":"fanc","when":{"encounter":"anc"},"require":"urine_protein","msg":"Test urine for protein","sev":"high"},
-  {"id":"FANC_FUNDAL","phase":"fanc","when":{"encounter":"anc"},"require":"fundal_height","msg":"Assess fundal height","sev":"med"},
-  {"id":"FANC_FHR","phase":"fanc","when":{"encounter":"anc"},"require":"fhr","msg":"Auscultate fetal heart rate","sev":"med"},
-  {"id":"FANC_TT","phase":"fanc","when":{"encounter":"anc"},"require":"tt_vaccine","msg":"Give/verify tetanus vaccination","sev":"med"},
-  {"id":"FANC_IRON","phase":"fanc","when":{"encounter":"anc"},"require":"iron_folate","msg":"Provide iron-folate supplementation","sev":"med"},
-  {"id":"FANC_BLOODGP","phase":"fanc","when":{"encounter":"anc"},"require":"blood_group","msg":"Determine blood group and Rh","sev":"med"},
-  {"id":"FANC_HGB","phase":"fanc","when":{"encounter":"anc"},"require":"haemoglobin","msg":"Check haemoglobin for anaemia","sev":"med"},
-  {"id":"FANC_HIV","phase":"fanc","when":{"encounter":"anc"},"require":"hiv_test","msg":"Offer HIV testing (PMTCT)","sev":"high"},
-  {"id":"FANC_SYPH","phase":"fanc","when":{"encounter":"anc"},"require":"syphilis_test","msg":"Test for syphilis","sev":"med"},
-  {"id":"FANC_IPTP","phase":"fanc","when":{"encounter":"anc"},"require":"iptp_malaria","msg":"Give IPTp / malaria prevention where indicated","sev":"low"},
-  {"id":"FANC_COUNSEL","phase":"fanc","when":{"encounter":"anc"},"require":"danger_signs_counsel","msg":"Counsel on pregnancy danger signs and birth preparedness","sev":"med"},
-  {"id":"LAB_PARTOGRAPH","phase":"intrapartum","when":{"cervix_ge":4},"require":"partograph_started","msg":"Start the partograph (cervix ≥4 cm)","sev":"high"},
-  {"id":"LAB_FHR30","phase":"intrapartum","when":{"encounter":"labour"},"require":"fhr","msg":"Record fetal heart rate every 30 min","sev":"high"},
-  {"id":"LAB_BP4H","phase":"intrapartum","when":{"encounter":"labour"},"require":"bp","msg":"Record blood pressure every 4 h","sev":"high"},
-  {"id":"LAB_TEMP4H","phase":"intrapartum","when":{"encounter":"labour"},"require":"temperature","msg":"Record temperature every 4 h","sev":"med"},
-  {"id":"LAB_PULSE","phase":"intrapartum","when":{"encounter":"labour"},"require":"pulse","msg":"Record maternal pulse every 30 min","sev":"med"},
-  {"id":"LAB_CONTRACTIONS","phase":"intrapartum","when":{"encounter":"labour"},"require":"contractions","msg":"Assess contractions every 30 min","sev":"med"},
-  {"id":"LAB_BLADDER","phase":"intrapartum","when":{"encounter":"labour"},"require":"bladder_checked","msg":"Encourage bladder emptying","sev":"low"},
-  {"id":"LAB_ACTIONLINE","phase":"intrapartum","when":{"past_action_line":true},"require":"referral_or_review","msg":"Cervix crossed the action line — review / refer","sev":"high"},
-  {"id":"ENC_AMTSL","phase":"enc","when":{"encounter":"delivery"},"require":"uterotonic_1min","msg":"Give uterotonic within 1 min (AMTSL)","sev":"high"},
-  {"id":"ENC_DRYWARM","phase":"enc","when":{"encounter":"delivery"},"require":"dry_and_warm","msg":"Dry and keep the baby warm","sev":"high"},
-  {"id":"ENC_BREATHING","phase":"enc","when":{"encounter":"delivery"},"require":"baby_breathing_checked","msg":"Assess breathing; resuscitate if not breathing","sev":"high"},
-  {"id":"ENC_SKINSKIN","phase":"enc","when":{"encounter":"delivery"},"require":"skin_to_skin","msg":"Immediate skin-to-skin contact","sev":"med"},
-  {"id":"ENC_CORD","phase":"enc","when":{"encounter":"delivery"},"require":"cord_care","msg":"Clamp/cut cord hygienically; cord care","sev":"med"},
-  {"id":"ENC_VITK","phase":"enc","when":{"encounter":"delivery"},"require":"vitamin_k","msg":"Give vitamin K to the newborn","sev":"med"},
-  {"id":"ENC_EYE","phase":"enc","when":{"encounter":"delivery"},"require":"eye_prophylaxis","msg":"Give eye prophylaxis","sev":"low"},
-  {"id":"ENC_WEIGH","phase":"enc","when":{"encounter":"delivery"},"require":"baby_weighed","msg":"Weigh the newborn","sev":"low"},
-  {"id":"ENC_BREASTFEED","phase":"enc","when":{"encounter":"delivery"},"require":"early_breastfeeding","msg":"Initiate breastfeeding within 1 h","sev":"med"},
-  {"id":"PNC_BLEEDING","phase":"pnc","when":{"encounter":"pnc"},"require":"bleeding_checked","msg":"Check for postpartum bleeding","sev":"high"},
-  {"id":"PNC_UTERUS","phase":"pnc","when":{"encounter":"pnc"},"require":"uterine_tone","msg":"Check uterine tone/contraction","sev":"high"},
-  {"id":"PNC_BP","phase":"pnc","when":{"encounter":"pnc"},"require":"bp","msg":"Check blood pressure","sev":"med"},
-  {"id":"PNC_TEMP","phase":"pnc","when":{"encounter":"pnc"},"require":"temperature","msg":"Check temperature (sepsis)","sev":"med"},
-  {"id":"PNC_BABY","phase":"pnc","when":{"encounter":"pnc"},"require":"baby_danger_signs","msg":"Check newborn danger signs","sev":"high"},
-  {"id":"PNC_IMMUN","phase":"pnc","when":{"encounter":"pnc"},"require":"immunization","msg":"Give/verify newborn immunization (BCG, OPV0)","sev":"med"},
-  {"id":"PNC_COUNSEL","phase":"pnc","when":{"encounter":"pnc"},"require":"danger_signs_counsel","msg":"Counsel on maternal/newborn danger signs","sev":"med"},
-  {"id":"PNC_EBF","phase":"pnc","when":{"encounter":"pnc"},"require":"exclusive_breastfeeding","msg":"Counsel exclusive breastfeeding","sev":"low"},
-  {"id":"PNC_FP","phase":"pnc","when":{"encounter":"pnc"},"require":"family_planning","msg":"Discuss family planning","sev":"low"}
- ]}
+{
+ "version": "mch-rules-2.0-lcg",
+ "note": "Representative FMOH/WHO MCH protocol rule set, with the labour rules rewritten for the Labour Care Guide (Ethiopia's endorsed Intrapartum Care Guideline). The partograph rules \u2014 start at 4 cm, crossed the action line \u2014 described a tool that no longer exists. Not the complete signed-off national protocol; the full rule set requires clinical authoring and FMOH sign-off before clinical use.",
+ "rules": [
+  {
+   "id": "FANC_BP",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "bp",
+   "msg": "Measure blood pressure",
+   "sev": "high"
+  },
+  {
+   "id": "FANC_URINE",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "urine_protein",
+   "msg": "Test urine for protein",
+   "sev": "high"
+  },
+  {
+   "id": "FANC_FUNDAL",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "fundal_height",
+   "msg": "Assess fundal height",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_FHR",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "fhr",
+   "msg": "Auscultate fetal heart rate",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_TT",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "tt_vaccine",
+   "msg": "Give/verify tetanus vaccination",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_IRON",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "iron_folate",
+   "msg": "Provide iron-folate supplementation",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_BLOODGP",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "blood_group",
+   "msg": "Determine blood group and Rh",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_HGB",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "haemoglobin",
+   "msg": "Check haemoglobin for anaemia",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_HIV",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "hiv_test",
+   "msg": "Offer HIV testing (PMTCT)",
+   "sev": "high"
+  },
+  {
+   "id": "FANC_SYPH",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "syphilis_test",
+   "msg": "Test for syphilis",
+   "sev": "med"
+  },
+  {
+   "id": "FANC_IPTP",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "iptp_malaria",
+   "msg": "Give IPTp / malaria prevention where indicated",
+   "sev": "low"
+  },
+  {
+   "id": "FANC_COUNSEL",
+   "phase": "fanc",
+   "when": {
+    "encounter": "anc"
+   },
+   "require": "danger_signs_counsel",
+   "msg": "Counsel on pregnancy danger signs and birth preparedness",
+   "sev": "med"
+  },
+  {
+   "id": "ENC_AMTSL",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "uterotonic_1min",
+   "msg": "Give uterotonic within 1 min (AMTSL)",
+   "sev": "high"
+  },
+  {
+   "id": "ENC_DRYWARM",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "dry_and_warm",
+   "msg": "Dry and keep the baby warm",
+   "sev": "high"
+  },
+  {
+   "id": "ENC_BREATHING",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "baby_breathing_checked",
+   "msg": "Assess breathing; resuscitate if not breathing",
+   "sev": "high"
+  },
+  {
+   "id": "ENC_SKINSKIN",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "skin_to_skin",
+   "msg": "Immediate skin-to-skin contact",
+   "sev": "med"
+  },
+  {
+   "id": "ENC_CORD",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "cord_care",
+   "msg": "Clamp/cut cord hygienically; cord care",
+   "sev": "med"
+  },
+  {
+   "id": "ENC_VITK",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "vitamin_k",
+   "msg": "Give vitamin K to the newborn",
+   "sev": "med"
+  },
+  {
+   "id": "ENC_EYE",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "eye_prophylaxis",
+   "msg": "Give eye prophylaxis",
+   "sev": "low"
+  },
+  {
+   "id": "ENC_WEIGH",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "baby_weighed",
+   "msg": "Weigh the newborn",
+   "sev": "low"
+  },
+  {
+   "id": "ENC_BREASTFEED",
+   "phase": "enc",
+   "when": {
+    "encounter": "delivery"
+   },
+   "require": "early_breastfeeding",
+   "msg": "Initiate breastfeeding within 1 h",
+   "sev": "med"
+  },
+  {
+   "id": "PNC_BLEEDING",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "bleeding_checked",
+   "msg": "Check for postpartum bleeding",
+   "sev": "high"
+  },
+  {
+   "id": "PNC_UTERUS",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "uterine_tone",
+   "msg": "Check uterine tone/contraction",
+   "sev": "high"
+  },
+  {
+   "id": "PNC_BP",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "bp",
+   "msg": "Check blood pressure",
+   "sev": "med"
+  },
+  {
+   "id": "PNC_TEMP",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "temperature",
+   "msg": "Check temperature (sepsis)",
+   "sev": "med"
+  },
+  {
+   "id": "PNC_BABY",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "baby_danger_signs",
+   "msg": "Check newborn danger signs",
+   "sev": "high"
+  },
+  {
+   "id": "PNC_IMMUN",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "immunization",
+   "msg": "Give/verify newborn immunization (BCG, OPV0)",
+   "sev": "med"
+  },
+  {
+   "id": "PNC_COUNSEL",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "danger_signs_counsel",
+   "msg": "Counsel on maternal/newborn danger signs",
+   "sev": "med"
+  },
+  {
+   "id": "PNC_EBF",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "exclusive_breastfeeding",
+   "msg": "Counsel exclusive breastfeeding",
+   "sev": "low"
+  },
+  {
+   "id": "PNC_FP",
+   "phase": "pnc",
+   "when": {
+    "encounter": "pnc"
+   },
+   "require": "family_planning",
+   "msg": "Discuss family planning",
+   "sev": "low"
+  },
+  {
+   "id": "LCG_START",
+   "phase": "labour",
+   "when": {
+    "cervix_ge": 5
+   },
+   "require": "lcg_started",
+   "msg": "Open the Labour Care Guide (active first stage, 5 cm or more)",
+   "sev": "high"
+  },
+  {
+   "id": "LCG_LAG",
+   "phase": "labour",
+   "when": {
+    "lag_exceeded": true
+   },
+   "require": "referral_or_review",
+   "msg": "She has been at this dilatation longer than its lag time with no progress \u2014 alert a senior provider, assess for obstruction",
+   "sev": "high"
+  },
+  {
+   "id": "LCG_FHR30",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "fhr",
+   "msg": "Auscultate the fetal heart every 30 minutes (every 5 minutes in the second stage)",
+   "sev": "high"
+  },
+  {
+   "id": "LCG_DECEL",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "fhr_decel",
+   "msg": "Record whether decelerations are present, and their type \u2014 late decelerations are the alert",
+   "sev": "high"
+  },
+  {
+   "id": "LCG_CTX",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "contractions",
+   "msg": "Count contractions per 10 minutes every 30 minutes",
+   "sev": "med"
+  },
+  {
+   "id": "LCG_CTX_DUR",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "contraction_duration",
+   "msg": "Record the duration of contractions in seconds",
+   "sev": "med"
+  },
+  {
+   "id": "LCG_BP4H",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "bp",
+   "msg": "Measure blood pressure 4-hourly",
+   "sev": "med"
+  },
+  {
+   "id": "LCG_TEMP4H",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "temperature",
+   "msg": "Measure temperature 4-hourly",
+   "sev": "med"
+  },
+  {
+   "id": "LCG_PULSE",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "pulse",
+   "msg": "Record the pulse",
+   "sev": "med"
+  },
+  {
+   "id": "LCG_COMPANION",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "companion",
+   "msg": "Offer her a companion of her choice \u2014 labouring alone is an alert in the guideline",
+   "sev": "med"
+  },
+  {
+   "id": "LCG_PLAN",
+   "phase": "labour",
+   "when": {
+    "encounter": "labour"
+   },
+   "require": "plan",
+   "msg": "Record the assessment and the plan agreed with her (shared decision-making)",
+   "sev": "med"
+  }
+ ]
+}
