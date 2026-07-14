@@ -546,6 +546,11 @@ try {
       'checklist'     => $all("SELECT * FROM checklist_responses WHERE episode_id IN ($in) ORDER BY id"),
       'bemonc'        => $all("SELECT * FROM bemonc_care       WHERE episode_id IN ($in) ORDER BY id"),
       'risk_scores'   => $all("SELECT * FROM risk_scores       WHERE episode_id IN ($in) ORDER BY scored_at, id"),
+      'abortion_care' => $all("SELECT * FROM abortion_care     WHERE episode_id IN ($in) ORDER BY care_date, id"),
+      // Her death belongs to HER, not to an episode — she may have died before any episode was open.
+      'deaths'        => (function() use ($wid,$fac){
+          $st=db()->prepare("SELECT * FROM maternal_deaths WHERE woman_id=? AND facility_id=? ORDER BY death_datetime");
+          $st->execute([$wid,$fac]); return $st->fetchAll(); })(),
     ]);
   }
 
@@ -576,6 +581,10 @@ try {
       'babies'     => ["SELECT $W, b.* FROM babies b ".sprintf($EP,'b.episode_id')." WHERE e.facility_id=? AND DATE(b.recorded_at) BETWEEN ? AND ? ORDER BY b.id", 'newborns'],
       'pnc'        => ["SELECT $W, p.* FROM pnc_visits p ".sprintf($EP,'p.episode_id')." WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY p.visit_date, p.id", 'pnc_visits'],
       'referrals'  => ["SELECT $W, rf.* FROM referrals rf ".sprintf($EP,'rf.episode_id')." WHERE e.facility_id=? AND DATE(rf.recorded_at) BETWEEN ? AND ? ORDER BY rf.id", 'referrals'],
+      'loss'       => ["SELECT $W, a.* FROM abortion_care a ".sprintf($EP,'a.episode_id')." WHERE e.facility_id=? AND a.care_date BETWEEN ? AND ? ORDER BY a.care_date, a.id", 'pregnancy_loss'],
+      'deaths'     => ["SELECT w.mrn, TRIM(CONCAT_WS(' ',w.first_name,w.father_name)) AS name, w.age, d.*
+                          FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id
+                         WHERE d.facility_id=? AND DATE(d.death_datetime) BETWEEN ? AND ? ORDER BY d.death_datetime", 'maternal_deaths'],
     ];
     if(!isset($Q[$type])) err('unknown export type');
     [$sql,$fname]=$Q[$type];
@@ -593,6 +602,62 @@ try {
     foreach($rows as $row) fputcsv($out, array_values($row));
     fclose($out);
     exit;
+  }
+
+  // ==========================================================================================
+  // A MATERNAL DEATH — WHEREVER IT HAPPENS.
+  //
+  // A maternal death could only be recorded in two places: on the delivery record, and on a
+  // postnatal visit. A woman who died BEFORE delivery — eclampsia at 30 weeks, a ruptured ectopic,
+  // sepsis after an unsafe abortion — could not be recorded as having died at all. She simply
+  // stopped appearing on the worklist, indistinguishable from a woman who went home.
+  //
+  // That is not a missing feature. In a country whose maternal death surveillance depends on
+  // facilities reporting deaths, a tool that cannot record one is a tool that hides it.
+  // ==========================================================================================
+  if ($r==='maternal_deaths'){
+    $u=require_role(['provider','admin','supervisor']);
+    if($m==='GET'){
+      $st=db()->prepare("SELECT d.*, w.mrn, TRIM(CONCAT_WS(' ',w.first_name,w.father_name)) AS name, w.age,
+                                u.full_name AS recorded_by_name
+                           FROM maternal_deaths d
+                           JOIN women w ON w.id=d.woman_id
+                      LEFT JOIN users u ON u.id=d.recorded_by
+                          WHERE d.facility_id=? ORDER BY d.death_datetime DESC LIMIT 200");
+      $st->execute([(int)$u['facility_id']]); out($st->fetchAll());
+    }
+    if($m==='POST'){
+      require_role(['provider','admin']);
+      $b=body();
+      $wid=(int)($b['woman_id']??0);
+      $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=? AND voided=0");
+      $wc->execute([$wid,$u['facility_id']]);
+      if(!$wc->fetch()) err('woman not in your facility',404);
+      $eid=(int)($b['episode_id']??0); if($eid) require_ep($eid);
+      if(empty($b['death_datetime'])) err('The date and time of death is required.');
+      if(empty($b['phase'])) err('When in the pregnancy she died is required — it is the axis maternal death surveillance is reported on.');
+
+      $id=insert('maternal_deaths', array_merge(
+        array_intersect_key($b, array_flip(['death_datetime','phase','ga_weeks','place','cause','cause_note','contributing','reported_mdsr'])),
+        ['woman_id'=>$wid,'episode_id'=>($eid?:null),'facility_id'=>(int)$u['facility_id'],'recorded_by'=>$u['id']]));
+
+      // Her episode of care is over. Closing it takes her off the worklist — leaving a dead woman on
+      // the labour ward list for the next shift to "follow up" is its own cruelty.
+      if($eid) close_episode($eid,'maternal death');
+      audit('maternal_death','women',$wid,['phase'=>$b['phase'],'cause'=>($b['cause']??null)]);
+      out(['id'=>$id,'ok'=>true],201);
+    }
+    if($m==='PATCH' && $id){
+      require_role(['provider','admin']); $b=body();
+      $f=array_intersect_key($b, array_flip(['death_datetime','phase','ga_weeks','place','cause','cause_note','contributing','reported_mdsr']));
+      if($f){
+        $sets=[]; $vals=[];
+        foreach($f as $k=>$v){ $sets[]="`$k`=?"; $vals[]=($v===''?null:$v); }
+        $vals[]=$id; $vals[]=(int)$u['facility_id'];
+        db()->prepare("UPDATE maternal_deaths SET ".implode(',',$sets)." WHERE id=? AND facility_id=?")->execute($vals);
+      }
+      audit('update','maternal_deaths',$id,array_keys($f)); out(['ok'=>true]);
+    }
   }
 
   // ---- providers list (for handover picker; any logged-in user) ----
@@ -821,6 +886,13 @@ try {
              // MoH Delivery register (v12): 7,11,12,15-24,36-38,42,49-51,66
              'partograph_used','episiotomy','mode_other_text','maternal_status','maternal_death_cause','comp_preeclampsia','comp_eclampsia','comp_aph','comp_pph','comp_other','referred','hiv_test_accepted','hiv_retest_accepted','hiv_test_result','cnsl_feeding_options','ippfp_acceptor','ippfp_method','remark',
              'ippfp_timing']],   // v15 — IUCD is the commonest method at delivery; post-placental vs 48h matters
+           // THE PREGNANCY THAT ENDS EARLY. Miscarriage, safe abortion care, the complications of an
+           // unsafe one, an ectopic — none of these had anywhere to be recorded, so a woman who had
+           // one either stayed on the ANC worklist as if still pregnant, or her record was abandoned.
+           'abortion'=>['abortion_care',['episode_id','care_date','ga_weeks','loss_type','presentation',
+             'procedure_done','procedure_note','comp_haemorrhage','comp_sepsis','comp_perforation','comp_shock','comp_anaemia',
+             'tx_uterotonic','tx_antibiotics','tx_iv_fluids','tx_blood','anti_d_given','hgb','blood_loss_ml',
+             'pac_fp_counselled','pac_fp_method','outcome','referred_to','remark','recorded_by']],
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
            'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
@@ -1189,6 +1261,28 @@ try {
        'red_alerts'     =>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE e.facility_id=? AND s.band='red'$since"),
      ],
      'ippfp'=>$grp("SELECT d.ippfp_method k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.ippfp_method IS NOT NULL$since GROUP BY d.ippfp_method"),
+
+     // ---- The pregnancy that ends early, and the woman who dies ----
+     // A facility that cannot see its losses and its deaths cannot act on them. Post-abortion
+     // contraception in particular is a rate the facility should be watching: she is fertile again
+     // in two weeks, and she is standing in front of you now.
+     'loss'=>[
+       'total'        =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=?$since"),
+       'spontaneous'  =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND a.loss_type='spontaneous'$since"),
+       'induced'      =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND a.loss_type='induced'$since"),
+       'unsafe'       =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND a.loss_type='unsafe'$since"),
+       'ectopic'      =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND a.loss_type='ectopic'$since"),
+       'complications'=>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND (a.comp_haemorrhage=1 OR a.comp_sepsis=1 OR a.comp_shock=1 OR a.comp_perforation=1)$since"),
+       'pac_fp'       =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND a.pac_fp_method IS NOT NULL AND a.pac_fp_method<>'none'$since"),
+     ],
+     'maternal_deaths'=>[
+       'total'      =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=?".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'antenatal'  =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='antenatal'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'abortion'   =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='abortion_related'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'intrapartum'=>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='intrapartum'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'postpartum' =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='postpartum'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'not_reported'=>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.reported_mdsr=0".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+     ],
      // ---- Family planning ----
      'fp'=>[
        'clients'      =>$one("SELECT COUNT(*) c FROM fp_clients e WHERE e.facility_id=?".($days>0?" AND e.created_at >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),

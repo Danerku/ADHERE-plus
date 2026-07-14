@@ -864,6 +864,7 @@ function route(){
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
     find:findWoman,failed:failedScreen,voided:voidedScreen,
     letter:letterScreen, export:exportScreen,
+    abortion:abortionScreen, death:deathScreen,
     account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
@@ -1348,6 +1349,7 @@ async function register(){
       <option value="anc">Antenatal care (ANC)</option>
       <option value="labour" selected>Labour &amp; delivery</option>
       <option value="pnc">Postnatal care — including a birth at home or elsewhere</option>
+      <option value="abortion">Pregnancy loss / abortion care — miscarriage, ectopic, incomplete abortion</option>
       <option value="fp">Family planning</option>
       <option value="pmtct">PMTCT — HIV positive</option>
       <option value="td">Immunization — Td</option>
@@ -1536,6 +1538,7 @@ async function findWoman(arg){
         <option value="anc">Antenatal care (ANC)</option>
         <option value="labour">Labour &amp; delivery</option>
         <option value="pnc">Postnatal care</option>
+        <option value="abortion">Pregnancy loss / abortion care</option>
         <option value="pregtest">Pregnancy test</option>
         <option value="fp">Family planning</option>
         <option value="pmtct">PMTCT — HIV positive</option>
@@ -1583,9 +1586,12 @@ async function routeNewClient(cat, wid, d){
     if(r&&r.id){ toast('Enrolled in PMTCT — complete her ART details','ok'); location.hash='#pmtctclient/'+r.id; return; }
     toast('Registered','ok'); location.hash='#pmtct'; return;
   }
-  // maternity: ANC, labour, PNC (PNC includes a birth at home or another facility)
+  // maternity: ANC, labour, PNC, and the pregnancy that ends early
   const ep=await api('POST','episodes',{woman_id:wid,service_category:cat,status:(cat==='labour'?'laboring':'active'),
     provider_id:(ME.role==='provider'?ME.id:null),admission_datetime:localDateTime()});
+  // A woman admitted for a pregnancy loss is bleeding, or septic, or has an ectopic. Take the
+  // provider straight to the screen that records the care — not to a grid of tiles.
+  if(ep&&ep.id&&cat==='abortion'){ location.hash='#abortion/'+ep.id; return; }
   if(ep&&ep.id){ location.hash='#patient/'+ep.id; return; }
   location.hash='#'+(cat==='anc'?'antenatal':cat==='pnc'?'pnc':'labour');
 }
@@ -2037,6 +2043,26 @@ async function overviewSection(){
       ${ovStat((c.high_risk||0)+' · '+hrPct+'%','High risk','of all episodes')}
     </div>
 
+    ${(()=>{ const L=o.loss||{}, D=o.maternal_deaths||{};
+      if(!(+L.total||0) && !(+D.total||0)) return '';
+      // These two were invisible: a pregnancy that ended early had nowhere to be recorded, and a
+      // woman who died before delivery could not be recorded as dead at all.
+      return `<h4>Pregnancy loss &amp; maternal death</h4>
+      <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+        ${ovStat(L.total||0,'Losses')}
+        ${ovStat(L.spontaneous||0,'Miscarriage')}
+        ${ovStat(L.induced||0,'Safe abortion care')}
+        ${ovStat(L.unsafe||0,'Unsafe — complications')}
+        ${ovStat(L.ectopic||0,'Ectopic')}
+        ${ovStat(L.complications||0,'With complications')}
+        ${ovStat(pct(L.pac_fp||0, L.total||0),'Contraception after','of losses')}
+        ${(+D.total||0)?ovStat(D.total,'MATERNAL DEATHS'):''}
+        ${(+D.not_reported||0)?ovStat(D.not_reported,'Not yet in MDSR','notify them'):''}
+      </div>
+      ${(+D.total||0)?`<p class="muted" style="font-size:12px">Deaths by phase: antenatal ${esc(D.antenatal||0)} &middot; abortion-related ${esc(D.abortion||0)} &middot; in labour ${esc(D.intrapartum||0)} &middot; postpartum ${esc(D.postpartum||0)}. Every one of them is reviewable through Maternal Death Surveillance and Response.</p>`:''}
+      ${(+L.total||0) && (+L.pac_fp||0)<(+L.total||0) ? `<p class="muted" style="font-size:12px">${esc((+L.total||0)-(+L.pac_fp||0))} of ${esc(L.total)} left without contraception. She is fertile again in about two weeks; this is the number to move.</p>`:''}`;
+    })()}
+
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:14px">
       <div><h4>Mode of delivery</h4>${ovBar(o.mode_of_delivery)}</div>
       <div><h4>Birth outcome</h4>${ovBar(o.birth_outcome,['live_birth'])}</div>
@@ -2139,6 +2165,7 @@ function wireOverview(){
     push('LAFP removal reason',o.lafp_reasons);
     push('PMTCT',o.pmtct); push('PMTCT entry point',o.pmtct_entry); push('PMTCT infant feeding',o.pmtct_feeding);
     push('Immunization',o.immunization);
+    push('Pregnancy loss',o.loss); push('Maternal deaths',o.maternal_deaths);
     const csv=lines.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\n');
     const bl=new Blob([csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
     a.href=URL.createObjectURL(bl); a.download='adhere_overview_'+(localDate())+'.csv'; a.click(); };
@@ -5239,6 +5266,36 @@ async function reportScreen(id){
 
    ${recBlock('History', histBody, 'What she carries into every episode of care.')}
    ${yesScr.length?`<div class="rec-b"><h5>Risk screening</h5><div class="rec-g">${yesScr.map(s=>`<div class="rec-f"><span class="rec-l">${esc(s.item_code||'')}</span><span class="rec-v rec-alarm">Yes</span></div>`).join('')}</div></div>`:''}
+   ${(C.deaths||[]).length?`<div class="rec-b" style="border-left:4px solid #a32d2d">
+     <h5 style="color:#a32d2d">She died</h5>
+     ${(C.deaths||[]).map(d=>`<div class="rec-g">
+       <div class="rec-f"><span class="rec-l">When</span><span class="rec-v rec-alarm">${esc(String(d.death_datetime||'').slice(0,16))}</span></div>
+       <div class="rec-f"><span class="rec-l">Phase</span><span class="rec-v rec-alarm">${esc({antenatal:'Antenatal — before labour',abortion_related:'Abortion-related',intrapartum:'In labour / at birth',postpartum:'Postpartum',unknown:'Unknown'}[d.phase]||d.phase||'')}</span></div>
+       <div class="rec-f"><span class="rec-l">Probable cause</span><span class="rec-v rec-alarm">${esc(d.cause||'')}${d.cause_note?(' — '+esc(d.cause_note)):''}</span></div>
+       <div class="rec-f"><span class="rec-l">Where</span><span class="rec-v">${esc(d.place||'')}</span></div>
+       ${d.contributing?`<div class="rec-f" style="grid-column:1/-1"><span class="rec-l">Contributing factors</span><span class="rec-v">${esc(d.contributing)}</span></div>`:''}
+       <div class="rec-f"><span class="rec-l">Notified into MDSR</span><span class="rec-v${d.reported_mdsr==1?'':' rec-alarm'}">${d.reported_mdsr==1?'Yes':'NOT YET'}</span></div>
+     </div>`).join('')}
+   </div>`:''}
+
+   ${(C.abortion_care||[]).length?`<div class="rec-b"><h5>Pregnancy loss / abortion care</h5>
+     ${(C.abortion_care||[]).map(a=>`<div class="rec-c">
+       <h5>${esc({spontaneous:'Miscarriage',induced:'Safe abortion care',unsafe:'Complications of an unsafe abortion',ectopic:'Ectopic pregnancy',molar:'Molar pregnancy',unknown:'Pregnancy loss'}[a.loss_type]||a.loss_type||'')}
+         <span class="muted">&mdash; ${esc(a.care_date||'')}${a.ga_weeks?(' &middot; '+esc(a.ga_weeks)+' weeks'):''}</span></h5>
+       <div class="rec-g">
+         ${fld('presentation',a.presentation)}
+         <div class="rec-f"><span class="rec-l">Procedure</span><span class="rec-v">${esc(a.procedure_done||'')}${a.procedure_note?(' — '+esc(a.procedure_note)):''}</span></div>
+         ${fld('comp_pph',a.comp_haemorrhage)}${fld('comp_other',a.comp_sepsis)}
+         ${a.comp_shock==1?'<div class="rec-f"><span class="rec-l">Shock</span><span class="rec-v rec-alarm">Yes</span></div>':''}
+         ${a.comp_perforation==1?'<div class="rec-f"><span class="rec-l">Uterine perforation</span><span class="rec-v rec-alarm">Yes</span></div>':''}
+         ${fld('hgb',a.hgb)}${fld('blood_loss_ml',a.blood_loss_ml)}
+         ${a.tx_blood==1?'<div class="rec-f"><span class="rec-l">Blood transfused</span><span class="rec-v">Yes</span></div>':''}
+         ${fld('anti_d_given',a.anti_d_given)}
+         <div class="rec-f"><span class="rec-l">Contraception before she left</span><span class="rec-v${(!a.pac_fp_method||a.pac_fp_method==='none')?' rec-alarm':''}">${esc((!a.pac_fp_method||a.pac_fp_method==='none')?'NONE':a.pac_fp_method)}</span></div>
+         <div class="rec-f"><span class="rec-l">Outcome</span><span class="rec-v${String(a.outcome||'')==='died'?' rec-alarm':''}">${esc(a.outcome||'')}${a.referred_to?(' — '+esc(a.referred_to)):''}</span></div>
+       </div></div>`).join('')}
+   </div>`:''}
+
    ${trends}
    ${ancBlocks?`<div class="rec-b"><h5>Antenatal contacts</h5>${ancBlocks}</div>`:''}
    ${labs.length?`<div class="rec-b"><h5>Laboratory</h5><table class="rec-t"><tr><th>Test</th><th>Requested</th><th>Result</th><th>Result date</th><th>Note</th></tr>
@@ -5259,6 +5316,184 @@ async function reportScreen(id){
   </div>`;
 }
 
+// =================================================================================================
+// THE PREGNANCY THAT ENDS EARLY.
+//
+// ADHERE+ knew three things could happen to a pregnant woman: antenatal care, labour, postnatal
+// care. A pregnancy that ended before viability was not one of them. So a woman who miscarried at
+// 14 weeks stayed on the ANC worklist as if she were still pregnant, and a woman treated for an
+// incomplete abortion — or an ectopic, which kills by internal haemorrhage in hours — had nowhere
+// in this system to be recorded at all.
+//
+// The distinctions here are not bureaucratic. 'Induced' is safe abortion care, which is legal and
+// provided at health-centre level in Ethiopia. 'Unsafe' is a woman arriving with the complications
+// of one done elsewhere. Counting them as the same event would erase the very thing the facility
+// most needs to see.
+// =================================================================================================
+async function abortionScreen(id){
+  const [W, prev] = await Promise.all([ epOne(id), api('GET','abortion?episode='+id).catch(()=>[]) ]);
+  const rec=(prev||[])[0]||null;
+  const rhNeg=String(W.rh_factor||'').toLowerCase()==='neg';
+  app().innerHTML=nav()+`<div class="card"><h3>Pregnancy loss / abortion care &mdash; episode ${esc(id)}</h3>
+   <p class="muted">${esc(((W.first_name||'')+' '+(W.father_name||'')).trim())} &middot; MRN ${esc(W.mrn||'')} &middot; G${esc(W.gravida||'?')}/P${esc(W.para||'?')}</p>
+   ${rec?`<div class="alert amber" style="margin-bottom:8px"><b>Already recorded</b> for this episode (${esc(rec.care_date||'')}). Saving updates it.</div>`:''}
+   ${rhNeg?`<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:6px 0;font-size:13px">
+      <b>She is Rh NEGATIVE.</b> Anti-D is indicated after a pregnancy loss at any gestation. Missing it puts every future pregnancy at risk.</div>`:''}
+
+   <div class="grid">
+    ${ecPicker('acd','Date of care',true, rec&&rec.care_date?String(rec.care_date).slice(0,10):undefined)}
+    <label>Gestational age (weeks)<input id="acga" type="number" min="4" max="28" value="${esc(rec&&rec.ga_weeks!=null?rec.ga_weeks:'')}"></label>
+    <label>What happened <span style="color:#a32d2d">*</span><select id="actype">${selOpts([
+      ['spontaneous','Spontaneous — miscarriage'],
+      ['induced','Induced — safe abortion care provided'],
+      ['unsafe','Complications of an unsafe abortion done elsewhere'],
+      ['ectopic','Ectopic pregnancy'],
+      ['molar','Molar pregnancy'],
+      ['unknown','Unknown']], rec?rec.loss_type:'')}</select></label>
+    <label>Presentation<select id="acpres">${selOpts([
+      ['threatened','Threatened'],['inevitable','Inevitable'],['incomplete','Incomplete'],['complete','Complete'],
+      ['missed','Missed'],['septic','Septic'],['ruptured','Ruptured (ectopic)']], rec?rec.presentation:'')}</select></label>
+   </div>
+
+   <details class="moh" open><summary>What she presented with</summary><div class="ticks">
+    ${tick('ach','Haemorrhage')}${tick('acs','Sepsis')}${tick('acp','Uterine perforation')}${tick('acsh','Shock')}${tick('aca','Severe anaemia')}
+   </div>
+   <div class="grid" style="margin-top:6px">
+    <label>Haemoglobin (g/dl)<input id="achb" type="number" step="0.1" value="${esc(rec&&rec.hgb!=null?rec.hgb:'')}"></label>
+    <label>Blood loss (ml)<input id="acbl" type="number" value="${esc(rec&&rec.blood_loss_ml!=null?rec.blood_loss_ml:'')}"></label>
+   </div>
+   <div id="acalert"></div></details>
+
+   <details class="moh" open><summary>What was done</summary><div class="grid">
+    <label>Procedure<select id="acproc">${selOpts([
+      ['mva','Manual vacuum aspiration (MVA)'],['medical','Medical (misoprostol ± mifepristone)'],
+      ['evacuation','Surgical evacuation'],['expectant','Expectant management'],
+      ['laparotomy','Laparotomy (ectopic)'],['referred','Referred — not done here'],['none','None']], rec?rec.procedure_done:'')}</select></label>
+    <label>Note<input id="acpn" placeholder="optional" value="${esc(rec&&rec.procedure_note?rec.procedure_note:'')}"></label>
+   </div>
+   <div class="ticks" style="margin-top:6px">
+    ${tick('actu','Uterotonic')}${tick('acta','Antibiotics')}${tick('actf','IV fluids')}${tick('actb','Blood transfusion')}${tick('acad','Anti-D given (Rh negative)')}
+   </div></details>
+
+   <details class="moh" open><summary>Contraception before she leaves <span class="muted">&mdash; the most effective thing that happens today</span></summary>
+    <div class="muted" style="font-size:12px;margin-bottom:6px">She is fertile again within about two weeks. Post-abortion contraception is the single most effective thing a facility can do to prevent the next unintended pregnancy &mdash; and she is here, now.</div>
+    <div class="ticks">${tick('acfc','Counselled on family planning')}</div>
+    <label>Method accepted<select id="acfm">${selOpts([['none','None / declined'],['POP','Pill'],['Inj','Injectable'],['Imp','Implant'],['IUCD','IUCD'],['Cond','Condoms'],['TL','Tubal ligation'],['Oth','Other']], rec?rec.pac_fp_method:'')}</select></label>
+   </details>
+
+   <div class="grid">
+    <label>Outcome <span style="color:#a32d2d">*</span><select id="acout">${selOpts([['recovered','Recovered — discharged'],['referred','Referred'],['died','SHE DIED'],['absconded','Left before care was complete']], rec?rec.outcome:'')}</select></label>
+    <label id="acrefw" style="display:none">Referred to<input id="acref" value="${esc(rec&&rec.referred_to?rec.referred_to:'')}"></label>
+   </div>
+   <label>Remark<input id="acrmk" value="${esc(rec&&rec.remark?rec.remark:'')}"></label>
+   <div id="acdied"></div>
+   <button class="act" id="acsave" style="margin-top:10px">${rec?'Save the correction':'Save'}</button> <span class="muted" id="acm"></span>
+  </div>`;
+
+  if(rec){
+    ['ach:comp_haemorrhage','acs:comp_sepsis','acp:comp_perforation','acsh:comp_shock','aca:comp_anaemia',
+     'actu:tx_uterotonic','acta:tx_antibiotics','actf:tx_iv_fluids','actb:tx_blood','acad:anti_d_given','acfc:pac_fp_counselled']
+      .forEach(p=>{ const [k,c]=p.split(':'); const el=$('#'+k); if(el) el.checked=(rec[c]==1); });
+  }
+  const paint=()=>{
+    const A=[];
+    if(tk('acsh')) A.push(['red','Shock','Resuscitate now: two wide-bore lines, fluids, blood if you have it, and treat the cause. Refer if she does not stabilise.']);
+    if(tk('ach')) A.push(['red','Haemorrhage','Uterotonic, evacuate the uterus, and be ready to transfuse. Haemorrhage after an abortion kills quickly.']);
+    if(tk('acs')) A.push(['red','Sepsis','Broad-spectrum antibiotics now and evacuate the uterus. Septic abortion is a direct cause of maternal death.']);
+    if($('#actype').value==='ectopic') A.push(['red','Ectopic pregnancy','A ruptured ectopic bleeds internally and kills within hours. If you cannot operate here, refer NOW with a line running.']);
+    if(tk('acp')) A.push(['red','Uterine perforation','She needs surgical assessment. Refer.']);
+    const hb=+($('#achb').value||0); if(hb && hb<7) A.push(['red','Severe anaemia','Haemoglobin '+hb+' g/dl. Transfuse per protocol and treat the cause.']);
+    if(rhNeg && !tk('acad')) A.push(['amber','Anti-D not yet recorded','She is Rh negative. Anti-D after a pregnancy loss protects every future pregnancy.']);
+    $('#acalert').innerHTML=A.map(a=>alertBox(a[0],a[1],a[2])).join('');
+    $('#acrefw').style.display=($('#acout').value==='referred')?'':'none';
+    $('#acdied').innerHTML=($('#acout').value==='died')
+      ? alertBox('red','She died — this must be recorded as a maternal death','Saving this will take you to the maternal death record. It is reportable through Maternal Death Surveillance and Response, and a death recorded nowhere is a death that never happened.')
+      : '';
+  };
+  ['ach','acs','acp','acsh','aca','acad','actype','acout'].forEach(k=>{const el=$('#'+k); if(el) el.addEventListener('change',paint);});
+  const hbEl=$('#achb'); if(hbEl) hbEl.addEventListener('input',paint);
+  paint();
+
+  $('#acsave').onclick=async()=>{
+    if(!$('#actype').value){ modal('What happened?','Record whether this was a miscarriage, safe abortion care, the complications of an unsafe abortion, or an ectopic pregnancy. They are different events and must not be counted as the same thing.','risk'); return; }
+    if(!$('#acout').value){ modal('Outcome','Record what happened to her: recovered, referred, or died.','risk'); return; }
+    if(!checkRanges([['achb','hgb'],['acbl','blood_loss_ml'],['acga','ga_weeks']])) return;
+    const b=$('#acsave'); b.disabled=true;
+    try{
+      const body={episode_id:+id, care_date:ecGet('acd'), ga_weeks:numOrNull($('#acga').value),
+        loss_type:$('#actype').value, presentation:($('#acpres').value||null),
+        procedure_done:($('#acproc').value||null), procedure_note:($('#acpn').value||null),
+        comp_haemorrhage:tk('ach'), comp_sepsis:tk('acs'), comp_perforation:tk('acp'), comp_shock:tk('acsh'), comp_anaemia:tk('aca'),
+        tx_uterotonic:tk('actu'), tx_antibiotics:tk('acta'), tx_iv_fluids:tk('actf'), tx_blood:tk('actb'), anti_d_given:tk('acad'),
+        hgb:numOrNull($('#achb').value), blood_loss_ml:numOrNull($('#acbl').value),
+        pac_fp_counselled:tk('acfc'), pac_fp_method:($('#acfm').value||null),
+        outcome:$('#acout').value, referred_to:($('#acout').value==='referred'?($('#acref').value||null):null),
+        remark:($('#acrmk').value||null)};
+      const r = rec ? await api('PATCH','abortion/'+rec.id, body) : await api('POST','abortion', body);
+      if(r && (r.ids||r.ok||r.id||r.queued)){
+        $('#acm').textContent=' saved';
+        if($('#acout').value==='died'){ setTimeout(()=>location.hash='#death/'+id, 600); return; }
+        // She is no longer pregnant. Her episode of care ends here, not on an antenatal worklist.
+        await api('PATCH','episodes/'+id,{status:'closed', close_reason:'pregnancy ended'}).catch(()=>{});
+        toast('Recorded. Her episode is closed — she is no longer on the antenatal list.','ok');
+        setTimeout(()=>location.hash='#patient/'+id, 900);
+      } else $('#acm').textContent=' '+((r&&r.error)||'error');
+    } finally { b.disabled=false; }
+  };
+}
+
+// ---- A MATERNAL DEATH ---------------------------------------------------------------------------
+// She could only be recorded as having died on a delivery record or a postnatal visit. A woman who
+// died before delivery could not be recorded as dead AT ALL — she just stopped appearing.
+async function deathScreen(id){
+  const W=await epOne(id);
+  if(!W || !W.woman_id){ app().innerHTML=nav()+'<div class="card"><h3>Record could not be loaded</h3></div>'; return; }
+  const name=((W.first_name||'')+' '+(W.father_name||'')).trim();
+  app().innerHTML=nav()+`<div class="card"><h3>Record a maternal death</h3>
+   <p><b>${esc(name)}</b> &middot; MRN ${esc(W.mrn||'')}${W.age?(' &middot; '+esc(W.age)+' years'):''}</p>
+   <div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:10px 12px;margin:8px 0;font-size:13px">
+     This is reportable through <b>Maternal Death Surveillance and Response</b>. Record it here so that it is counted, reviewed, and acted on. A death recorded nowhere is a death that never happened &mdash; and the next woman dies of the same thing.
+   </div>
+   <div class="grid">
+     <label>Date and time of death <span style="color:#a32d2d">*</span><input id="mdt" type="datetime-local" value="${esc(localDateTime())}"></label>
+     <label>When in the pregnancy <span style="color:#a32d2d">*</span><select id="mdp">${selOpts([
+       ['antenatal','Antenatal — before labour'],
+       ['abortion_related','Abortion-related (including ectopic)'],
+       ['intrapartum','In labour / at birth'],
+       ['postpartum','Postpartum — within 42 days'],
+       ['unknown','Unknown']])}</select></label>
+     <label>Gestational age (weeks)<input id="mdg" type="number" min="4" max="45"></label>
+     <label>Where she died<select id="mdpl">${selOpts([
+       ['this_facility','In this facility'],['in_transit','In transit / on the way'],
+       ['at_home','At home'],['other_facility','At another facility'],['unknown','Unknown']])}</select></label>
+     <label>Probable cause<select id="mdc">${selOpts([
+       ['haemorrhage','Haemorrhage'],['hypertensive','Hypertensive disorder (pre-eclampsia / eclampsia)'],
+       ['sepsis','Sepsis / infection'],['obstructed','Obstructed labour / rupture'],
+       ['abortion_complication','Abortion complication'],['ectopic','Ectopic pregnancy'],
+       ['embolism','Embolism'],['indirect','Indirect (malaria, HIV, anaemia, cardiac…)'],
+       ['other','Other'],['unknown','Unknown']])}</select></label>
+     <label>Cause — detail<input id="mdcn" placeholder="optional"></label>
+   </div>
+   <label>Contributing factors <span class="muted" style="font-weight:400">— the three delays</span>
+     <input id="mdct" placeholder="delay in deciding to seek care · delay reaching the facility · delay receiving care here"></label>
+   <div class="ticks">${tick('mdr','Notified into MDSR')}</div>
+   <button class="act" id="mdsave" style="margin-top:10px;background:#a32d2d">Record the death</button> <span class="muted" id="mdm"></span>
+   <p class="muted" style="font-size:12px;margin-top:8px">Recording this closes her episode of care. Leaving a woman who has died on the labour-ward worklist for the next shift to follow up is its own cruelty.</p>
+  </div>`;
+  $('#mdsave').onclick=async()=>{
+    const b=$('#mdsave'); b.disabled=true;
+    try{
+      const r=await api('POST','maternal_deaths',{woman_id:+W.woman_id, episode_id:+id,
+        death_datetime:($('#mdt').value||'').replace('T',' ')+':00',
+        phase:$('#mdp').value, ga_weeks:numOrNull($('#mdg').value), place:$('#mdpl').value,
+        cause:$('#mdc').value, cause_note:($('#mdcn').value||null), contributing:($('#mdct').value||null),
+        reported_mdsr:tk('mdr')});
+      if(r&&(r.id||r.ok||r.queued)){ toast('Recorded. Her episode of care is closed.','ok'); setTimeout(()=>location.hash='#patient/'+id,900); }
+      else $('#mdm').textContent=' '+((r&&r.error)||'error');
+    } finally { b.disabled=false; }
+  };
+}
+
 // ---- EXPORT: the facility's data, in its own hands ----------------------------------------------
 // The record belongs to the facility, not to this application. If the tool goes away, or the woreda
 // wants the figures in a spreadsheet, there has to be a way out. CSV, because Excel is what the
@@ -5267,7 +5502,7 @@ async function exportScreen(){
   if(!(ME.role==='provider'||ME.role==='supervisor'||ADMIN())){ app().innerHTML=nav()+'<div class="card">Providers, supervisors and admins only.</div>'; return; }
   const today=new Date().toISOString().slice(0,10);
   const first=today.slice(0,8)+'01';
-  const T=[['women','Patients registered'],['anc','ANC contacts'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals']];
+  const T=[['women','Patients registered'],['anc','ANC contacts'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals'],['loss','Pregnancy loss / abortion care'],['deaths','Maternal deaths']];
   app().innerHTML=nav()+`<div class="card">
     <h3>Export the facility&rsquo;s records</h3>
     <p class="muted">A spreadsheet of what this facility recorded, for the dates you choose. It opens in Excel.</p>
@@ -5452,13 +5687,18 @@ async function patientHub(id){
   // admitted straight into labour, unbooked (high risk by definition), had no way anywhere in
   // the application to record a previous caesarean. The model then scored her prior_cs = 0.
   const scrTile = tile('#anc/'+id,'Risk screening');
+  // A pregnancy can end at any point in the antenatal period, and a woman can die at any point in
+  // any of them. Both had nowhere to go.
+  const lossTile  = (cat==='anc'||cat==='abortion') ? tile('#abortion/'+id,'Pregnancy loss / abortion care') : '';
+  const deathTile = (ME.role==='provider'||ADMIN()) ? tile('#death/'+id,'Record a maternal death') : '';
   let tiles, fold='';
   if(ME.role==='observer') tiles=[tile('#report/'+id,'Full record')];   // read-only role: view the summary, no data-entry screens
-  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details')];
-  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record')];
+  else if(cat==='abortion') tiles=[tile('#abortion/'+id,'Pregnancy loss / abortion care'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),deathTile];
+  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),lossTile,deathTile];
+  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
     if(isLab&&delivered){ const lab=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
       fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
   tiles=tiles.filter(Boolean);
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
