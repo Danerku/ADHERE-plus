@@ -56,8 +56,20 @@ function reminders_run($db, $windowDays = 2){
     $generated++;
   }
 
-  // 2) Send — every pending reminder through the gateway stub.
-  $pend = $db->query("SELECT id, phone, message FROM reminders WHERE status='pending' ORDER BY id LIMIT 500")->fetchAll();
+  // 2) Send — every pending reminder THAT IS DUE.
+  //
+  // THIS QUERY HAD NO DUE-DATE FILTER, and it was safe only by accident: the generator above created
+  // rows whose due date was always within a couple of days of today, so "pending" and "due" happened
+  // to be the same set. The preconception module breaks that assumption on purpose — its whole point
+  // is a reminder dated about THREE MONTHS OUT ("you may try to conceive from ..."), which is the date
+  // the folic acid has finished protecting against neural tube defects.
+  //
+  // Without this filter, the very next scheduler tick would have texted a woman that she may conceive
+  // now — three months before it is true, and about the one thing the module exists to get right.
+  // A reminder is sent when it is DUE. Not when it is written.
+  $pend = $db->query("SELECT id, phone, message FROM reminders
+                       WHERE status='pending' AND (due_date IS NULL OR due_date <= CURDATE())
+                       ORDER BY id LIMIT 500")->fetchAll();
   foreach($pend as $p){
     if(sms_send_stub($p['phone'], $p['message'])){
       $db->prepare("UPDATE reminders SET status='sent', sent_at=NOW() WHERE id=?")->execute([$p['id']]); $sent++;

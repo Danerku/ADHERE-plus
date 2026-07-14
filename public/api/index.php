@@ -441,6 +441,12 @@ try {
       if(!$row) err('not found',404);
       db()->prepare("UPDATE episodes SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
           ->execute([$u['id'],$reason,$eid]);
+      // The PCC uptake checklist belongs to the episode. It was the one child row that did not go with
+      // it — so a removed ANC episode kept feeding three national indicators from beyond the grave.
+      // The reason carries VOID_CASCADE_PREFIX, so restoring the episode can restore it too, and a row
+      // voided in its own right stays voided.
+      db()->prepare("UPDATE pcc_uptake SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE episode_id=? AND voided=0")
+          ->execute([$u['id'],VOID_CASCADE_PREFIX.$reason,$eid]);
       $label=trim(($row['first_name']??'').' '.($row['father_name']??'')).' ('.($row['mrn']??'').') — '.($row['service_category']??'');
     }
 
@@ -1037,6 +1043,9 @@ try {
     // checkbox (0) is indistinguishable from a question never asked, and the completeness figure
     // reports care that was never given.
     'sections_reviewed',
+    // The id the tablet gave this write. UNIQUE — so an offline batch that is replayed twice lands
+    // once, instead of putting two contradictory preconception assessments on one woman's chart.
+    'client_uuid',
     'recorded_by'];
 
   $PCC_UPTAKE_FIELDS = ['episode_id','woman_id','facility_id','asked_date','verified_against',
@@ -1070,7 +1079,13 @@ try {
     }
     if($m==='POST'){ $u=require_role(['provider','admin']); $b=body();
       require_woman($b['woman_id']??0);                     // hers, and not voided
-      $b=blank_to_null($b); check_ranges($b);
+      $b=blank_to_null($b);
+      // blank_to_null() only nulls the columns that carry a numeric RANGE. This table also has four
+      // DATE columns and twenty ENUMs, and MySQL in strict mode rejects '' for both — so a payload from
+      // an older client, or a replay, came back as an opaque "one of the values is not valid" with no
+      // hint which field it meant. An empty box is "not recorded", everywhere on this form.
+      foreach($PCC_FIELDS as $f){ if(array_key_exists($f,$b) && $b[$f]==='') $b[$f]=null; }
+      check_ranges($b);
       $b['facility_id']=$u['facility_id'];                  // never taken from the client
       $b['recorded_by']=$u['id'];
       if(empty($b['contact_date'])) $b['contact_date']=date('Y-m-d');
@@ -1088,17 +1103,34 @@ try {
       if(is_array($b['cannot_assess']??null))     $b['cannot_assess']=implode('; ',$b['cannot_assess']);
       // A correction, not a re-parenting: the assessment can be corrected, but it cannot be moved to
       // another woman and its facility cannot be rewritten.
-      $f=array_intersect_key($b, array_flip(array_diff($PCC_FIELDS,['woman_id','facility_id','recorded_by'])));
+      $f=array_intersect_key($b, array_flip(array_diff($PCC_FIELDS,['woman_id','facility_id','recorded_by','client_uuid'])));
       if(!$f) err('nothing to update');
-      foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_assessments SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      // All of them, or none. A constraint tripped on a late column must not leave the record
+      // half-corrected — with, say, the readiness verdict updated and the finding that produced it not.
+      db()->beginTransaction();
+      try{
+        foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_assessments SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+        db()->commit();
+      }catch(Throwable $ex1){ db()->rollBack(); throw $ex1; }
       audit('update','pcc_assessments',$id,array_keys($f)); out(['ok'=>true]); }
     if($m==='DELETE' && $id){ $u=require_role(['provider','admin']); $b=body();
       $reason=trim((string)($b['reason']??'')); if(strlen($reason)<5) err('a reason is required to void a record');
-      $q=db()->prepare("SELECT woman_id FROM pcc_assessments WHERE id=? AND voided=0"); $q->execute([$id]); $row=$q->fetch();
+      $q=db()->prepare("SELECT p.woman_id, w.mrn, w.first_name, w.father_name
+                          FROM pcc_assessments p JOIN women w ON w.id=p.woman_id
+                         WHERE p.id=? AND p.voided=0");
+      $q->execute([$id]); $row=$q->fetch();
       if(!$row) err('not found',404);
       require_woman($row['woman_id']);
       db()->prepare("UPDATE pcc_assessments SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
           ->execute([$u['id'],$reason,$id]);
+      // An admin is told when a PROVIDER removes a record — the same rule as every other void. It was
+      // missing here, so a preconception assessment was the one clinical record a provider could remove
+      // without anybody being notified.
+      if(($u['role']??'')==='provider'){
+        insert('void_notices',['facility_id'=>$u['facility_id'],'entity'=>'pcc_assessment','entity_id'=>(int)$id,
+          'label'=>trim(($row['first_name']??'').' '.($row['father_name']??'')).' ('.($row['mrn']??'').') — preconception assessment',
+          'reason'=>$reason,'voided_by'=>$u['id'],'voided_at'=>date('Y-m-d H:i:s')]);
+      }
       audit('void','pcc_assessments',$id,['reason'=>$reason]); out(['ok'=>true]); }
   }
 
@@ -1108,19 +1140,31 @@ try {
       out($st->fetch()?:[]); }
     if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0);
       $b=blank_to_null($b);
+      foreach($PCC_UPTAKE_FIELDS as $f){ if(array_key_exists($f,$b) && $b[$f]==='') $b[$f]=null; }
       $e=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $e->execute([$b['episode_id']]); $ep=$e->fetch();
       $b['woman_id']=$ep['woman_id']; $b['facility_id']=$u['facility_id']; $b['recorded_by']=$u['id'];
       if(empty($b['asked_date'])) $b['asked_date']=date('Y-m-d');
-      $b['status']=pcc_uptake_status($b);                   // the server decides, always
-      $row=array_intersect_key($b,array_flip($PCC_UPTAKE_FIELDS));
       // One row per episode (UNIQUE on episode_id). Asking her again at a later contact CORRECTS the
       // answer; it does not create a second, contradictory one — and it must not 500 on the duplicate
       // key when a tablet replays a queued entry it already sent.
-      $ex=db()->prepare("SELECT id FROM pcc_uptake WHERE episode_id=?"); $ex->execute([$b['episode_id']]); $old=$ex->fetch();
+      $ex=db()->prepare("SELECT * FROM pcc_uptake WHERE episode_id=?"); $ex->execute([$b['episode_id']]); $old=$ex->fetch();
+      // THE STATUS IS DERIVED FROM THE WHOLE ROW — STORED PLUS INCOMING — NEVER FROM THE BODY ALONE.
+      //
+      // It used to be computed from $b. So a POST of {episode_id, remark:'corrected'} — a partial body,
+      // which is exactly what a correction or an older client sends — recomputed the status from a body
+      // containing NONE of the fifteen items, got 'none', and wrote that over a woman whose fifteen
+      // items were all still sitting in the row saying otherwise. The stored status then contradicted
+      // the stored answers, and `status` is the only column the dashboard and the supervisor rollup
+      // read. Three national indicators, quietly wrong, with no way to see it from the screen.
+      $b['status']=pcc_uptake_status(array_merge($old?:[], $b));
+      $row=array_intersect_key($b,array_flip($PCC_UPTAKE_FIELDS));
       if($old){
         $f=array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by']));
-        foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
-        db()->prepare("UPDATE pcc_uptake SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$old['id']]);
+        db()->beginTransaction();
+        try{
+          foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+          db()->commit();
+        }catch(Throwable $ex2){ db()->rollBack(); throw $ex2; }
         audit('update','pcc_uptake',$old['id'],['status'=>$b['status']]);
         out(['id'=>(int)$old['id'],'status'=>$b['status']]);
       }
@@ -1132,11 +1176,30 @@ try {
       if(!$row) err('not found',404);
       require_ep($row['episode_id']);
       $b=blank_to_null($b);
+      foreach($PCC_UPTAKE_FIELDS as $f2){ if(array_key_exists($f2,$b) && $b[$f2]==='') $b[$f2]=null; }
       $merged=array_merge($row,$b); $b['status']=pcc_uptake_status($merged);
       $f=array_intersect_key($b, array_flip(array_diff($PCC_UPTAKE_FIELDS,['episode_id','woman_id','facility_id','recorded_by'])));
       if(!$f) err('nothing to update');
-      foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      // ALL THE COLUMNS, OR NONE OF THEM. Applied one UPDATE at a time, a value that trips a constraint
+      // on the twentieth column leaves the first nineteen committed — and `status` could be persisted
+      // while the items it was derived from were not. A half-corrected record is worse than a rejected
+      // one, because nothing about it looks wrong.
+      db()->beginTransaction();
+      try{
+        foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+        db()->commit();
+      }catch(Throwable $ex3){ db()->rollBack(); throw $ex3; }
       audit('update','pcc_uptake',$id,array_keys($f)); out(['ok'=>true,'status'=>$b['status']]); }
+    // A checklist recorded against the wrong episode could never be removed — there was no DELETE at
+    // all. It is soft-voided like everything else: the row survives, with who removed it and why.
+    if($m==='DELETE' && $id){ $u=require_role(['provider','admin']); $b=body();
+      $reason=trim((string)($b['reason']??'')); if(strlen($reason)<5) err('a reason is required to void a record');
+      $q=db()->prepare("SELECT episode_id FROM pcc_uptake WHERE id=? AND voided=0"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      require_ep($row['episode_id']);
+      db()->prepare("UPDATE pcc_uptake SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
+          ->execute([$u['id'],$reason,$id]);
+      audit('void','pcc_uptake',$id,['reason'=>$reason]); out(['ok'=>true]); }
   }
 
   // ---- AI risk score (server-stored; scoring done on-device) ----
@@ -1713,13 +1776,21 @@ try {
        // the facility's own lab gap, said out loud instead of being hidden inside a green tick.
        'incomplete'   =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.readiness='incomplete'".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        'couple_counselled'=>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.couple_counselled=1".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),   // Table 7 indicator 5
+       // The facility's own laboratory gap. Read off `cannot_assess`, NOT off readiness='incomplete':
+       // `optimize` outranks `incomplete`, so a woman with an untested HBsAg AND a raised BMI is filed
+       // as `optimize` and would have vanished from the very count that exists to measure the gap.
+       'gaps'         =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.cannot_assess IS NOT NULL AND e.cannot_assess<>''".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
        // ---- uptake at ANC (Table 8) — the national indicators ----
-       'asked'        =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'uptake_none'  =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.status='none'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'uptake_partial'=>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.status='partial'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'uptake_optimal'=>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.status='optimal'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'planned_preg' =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.planned_pregnancy=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 2
-       'ifa_before'   =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.i3_folic_acid=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 3
+       // `AND ep.voided=0`: an uptake row on a VOIDED EPISODE is not part of the record. Without the
+       // join it stayed in the numerator while its episode dropped out of the denominator, so the
+       // "asked at ANC" percentage could exceed 100% — and the export, the chart and this screen gave
+       // three different answers for the same facility.
+       'asked'        =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_none'  =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.status='none'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_partial'=>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.status='partial'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_optimal'=>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.status='optimal'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'planned_preg' =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.planned_pregnancy=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 2
+       'ifa_before'   =>$one("SELECT COUNT(*) c FROM pcc_uptake e JOIN episodes ep ON ep.id=e.episode_id AND ep.voided=0 WHERE e.facility_id=? AND e.voided=0 AND e.i3_folic_acid=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 3
      ],
     ]);
   }
@@ -1938,45 +2009,74 @@ try {
       'danger_signs'         => ['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by'],
     ];
 
-    // PRECONCEPTION CARE REPLAYS ON THE WOMAN, NOT ON AN EPISODE.
+    // ONE BAD ROW MUST NOT TAKE THE REST OF THE QUEUE DOWN WITH IT.
     //
-    // Every other entity in this queue is guarded by require_ep(). A PCC assessment has no episode —
-    // it is care given before there is a pregnancy — so it needs its own guard, require_woman(), with
-    // the same two properties: hers, and not voided. Handled separately rather than bent into $map,
-    // because bending it would have meant passing episode_id=0 to require_ep() and either failing
-    // every queued PCC entry or, worse, letting it through unguarded.
+    // require_woman() / require_ep() call err(), which EXITS the request. So a single item the server
+    // will not accept — most commonly a record whose patient was voided while the tablet was offline —
+    // used to end the whole /sync request, after some earlier items had already been committed and with
+    // $applied thrown away. The device never learned what landed, re-sent the batch, and duplicated it.
+    // Worse: because PCC is replayed first, one such row meant the LABOUR observations and DANGER SIGNS
+    // behind it in the same batch were never even reached. A dead woman's queued row could withhold a
+    // living one's labour record.
+    //
+    // Now: each item is tried on its own. A failure is REPORTED against its uuid and the queue moves on,
+    // so the client can surface it on the failed-entries screen with her values intact.
+    $fail=function($it,$e) use (&$applied){
+      $applied[]=['uuid'=>$it['client_uuid']??null,'error'=>$e];
+    };
+
     foreach($items as $it){
       if(($it['entity']??'')!=='pcc') continue;
-      $p=$it['payload']??[];
-      require_woman($p['woman_id']??0);
-      $p=blank_to_null($p); check_ranges($p);
-      $p['facility_id']=$u['facility_id']; $p['recorded_by']=$u['id'];
-      if(empty($p['contact_date'])) $p['contact_date']=date('Y-m-d');
-      if(is_array($p['readiness_reasons']??null)) $p['readiness_reasons']=implode(' | ',$p['readiness_reasons']);
-      if(is_array($p['cannot_assess']??null))     $p['cannot_assess']=implode('; ',$p['cannot_assess']);
-      $p=array_intersect_key($p,array_flip($PCC_FIELDS));   // the SAME list POST /pcc uses
-      $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_assessments',$p)];
+      try{
+        $p=$it['payload']??[];
+        if(!woman_facility_ok($p['woman_id']??0)) throw new RuntimeException('this patient record no longer exists here');
+        $p=blank_to_null($p);
+        foreach($PCC_FIELDS as $f){ if(array_key_exists($f,$p) && $p[$f]==='') $p[$f]=null; }  // '' is not a date, and not an enum
+        check_ranges($p);
+        $p['facility_id']=$u['facility_id']; $p['recorded_by']=$u['id'];
+        if(empty($p['contact_date'])) $p['contact_date']=date('Y-m-d');
+        if(is_array($p['readiness_reasons']??null)) $p['readiness_reasons']=implode(' | ',$p['readiness_reasons']);
+        if(is_array($p['cannot_assess']??null))     $p['cannot_assess']=implode('; ',$p['cannot_assess']);
+        if(!empty($it['client_uuid'])) $p['client_uuid']=$it['client_uuid'];
+        $p=array_intersect_key($p,array_flip($PCC_FIELDS));   // the SAME list POST /pcc uses
+        // A REPLAYED BATCH MUST NOT CREATE A SECOND ASSESSMENT. pcc_uptake is protected by its unique
+        // key; pcc_assessments had nothing at all, so a batch re-sent after a failure duplicated every
+        // PCC row in it — double-counting the facility's caseload and putting two contradictory
+        // readiness verdicts on one woman's chart. The client's own uuid is the identity.
+        if(!empty($p['client_uuid'])){
+          $ex=db()->prepare("SELECT id FROM pcc_assessments WHERE client_uuid=?"); $ex->execute([$p['client_uuid']]);
+          if($old=$ex->fetch()){ $applied[]=['uuid'=>$it['client_uuid'],'id'=>(int)$old['id']]; continue; }
+        }
+        $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_assessments',$p)];
+      }catch(Throwable $e){ $fail($it, $e->getMessage()); }
     }
     // The ANC uptake checklist replays on the episode, and it is an UPSERT: the row is unique per
     // episode, so a tablet that queued it twice must correct the row rather than hit the unique key
     // and 500 (a 5xx retries for ever — the queue would wedge on it).
     foreach($items as $it){
-      if(($it['entity']??'')!=='pcc_uptake') continue;
-      $p=$it['payload']??[]; require_ep($p['episode_id']??0);
-      $p=blank_to_null($p);
-      $e=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $e->execute([$p['episode_id']]); $er=$e->fetch();
-      $p['woman_id']=$er['woman_id']; $p['facility_id']=$u['facility_id']; $p['recorded_by']=$u['id'];
-      if(empty($p['asked_date'])) $p['asked_date']=date('Y-m-d');
-      $p['status']=pcc_uptake_status($p);
-      $row=array_intersect_key($p,array_flip($PCC_UPTAKE_FIELDS));
-      $ex=db()->prepare("SELECT id FROM pcc_uptake WHERE episode_id=?"); $ex->execute([$p['episode_id']]); $old=$ex->fetch();
-      if($old){
-        foreach(array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by'])) as $k=>$v){
-          db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
-        $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>(int)$old['id']];
-      } else {
-        $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_uptake',$row)];
-      }
+      if(($it['entity']??'')!=='pcc_uptake' && ($it['entity']??'')!=='pcc-uptake') continue;
+      try{
+        $p=$it['payload']??[];
+        if(!ep_facility_ok($p['episode_id']??0)) throw new RuntimeException('this episode no longer exists here');
+        $p=blank_to_null($p);
+        foreach($PCC_UPTAKE_FIELDS as $f){ if(array_key_exists($f,$p) && $p[$f]==='') $p[$f]=null; }
+        $e=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $e->execute([$p['episode_id']]); $er=$e->fetch();
+        $p['woman_id']=$er['woman_id']; $p['facility_id']=$u['facility_id']; $p['recorded_by']=$u['id'];
+        if(empty($p['asked_date'])) $p['asked_date']=date('Y-m-d');
+        $ex=db()->prepare("SELECT * FROM pcc_uptake WHERE episode_id=?"); $ex->execute([$p['episode_id']]); $old=$ex->fetch();
+        // Derive the status from the WHOLE row, stored plus incoming — never from the payload alone.
+        // A replay carrying a subset of the items would otherwise recompute 'none' from a body with no
+        // items in it, and write that over a woman who had told us she took folic acid.
+        $p['status']=pcc_uptake_status(array_merge($old?:[], $p));
+        $row=array_intersect_key($p,array_flip($PCC_UPTAKE_FIELDS));
+        if($old){
+          foreach(array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by'])) as $k=>$v){
+            db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+          $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>(int)$old['id']];
+        } else {
+          $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_uptake',$row)];
+        }
+      }catch(Throwable $e){ $fail($it, $e->getMessage()); }
     }
 
     foreach($items as $it){ $ep=$it['entity']??''; $payload=$it['payload']??[];
@@ -2030,9 +2130,16 @@ try {
     $pccW     = $grp("SELECT p.facility_id fid, COUNT(DISTINCT p.woman_id) c FROM pcc_assessments p JOIN women w ON w.id=p.woman_id AND w.voided=0
                        WHERE p.voided=0 AND p.facility_id IN ($in)".$dc('p.contact_date')." GROUP BY p.facility_id");
     $ancEp    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.service_category='anc' AND e.facility_id IN ($in)".$dc('e.created_at')." GROUP BY e.facility_id");
-    $asked    = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x JOIN women w ON w.id=x.woman_id AND w.voided=0
+    // The episode join is NOT optional. The denominator ($ancEp) already excludes voided episodes; if
+    // the numerator does not, voiding an ANC episode removes it from the bottom of the fraction and
+    // leaves it at the top — and pcc_asked_pct reports more than 100%.
+    $asked    = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x
+                        JOIN women w    ON w.id=x.woman_id  AND w.voided=0
+                        JOIN episodes e2 ON e2.id=x.episode_id AND e2.voided=0
                        WHERE x.voided=0 AND x.facility_id IN ($in)".$dc('x.asked_date')." GROUP BY x.facility_id");
-    $optimal  = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x JOIN women w ON w.id=x.woman_id AND w.voided=0
+    $optimal  = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x
+                        JOIN women w    ON w.id=x.woman_id  AND w.voided=0
+                        JOIN episodes e2 ON e2.id=x.episode_id AND e2.voided=0
                        WHERE x.voided=0 AND x.status='optimal' AND x.facility_id IN ($in)".$dc('x.asked_date')." GROUP BY x.facility_id");
     $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
       $anc=$ancEp[$fid]??0; $ak=$asked[$fid]??0;
@@ -2067,11 +2174,19 @@ try {
     if($m==='POST' && !$id){ $u=require_role(['provider','admin']); $b=body();
       $wid=(int)($b['woman_id']??0); require_woman($wid);
       $due=$b['due_date']??''; if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$due)) err('a due date is required');
-      $kind=preg_replace('/[^a-z_]/','',strtolower((string)($b['kind']??'custom'))) ?: 'custom';
+      // THE KIND IS WHITELISTED, AND 'anc'/'pnc' ARE NOT ON THE LIST.
+      // The scheduler dedupes its own ANC reminders on (woman_id, due_date, kind='anc'). A hand-made
+      // row with kind='anc' would therefore OCCUPY THAT SLOT and the scheduler would never generate the
+      // real antenatal-appointment reminder for that woman on that date — she simply would not be told
+      // about her appointment. The scheduler owns those kinds; a provider may only add her own.
+      $kind=strtolower(trim((string)($b['kind']??'custom')));
+      if(!in_array($kind,['custom','pcc_folate','pcc_followup'],true)) err('that is not a reminder a provider can create');
+      $msg=trim((string)($b['message']??''));
+      if($msg==='') err('a reminder needs a message — an empty SMS is worse than none');
       $w=db()->prepare("SELECT phone, sms_consent FROM women WHERE id=?"); $w->execute([$wid]); $wr=$w->fetch();
       $phone=((int)($wr['sms_consent']??0)===1) ? ($wr['phone']??null) : null;
       $rid=insert('reminders',['woman_id'=>$wid,'facility_id'=>(int)$u['facility_id'],'kind'=>$kind,
-        'due_date'=>$due,'phone'=>$phone,'message'=>mb_substr((string)($b['message']??''),0,300),'status'=>'pending']);
+        'due_date'=>$due,'phone'=>$phone,'message'=>mb_substr($msg,0,300),'status'=>'pending']);
       audit('create','reminders',$rid,['kind'=>$kind,'due'=>$due,'sms'=>$phone?1:0]);
       out(['id'=>$rid,'sms'=>$phone?1:0],201); }
   }

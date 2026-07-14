@@ -139,20 +139,40 @@
 
   // The 3-month clock. This is the single most actionable number in the whole module: it is the date
   // she can be told it is safe to try. Everything else is advice; this is a date.
+  //
+  // DO NOT USE toISOString() HERE. `new Date('2026-07-14T00:00:00')` is parsed as LOCAL midnight, and
+  // toISOString() converts to UTC — so on a tablet in Addis (UTC+3) it returns 2026-07-13. Every date
+  // this module produced would have been ONE DAY EARLY, including the date a woman is told she may
+  // safely conceive: she would be cleared a day before the folate had done its work. The whole point
+  // of the three months is that the days are counted correctly.
+  function ymd(d){
+    const p = n => (n<10?'0':'')+n;
+    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());   // local fields, no UTC shift
+  }
+  // Adding 3 months to 30 November must not land on 2 March. Clamp to the end of the target month.
+  function addMonths(d, m){
+    const day = d.getDate();
+    const t = new Date(d.getFullYear(), d.getMonth()+m, 1);
+    const lastDay = new Date(t.getFullYear(), t.getMonth()+1, 0).getDate();
+    t.setDate(Math.min(day, lastDay));
+    return t;
+  }
   function folateClock(start_date){
     if(!start_date) return null;
-    const d = new Date(String(start_date).slice(0,10) + 'T00:00:00');
+    const s = String(start_date).slice(0,10).split('-');
+    if(s.length !== 3) return null;
+    const d = new Date(+s[0], +s[1]-1, +s[2]);                          // local, unambiguous
     if(isNaN(d)) return null;
-    const ready = new Date(d); ready.setMonth(ready.getMonth() + T.FOLATE_MONTHS);
-    const days = Math.ceil((ready - new Date()) / 86400000);
+    const ready = addMonths(d, T.FOLATE_MONTHS);
+    const today = new Date(); today.setHours(0,0,0,0);
+    const days = Math.round((ready - today) / 86400000);
     return {
-      start: iso(d),
-      conception_from: iso(ready),
+      start: ymd(d),
+      conception_from: ymd(ready),
       days_remaining: days > 0 ? days : 0,
       complete: days <= 0,
     };
   }
-  function iso(d){ return d.toISOString().slice(0,10); }
 
   // ---- READINESS ---------------------------------------------------------------------------------
   // Four states, in strict precedence:
@@ -166,8 +186,27 @@
   //   ready      — assessed, and nothing is outstanding.
   //
   // Every reason is a sentence a provider can act on. There is no score, and there is no bare label.
+  // "none" TYPED INTO A FREE-TEXT BOX IS NOT A FINDING.
+  //
+  // The adverse-outcome box says, in its own placeholder, "none, or what happened". A provider who
+  // does as she is told and types "none" was escalating the woman to 5 mg high-dose folic acid, and
+  // the printed care plan read: "5 mg is indicated: previous adverse pregnancy outcome (none)".
+  // The same trap sat on "other substances" and on "cardiac symptoms". A box that invites the word
+  // "none" must understand it.
+  function txt(v){
+    const s = String(v==null?'':v).trim().toLowerCase();
+    if(!s) return null;
+    if(['none','nil','no','n/a','na','-','nothing','negative','none.'].indexOf(s) >= 0) return null;
+    return v;
+  }
+
   function readiness(a){
-    a = a || {};
+    a = Object.assign({}, a || {});
+    a.prior_apo        = txt(a.prior_apo);
+    a.other_substance  = txt(a.other_substance);
+    a.cardiac_symptoms = txt(a.cardiac_symptoms);
+    a.current_medicines= txt(a.current_medicines);
+    a.family_hx_genetic= txt(a.family_hx_genetic);
     const defer = [], optimize = [], cannot = [], advise = [];
 
     // ---------- defer: the guideline's own words ----------
@@ -180,8 +219,18 @@
     }
 
     // ---------- optimize: a target, and the number she is at ----------
-    if(bad(a.bp_systolic) && bad(a.bp_diastolic) && (+a.bp_systolic >= T.SBP || +a.bp_diastolic >= T.DBP)){
-      optimize.push('Blood pressure ' + a.bp_systolic + '/' + a.bp_diastolic +
+    // MODERATE renal impairment (1.4-2.49) used to produce nothing at all: not a defer, not an
+    // optimize, not a gap — because the value WAS recorded, it simply was not below the severe
+    // threshold. A woman with a creatinine of 2.0 was told "Ready to conceive".
+    if(bad(a.creatinine) && +a.creatinine >= T.CREAT_MOD && +a.creatinine < T.CREAT_SEVERE){
+      optimize.push('Creatinine ' + a.creatinine + ' mg/dL — moderate chronic renal disease. Refer for a pre-pregnancy renal assessment, and contraception until she has been reviewed.');
+    }
+    // Each limb is tested on its own. Requiring BOTH meant a recorded 180/(blank) raised nothing at
+    // all and then reported "blood pressure not measured" — burying the 180 the provider had written.
+    const hiSys = bad(a.bp_systolic)  && +a.bp_systolic  >= T.SBP;
+    const hiDia = bad(a.bp_diastolic) && +a.bp_diastolic >= T.DBP;
+    if(hiSys || hiDia){
+      optimize.push('Blood pressure ' + (bad(a.bp_systolic)?a.bp_systolic:'?') + '/' + (bad(a.bp_diastolic)?a.bp_diastolic:'?') +
                     ' — hypertension. Contraception until it is controlled; lifestyle and weight advice; review medication for drugs that must not be used in pregnancy.');
     }
     if(bad(a.dm_fbs) && +a.dm_fbs > T.FBS_MAX){
@@ -258,9 +307,14 @@
     // The guideline screens EVERY preconception woman for HIV, syphilis and hepatitis B. If they were
     // not done, we do not know, and we say so. The remaining tests are conditional: we only demand
     // the test where her own findings make the guideline ask for it.
+    // A DECLINED TEST IS A TEST WE DO NOT HAVE. It was falling through both branches below — neither
+    // falsy nor 'unknown' — so a woman who refused an HIV test came back "Ready to conceive" with no
+    // gap recorded anywhere. Refusal is her right; pretending we know the answer is not.
     if(!a.hiv_status || a.hiv_status === 'unknown')  cannot.push('HIV status not known');
+    else if(a.hiv_status === 'declined')             cannot.push('HIV test declined — status not known');
     if(!a.syphilis   || a.syphilis   === 'not_done') cannot.push('Syphilis test not done');
     if(!a.hbsag      || a.hbsag      === 'not_done') cannot.push('HBsAg not done');
+    if(!a.tb_screen  || a.tb_screen  === 'not_done') cannot.push('TB screening not done');
     const dmRisk = a.dm_known || (b != null && b >= T.BMI_OVER) || /gdm|gestational diabetes|stillbirth|macrosom/i.test(String(a.prior_apo||''));
     if(dmRisk && !bad(a.dm_fbs) && !bad(a.dm_hba1c)) cannot.push('Diabetes screening indicated but no blood glucose recorded');
     if(a.dm_known && !bad(a.dm_hba1c))               cannot.push('Known diabetes but no HbA1c — control cannot be judged');
@@ -277,6 +331,13 @@
 
     return {
       state: state,
+      // THE GAP IS REPORTED SEPARATELY FROM THE STATE, and this matters.
+      // `optimize` overwrites `incomplete` in the precedence above — correctly, because what she must
+      // do next is the more urgent fact. But it meant the facility's laboratory gap was only counted
+      // for women whose ONLY problem was a gap: a woman with an untested HBsAg and a BMI of 27 was
+      // filed as `optimize`, and the "could not complete" figure quietly under-reported the very thing
+      // it exists to measure. The flag travels on its own.
+      has_gaps: cannot.length > 0,
       defer: defer,
       optimize: optimize,
       cannot_assess: cannot,
@@ -370,24 +431,25 @@
   // Pre-fill the ANC checklist from her OWN preconception record, where we have one. The provider
   // still confirms every line — this fills the form, it does not answer for her. Only components
   // that were actually delivered (not merely asked about) pre-tick.
+  //
+  // THIS FUNCTION FELL INTO THE SAME `0 !== null` TRAP componentDone() was rewritten to escape.
+  // Items 11, 13, 14 and 15 asked `is the checkbox column not null?` — and an UNTICKED box is stored
+  // as 0, which is not null. So ANY woman with a PCC row, including an empty one, opened the ANC
+  // checklist with four boxes already ticked YES, which makes her at least "partial uptake" and, with
+  // folate, "optimal". Three national indicators inflate, and the provider sees a green pill over a
+  // form she has not been asked. There is one definition of "this component was delivered", and it is
+  // componentDone(). Everything defers to it.
   function uptakeFromAssessment(a){
     if(!a) return null;
     const u = {};
-    u.i1_family_planning   = a.fp_counselled ? 1 : 0;
-    u.i2_nutrition_bmi     = (a.diet_counselled || a.bmi) ? 1 : 0;
-    u.i3_folic_acid        = (a.folate_dose && a.folate_dose !== 'none') ? 1 : 0;
-    u.i4_chronic_disease   = (a.dm_known || a.htn_known || a.ckd_known || a.epilepsy || a.cardiac_who_class) ? 1 : 0;
-    u.i5_substance_use     = (a.alcohol || a.khat || a.tobacco) ? 1 : 0;
-    u.i6_physical_activity = (a.activity_min_week != null && a.activity_min_week !== '') ? 1 : 0;
-    u.i7_repro_cxca        = (a.cxca_screened === 'yes') ? 1 : 0;
-    u.i8_sexual_gbv_fgm    = a.gbv_screened ? 1 : 0;
-    u.i9_infectious        = (a.hiv_status && a.hiv_status !== 'unknown') ? 1 : 0;
-    u.i10_vaccine          = (a.td_doses != null && a.td_doses !== '') ? 1 : 0;
-    u.i11_genetic          = (a.consanguinity != null || a.prior_ntd != null) ? 1 : 0;
-    u.i12_medication       = (a.current_medicines != null && a.current_medicines !== '') ? 1 : 0;
-    u.i13_mental_health    = (a.mh_depression != null || a.mh_anxiety != null) ? 1 : 0;
-    u.i14_environmental    = (a.exposure_counselled != null) ? 1 : 0;
-    u.i15_dental           = (a.dental_problem != null) ? 1 : 0;
+    COMPONENTS.forEach(function(c){ u[c.uptake] = componentDone(c.key, a) ? 1 : 0; });
+    // Two components mean something narrower on the ANC checklist than they do in the assessment.
+    // "Did you receive folic acid?" is not "was folic acid discussed" — it is "did you take it".
+    // "Were you screened for cervical cancer?" is not "was it noted as due".
+    u.i3_folic_acid = (a.folate_dose && a.folate_dose !== 'none') ? 1 : 0;
+    u.i7_repro_cxca = (a.cxca_screened === 'yes') ? 1 : 0;
+    // A test that was declined or never run is not a screening she received.
+    u.i9_infectious = (a.hiv_status === 'positive' || a.hiv_status === 'negative') ? 1 : 0;
     u.status = uptakeStatus(u);
     return u;
   }
@@ -396,14 +458,16 @@
   function tdNextDue(doses, last_date){
     const d = +doses || 0;
     if(d >= 5) return null;
+    if(d === 0) return 'now';                             // she has had none: the first dose is due today
     if(!last_date) return null;
-    const base = new Date(String(last_date).slice(0,10) + 'T00:00:00');
-    if(isNaN(base)) return null;
-    const next = new Date(base);
+    const s = String(last_date).slice(0,10).split('-');
+    if(s.length !== 3) return null;
+    const next = new Date(+s[0], +s[1]-1, +s[2]);          // local fields — never toISOString()
+    if(isNaN(next)) return null;
     if(d === 1) next.setDate(next.getDate() + 28);        // Td2: at least 4 weeks after Td1
-    else if(d === 2) next.setMonth(next.getMonth() + 6);  // Td3: at least 6 months after Td2
+    else if(d === 2) return ymd(addMonths(next, 6));      // Td3: at least 6 months after Td2
     else next.setFullYear(next.getFullYear() + 1);        // Td4/Td5: at least a year on
-    return iso(next);
+    return ymd(next);
   }
 
   global.PCC = {

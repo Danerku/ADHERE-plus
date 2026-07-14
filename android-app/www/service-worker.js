@@ -1,6 +1,6 @@
-const CACHE='adhere-v83';
+const CACHE='adhere-v85';
 const SHELL=['./','./index.html','./app.js','./styles.css','./config.js','./manifest.webmanifest',
-  './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js','./model/lcg.js',
+  './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js','./model/lcg.js','./model/pcc.js',
   './model/risk_model.json','./model/newborn_model.json','./model/mch_rules.json'];
 
 // A NEW CACHE MUST BE FILLED FROM THE NETWORK, NOT FROM THE BROWSER'S OLD ONE.

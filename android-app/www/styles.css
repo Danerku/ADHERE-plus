@@ -391,6 +391,37 @@ table.lcg td.lcgalert{background:#fcebeb;color:#791f1f;font-weight:700}
 @media print{ table.lcg .lcgp{position:static} table.lcg td.lcgalert{background:transparent;text-decoration:underline} }
 
 /* =================================================================================================
+   PRECONCEPTION CARE
+   Fifteen components is a long form. Collapsed sections with a one-line status keep it usable in the
+   eight minutes a midwife actually has; the readiness panel stays visible above them, because it is
+   the thing she reads out to the woman. `incomplete` is deliberately NOT green — a test that was not
+   run is a gap, and it has to look like one on the screen and on the paper. */
+details.pccsec{border:1px solid var(--border);border-radius:10px;margin:6px 0;padding:8px 12px;background:#fff}
+details.pccsec summary{cursor:pointer;font-size:13px;color:#334155;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+details.pccsec[open]{background:#fbfdfc}
+.pccstat{margin-left:auto}
+.pccok{font-size:11px;color:#166534;background:#e8f5ee;border-radius:999px;padding:2px 8px}
+.pcctriage{border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:#fbfdfc}
+.pccready{border-radius:10px;padding:10px 12px;border:1px solid var(--border);background:#fff}
+.pccready-ready{background:#f2fbf6;border-color:#bfe3cd}
+.pccready-optimize{background:#fdf7ee;border-color:#f0d3a4}
+.pccready-defer{background:#fdf2f2;border-color:#e9bcbc}
+.pccready-incomplete{background:#f6f8f7;border-color:#dfe5e3}
+ul.pccrs{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.5}
+ul.pccrs li{margin-bottom:3px}
+ul.pccdefer li{color:#7f1d1d}
+ul.pccopt li{color:#633806}
+ul.pccadv li{color:#334155}
+.pccgap{margin-top:8px;padding:6px 10px;border-radius:8px;background:#fff;border:1px dashed #b6bfbc;font-size:13px;color:#334155}
+@media print{
+  details.pccsec{border:0;padding:0}
+  details.pccsec summary{font-weight:700}
+  .pccready,.pcctriage{border:0;background:transparent;padding:0}
+  .pccready-ready,.pccready-optimize,.pccready-defer,.pccready-incomplete{background:transparent}
+  .pccgap{border:0;background:transparent}
+}
+
+/* =================================================================================================
    PRINT — A PLAIN DOCUMENT, NOT A SCREENSHOT OF THE APP.
    Paper was inheriting the screen design, and the screen design is built for a tablet: cards, pills,
    two-column grids, flex rows with the value pushed hard right, `white-space:nowrap` on table cells.

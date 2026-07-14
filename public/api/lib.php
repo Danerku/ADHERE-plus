@@ -221,8 +221,13 @@ function ranges(){
     // acid dose, "contraception until fasting glucose is 80-110", the WHO cardiac class, severe renal
     // disease. A mistyped creatinine of 31 instead of 3.1 does not just look wrong, it changes what
     // the woman is told, so it is refused at the door and not merely in the browser.
-    'height_cm'=>[100,220,'Height (cm)'],        'weight_kg'=>[25,250,'Weight (kg)'],
-    'bmi'=>[8,80,'BMI'],
+    //
+    // `height_cm` and `weight_kg` ARE DELIBERATELY NOT REDECLARED HERE. They are already bounded at the
+    // top of this table (120-200 cm, 30-200 kg) and those bounds are the right ones for an adult woman
+    // — which is who a preconception client is. A PHP array literal silently keeps the LAST duplicate
+    // key, so re-declaring them here to "widen for PCC" quietly widened them for REGISTRATION and for
+    // EVERY ANC CONTACT as well, and nothing would have warned us. One column, one bound, declared once.
+    'bmi'=>[10,70,'BMI'],                        // also guards anc_visits.bmi, which is derived
     'dm_fbs'=>[20,600,'Fasting blood glucose (mg/dL)'],
     'dm_hba1c'=>[3,20,'HbA1c (%)'],
     'creatinine'=>[0.1,20,'Creatinine (mg/dL)'],
