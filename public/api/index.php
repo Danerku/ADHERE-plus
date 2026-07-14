@@ -943,7 +943,11 @@ try {
     // insert a second row — a phantom twin, a duplicate delivery.
     // maternal_vitals added: the screen can now correct a mistyped BP or temperature, and without this
     // the PATCH fell through to a 404 while the UI reported a save.
-    if($m==='PATCH' && in_array($tbl,['babies','delivery_summary','pnc_visits','anc_visits','maternal_vitals']) && $id){
+    // 'referrals' is here to CLOSE THE LOOP. A referral left the building and nothing ever came back:
+    // no record of whether she arrived, what the hospital found, or whether she came home. So the
+    // same woman was referred twice for the same thing, and the facility never learned whether
+    // referring her had helped. The feedback is recorded onto the referral it belongs to.
+    if($m==='PATCH' && in_array($tbl,['babies','delivery_summary','pnc_visits','anc_visits','maternal_vitals','referrals','abortion_care']) && $id){
       $u=require_role(['provider','admin']); $b=body();
       // SELECT * (not just episode_id): the linkage below needs the row's own visit_date when the
       // caller patches only the result and not the date.
@@ -1260,6 +1264,8 @@ try {
        'amtsl'          =>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.amtsl_uterotonic='done'$since"),
        'checklist'      =>$one("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.voided=0 AND e.id=c.episode_id WHERE e.facility_id=?$since"),
        'referred'       =>$one("SELECT COUNT(*) c FROM referrals rf JOIN episodes e ON e.voided=0 AND e.id=rf.episode_id WHERE e.facility_id=?$since"),
+       // The loop that never closed: referrals with nothing back from the receiving facility.
+       'referral_no_feedback'=>$one("SELECT COUNT(*) c FROM referrals rf JOIN episodes e ON e.voided=0 AND e.id=rf.episode_id JOIN women w ON w.voided=0 AND w.id=e.woman_id WHERE e.facility_id=? AND (rf.feedback IS NULL OR rf.feedback='')$since"),
        'red_alerts'     =>$one("SELECT COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE e.facility_id=? AND s.band='red'$since"),
      ],
      'ippfp'=>$grp("SELECT d.ippfp_method k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.ippfp_method IS NOT NULL$since GROUP BY d.ippfp_method"),

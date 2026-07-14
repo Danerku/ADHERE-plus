@@ -1,4 +1,4 @@
-const CACHE='adhere-v67';
+const CACHE='adhere-v68';
 const SHELL=['./','./index.html','./app.js','./styles.css','./config.js','./manifest.webmanifest',
   './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js',
   './model/risk_model.json','./model/newborn_model.json','./model/mch_rules.json'];

@@ -899,10 +899,14 @@ function login(){
 function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===x?' on':'';
   const L=(href,txt)=>`<a class="nav${on(href)}" href="${href}">${txt}</a>`;
   const B=(href,txt)=>`<a class="bn${on(href)}" href="${href}">${esc(txt)}</a>`;
-  const _p=(location.hash||'').replace(/^#/,'').split('/'); const _EP=['partograph','anc','checklist','danger','delivery','baby','bemonc','handover','referral','report','vitals','ancvisit','pncvisit'];
+  const _p=(location.hash||'').replace(/^#/,'').split('/'); const _EP=['partograph','anc','checklist','danger','delivery','baby','bemonc','handover','referral','report','vitals','ancvisit','pncvisit','abortion','death','letter'];
   const back=(_EP.indexOf(_p[0])>=0 && _p[1] && /^\d+$/.test(_p[1]))?`<a class="nav" href="#patient/${_p[1]}" style="font-weight:600">‹ Back to patient</a>`:'';
   // sticky patient context bar (uses cache set by patientHub)
-  const _pid=(_p[0]==='patient'||_EP.indexOf(_p[0])>=0)?_p[1]:null; const C=window.CTX;
+  const _pid=(_p[0]==='patient'||_EP.indexOf(_p[0])>=0)?_p[1]:null;
+  // The context survives a reload. A tablet in a clinic is reloaded constantly — losing her name
+  // and the step strip every time would make both features decorative.
+  if(!window.CTX){ try{ const s=sessionStorage.getItem('ctx'); if(s) window.CTX=JSON.parse(s); }catch(err){} }
+  const C=window.CTX;
   const pbar=(_pid && C && String(C.id)===String(_pid))?`<div class="pbar"><div class="pav">${esc(C.ini)}</div><div class="pinfo"><div class="pnm">${esc(C.name)}</div><div class="pmeta">${esc(C.meta)}</div></div>${_p[0]!=='patient'?`<a class="pback" href="#patient/${_pid}">Hub</a>`:''}</div>`:'';
   if(ME.role==='supervisor') return pbar+`<nav class="navbar">${L('#supervisor','Supervisor')}${L('#reminders','Reminders')}</nav><nav class="botnav">${B('#supervisor','Board')}${B('#reminders','Alerts')}</nav>`;
   // ONE place to navigate: Home. The tab strip used to repeat Antenatal / Labour / Postnatal /
@@ -913,7 +917,33 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   ${L('#home','Home')}
   ${L('#dashboard','Dashboard')}</nav>`;
   const bot=`<nav class="botnav">${B('#home','Home')}${B('#dashboard','Dashboard')}</nav>`;
-  return pbar+top+bot; }
+
+  // ---- ZONE 3: WHERE SHE IS IN HER CARE ----------------------------------------------------
+  // Three zones, not one bar of links: WHERE AM I (home / dashboard) · WHO AM I WITH (the patient
+  // bar) · WHAT AM I DOING WITH HER (this strip).
+  //
+  // Before this, every screen inside an episode was reached from the hub and left back to the hub:
+  // a star, with the hub at the centre. A provider moving through a contact — screening, then the
+  // contact itself, then vitals, then the danger signs she just mentioned — had to go back to the
+  // hub and start again between each one. The strip is the sequence of care for the kind of episode
+  // she is in, in the order it happens, with the step she is on marked.
+  //
+  // It is NAVIGATION, not a progress bar: it does not claim a step is "done", because nav() cannot
+  // know that without a fetch, and a tick that lies is worse than no tick.
+  const STEPS={
+    anc:[['#anc/','Risk screening'],['#ancvisit/','ANC contact'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#referral/','Refer'],['#report/','Full record']],
+    labour:[['#partograph/','Partograph'],['#checklist/','Safe-birth checklist'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#delivery/','Delivery'],['#baby/','Newborn'],['#bemonc/','Emergency care'],['#report/','Full record']],
+    highrisk:[['#partograph/','Partograph'],['#checklist/','Safe-birth checklist'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#delivery/','Delivery'],['#baby/','Newborn'],['#bemonc/','Emergency care'],['#report/','Full record']],
+    pnc:[['#pncvisit/','PNC visit'],['#baby/','Newborn'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#referral/','Refer'],['#report/','Full record']],
+    abortion:[['#abortion/','Loss / abortion care'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#referral/','Refer'],['#report/','Full record']],
+  };
+  let strip='';
+  if(_pid && C && String(C.id)===String(_pid) && STEPS[C.cat]){
+    const here='#'+_p[0]+'/';
+    strip=`<div class="steps">${STEPS[C.cat].map(([hrf,txt])=>
+      `<a class="step${here===hrf?' on':''}" href="${hrf}${esc(_pid)}">${esc(txt)}</a>`).join('')}</div>`;
+  }
+  return pbar+top+strip+bot; }
 
 // ---- HOME = the launcher -----------------------------------------------------
 // Full-width tiles grouped by what the provider is DOING, not by which paper register
@@ -2081,8 +2111,10 @@ async function overviewSection(){
       ${ovStat(pct(pr.amtsl||0,c.deliveries||0),'AMTSL',(pr.amtsl||0)+' of '+(c.deliveries||0))}
       ${ovStat(pct(pr.checklist||0,c.labour||0),'Safe-birth checklist',(pr.checklist||0)+' of '+(c.labour||0))}
       ${ovStat(pr.referred||0,'Referred')}
+      ${ovStat(pr.referral_no_feedback||0,'Referrals with nothing back','close the loop')}
       ${ovStat(pr.red_alerts||0,'Red AI alerts')}
     </div>
+    ${(+pr.referral_no_feedback||0)?`<p class="muted" style="font-size:12px">${esc(pr.referral_no_feedback)} referral(s) have no word back from the receiving facility. Nobody knows whether she arrived, what was found, or whether she came home &mdash; and the same woman gets referred again for the same thing. Record it on her Refer screen.</p>`:''}
 
     <h4 style="margin-top:14px">Newborn care</h4>
     <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr))">
@@ -2741,10 +2773,58 @@ async function referralScreen(id){
     <label>Transport<input id="rtr" placeholder="ambulance / private"></label>
     <label>Reason<select id="rrsn"><option>Obstructed / prolonged labour</option><option>Postpartum haemorrhage (PPH)</option><option>Severe pre-eclampsia / eclampsia</option><option>Sepsis / infection</option><option>Birth asphyxia / newborn distress</option><option>Antepartum haemorrhage</option><option>Retained placenta</option><option>Uterine rupture</option><option>Other</option></select></label>
     <label>Details<input id="rdet" placeholder="optional"></label>
-   </div><button class="act" id="rsave" style="margin-top:10px">Save referral</button> <span class="muted" id="rm"></span></div>
-   <div class="card"><h3>Referral history</h3><table><tr><th>When</th><th>To</th><th>Urgency</th><th>Reason</th></tr>
-    ${past.map(p=>`<tr><td>${esc((p.recorded_at||'').slice(0,16))}</td><td>${esc(p.referred_to||'')}</td><td>${esc(p.urgency||'')}</td><td>${esc(p.reason||'')}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>No referrals yet.</td></tr>'}
+   </div><button class="act" id="rsave" style="margin-top:10px">Save referral</button>
+   <a class="nav" href="#letter/${esc(id)}" style="margin-left:8px">Print her referral letter &rsaquo;</a>
+   <span class="muted" id="rm"></span></div>
+
+   <div class="card"><h3>Referral history</h3>
+   <p class="muted" style="font-size:12px">A referral used to leave the building and never come back: nobody recorded what the hospital found, whether she arrived, or whether she came home. So the same woman was referred again for the same thing, and the facility never learned whether referring her helped. <b>Close the loop here.</b></p>
+   <table><tr><th>When</th><th>To</th><th>Urgency</th><th>Reason</th><th>What came back</th><th></th></tr>
+    ${past.map(p=>`<tr>
+      <td>${esc((p.recorded_at||'').slice(0,16))}</td><td>${esc(p.referred_to||'')}</td>
+      <td>${String(p.urgency||'')==='emergency'?'<span class="pill red">Emergency</span>':esc(p.urgency||'')}</td>
+      <td>${esc(p.reason||'')}</td>
+      <td>${p.feedback?esc(p.feedback):'<span class="pill amber">Nothing back yet</span>'}</td>
+      <td><button class="sm" data-fb="${p.id}">${p.feedback?'Update':'Record what happened'}</button></td></tr>`).join('')
+      ||'<tr><td colspan=6 class=muted>No referrals yet.</td></tr>'}
    </table></div>`;
+
+  // ---- CLOSING THE LOOP ---------------------------------------------------------------------
+  document.querySelectorAll('[data-fb]').forEach(b=>b.onclick=()=>{
+    const row=(past||[]).find(p=>String(p.id)===String(b.dataset.fb))||{};
+    const old=document.getElementById('mdl'); if(old) old.remove();
+    const d=document.createElement('div'); d.id='mdl';
+    d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
+    d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:460px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25)">
+      <h3 style="margin:0 0 4px;font-size:16px">What happened after the referral?</h3>
+      <p class="muted" style="font-size:12px;margin:0 0 10px">Referred to ${esc(row.referred_to||'')} &middot; ${esc(row.reason||'')}</p>
+      <label>Did she get there?<select id="fbarr">
+        <option value="">— not known —</option>
+        <option value="arrived">She arrived and was seen</option>
+        <option value="not_arrived">She did not go</option>
+        <option value="died_in_transit">She died on the way</option>
+      </select></label>
+      <label style="margin-top:6px">What the receiving facility found / did<input id="fbtxt" placeholder="e.g. caesarean done, mother and baby well" value="${esc(row.feedback||'')}"></label>
+      <div class="ticks" style="margin-top:6px">${tick('fbback','She has come back to us')}</div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="sec" id="fbcancel" style="flex:1">Cancel</button>
+        <button class="act" id="fbok" style="flex:1">Save</button>
+      </div></div>`;
+    document.body.appendChild(d);
+    $('#fbcancel').onclick=()=>d.remove();
+    $('#fbok').onclick=async()=>{
+      const arr=$('#fbarr').value, txt=($('#fbtxt').value||'').trim();
+      const note=[arr==='arrived'?'Arrived and was seen':arr==='not_arrived'?'DID NOT GO':arr==='died_in_transit'?'DIED IN TRANSIT':'', txt].filter(Boolean).join(' — ');
+      if(!note){ toast('Record what came back, or cancel.'); return; }
+      $('#fbok').disabled=true;
+      const r=await api('PATCH','referrals/'+row.id,{feedback:note}).catch(e=>({error:e.message}));
+      if(r&&(r.ok||r.queued)){
+        // She came back: she is HERE again, and the tool should stop showing her as away.
+        if(tk('fbback')) await api('PATCH','episodes/'+id,{returned_at:localDateTime()}).catch(()=>{});
+        d.remove(); toast('Recorded','ok'); setTimeout(()=>referralScreen(id),500);
+      } else { $('#fbok').disabled=false; toast((r&&r.error)||'Could not save it'); }
+    };
+  });
   $('#rsave').onclick=async()=>{ const _b=$('#rsave'); if(_b.disabled) return; _b.disabled=true;
     setTimeout(()=>{ if(_b) _b.disabled=false; },4000);
     const det=($('#rdet')||{}).value; const r=await api('POST','referrals',{episode_id:+id,referred_to:rto.value,reason:rrsn.value+(det?(' — '+det):''),urgency:rurg.value,transport:rtr.value});
@@ -5305,7 +5385,11 @@ async function reportScreen(id){
    ${babyBlocks?`<div class="rec-b"><h5>Newborn(s)</h5>${babyBlocks}</div>`:''}
    ${pncBlocks?`<div class="rec-b"><h5>Postnatal care</h5>${pncBlocks}</div>`:''}
    ${dgs.length?`<div class="rec-b"><h5>Danger signs recorded</h5><div class="rec-g">${dgs.map(d=>`<div class="rec-f"><span class="rec-l">${esc(String(d.obs_datetime||'').slice(0,16))}</span><span class="rec-v">${esc([d.headache==1?'headache':'',d.blurred_vision==1?'blurred vision':'',d.epigastric_pain==1?'epigastric pain':'',d.vaginal_bleeding==1?'vaginal bleeding':'',d.remark||''].filter(Boolean).join(', ')||'recorded')}</span></div>`).join('')}</div></div>`:''}
-   ${refs.length?`<div class="rec-b"><h5>Referrals</h5><div class="rec-g">${refs.map(r=>`<div class="rec-f"><span class="rec-l">${esc(String(r.recorded_at||'').slice(0,10))} &rarr; ${esc(r.referred_to||'')}</span><span class="rec-v${String(r.urgency||'')==='emergency'?' rec-alarm':''}">${esc(r.reason||'')}${r.feedback?(' &middot; feedback: '+esc(r.feedback)):''}</span></div>`).join('')}</div></div>`:''}
+   ${refs.length?`<div class="rec-b"><h5>Referrals</h5><div class="rec-g">${refs.map(r=>`<div class="rec-f" style="grid-column:1/-1">
+      <span class="rec-l">${esc(String(r.recorded_at||'').slice(0,10))} &rarr; ${esc(r.referred_to||'')} ${String(r.urgency||'')==='emergency'?'<b style="color:#a32d2d">(emergency)</b>':''}<br><span style="font-size:12px">${esc(r.reason||'')}</span></span>
+      <span class="rec-v${r.feedback?'':' rec-alarm'}">${r.feedback?esc(r.feedback):'NOTHING BACK YET'}</span></div>`).join('')}</div>
+      ${refs.some(r=>!r.feedback)?'<p class="muted" style="font-size:12px">Nobody has recorded what the receiving facility found, or whether she even arrived. Record it on her Refer screen &mdash; otherwise she is referred again, for the same thing, and nobody ever learns whether it helped.</p>':''}
+   </div>`:''}
    ${vits.length?`<div class="rec-b"><h5>Vital signs</h5><table class="rec-t"><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>Resp</th><th>SpO2</th></tr>
       ${vits.map(v=>`<tr><td>${esc(String(v.obs_datetime||'').slice(0,16))}</td><td>${esc((v.bp_systolic||'—')+'/'+(v.bp_diastolic||'—'))}</td><td>${esc(v.pulse||'—')}</td><td>${esc(v.temperature||'—')}</td><td>${esc(v.resp_rate||'—')}</td><td>${esc(v.spo2||'—')}</td></tr>`).join('')}</table></div>`:''}
 
@@ -5704,7 +5788,9 @@ async function patientHub(id){
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
   let _ga=''; if(e.edd){ const _d=(new Date(e.edd+'T00:00:00')-new Date())/86400000; const _w=Math.round((280-_d)/7); if(_w>0&&_w<=45) _ga=_w+' wga'; }
   const _book=e.ga_first_contact?('booked '+e.ga_first_contact+'w'+(e.late_anc_initiation==1?' (late)':'')):'';
-  window.CTX={id:+id, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,_book,e.status].filter(Boolean).join(' · ')};
+  // cat drives the step strip in nav(): the sequence of care for the kind of episode she is in.
+  window.CTX={id:+id, cat:cat, ini:_ini, name:_nm||('Episode '+id), meta:['MRN '+(e.mrn||''),'G'+(e.gravida||'?')+'/P'+(e.para||'?'),_ga,_book,e.status].filter(Boolean).join(' · ')};
+  try{ sessionStorage.setItem('ctx', JSON.stringify(window.CTX)); }catch(err){}
   app().innerHTML=nav()+`<div class="card"><h3>${esc((e.first_name||'')+' '+(e.father_name||''))||('Episode '+esc(id))}</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; G${esc(e.gravida||'?')}/P${esc(e.para||'?')} &middot; ${esc(cat||'')} &middot; ${esc(e.status||'')}${e.admitted_from&&e.admitted_from!=='new'?(' &middot; admitted from '+esc(e.admitted_from)):''} ${syncPill(e)}</p>
     ${isLocalId(e.id)?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">

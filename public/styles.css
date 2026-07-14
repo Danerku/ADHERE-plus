@@ -321,6 +321,18 @@ a.tile:active{transform:translateY(0)}
 /* ---- Small inline buttons (rupture time, failed-queue retry/discard) ---- */
 button.sm{padding:5px 10px;font-size:12px;width:auto;margin:2px 4px 2px 0}
 
+/* ---- ZONE 3: the step strip ------------------------------------------------------
+   Where she is in her care, in the order care actually happens. Horizontally scrollable,
+   because a phone is narrow and a labour episode has eight steps — and because hiding a
+   step behind a "more" menu is how a step gets skipped. */
+.steps{display:flex;gap:6px;overflow-x:auto;padding:2px 0 8px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.steps::-webkit-scrollbar{display:none}
+.step{flex:0 0 auto;padding:6px 12px;border-radius:999px;background:#eef2f1;color:#475569;
+      font-size:12.5px;font-weight:600;text-decoration:none;white-space:nowrap;border:1px solid transparent}
+.step:hover{background:#e2ebe9}
+.step.on{background:#0f766e;color:#fff;border-color:#0f766e}
+@media print{ .steps{display:none} }
+
 /* ================= THE CARE RECORD =================================================
    Everything the tool wrote down, shown back. Two rules drive this layout:
    (1) an abnormal value must catch the eye before the provider has finished scrolling;
