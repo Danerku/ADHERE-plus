@@ -6926,7 +6926,6 @@ async function pccUptake(eid){
     <div style="margin-top:8px"><a class="nav" href="#patient/${esc(eid)}">&lsaquo; Back to patient</a></div>
   </div>`;
 
-  const read=()=>{ const o={}; window.PCC.UPTAKE_ITEMS.forEach(i=>{ o[i.key]=tk('u_'+i.key); }); return o; };
   // "This pregnancy was planned" is a checkbox, and tick() renders it UNCHECKED. Without this restore,
   // reopening an existing uptake record and pressing Save silently rewrote planned_pregnancy to 0 —
   // and that field IS one of the five national indicators (Table 7, indicator 2).
