@@ -74,6 +74,17 @@ function screening_to_woman(int $eid, array $rows): void {
 // A positive HIV test anywhere -> the woman is known positive, and linked to PMTCT
 function mark_hiv_positive(int $eid): void {
   $wid = woman_of_episode($eid); if(!$wid) return;
+  mark_woman_hiv_positive($wid);
+}
+// ANYWHERE means anywhere — INCLUDING BEFORE SHE IS PREGNANT.
+//
+// mark_hiv_positive() takes an EPISODE, so preconception care could not use it: a PCC assessment has
+// no episode. The result was that a woman diagnosed HIV positive at a preconception visit was not
+// flagged, did not reach the high-risk worklist, was not linked to PMTCT — and at her first antenatal
+// contact the tool offered her an HIV test as though her status were unknown. The one place we had a
+// chance to have her established on ART BEFORE she conceived, and we dropped the result on the floor.
+function mark_woman_hiv_positive(int $wid): void {
+  if(!$wid) return;
   db()->prepare("UPDATE women SET hiv_known_positive=1 WHERE id=? AND (hiv_known_positive IS NULL OR hiv_known_positive=0)")->execute([$wid]);
 }
 
@@ -542,7 +553,11 @@ try {
   // between a provider using the record and not bothering.
   // ==========================================================================================
   if ($r==='chart' && $m==='GET'){
-    $u=require_role(['provider','admin','supervisor']);
+    // 'observer' belongs on this list. The patient hub gives an observer exactly ONE tile — "Full
+    // record" — and that screen reads /chart, which refused them. So the single thing the role is
+    // allowed to do failed with "Record could not be loaded". A read-only role that cannot read is
+    // not a role, it is a dead end.
+    $u=require_role(['provider','admin','supervisor','observer']);
     $fac=(int)$u['facility_id'];
     $wid=(int)($_GET['woman']??0);
     if(!$wid && ($eid=(int)($_GET['episode']??0))){
@@ -898,6 +913,21 @@ try {
         foreach($anc->fetchAll() as $r){ close_episode((int)$r['id'],'admitted in labour'); }
       }
 
+      // LAST PREGNANCY'S BOOKING FACTS MUST NOT FOLLOW HER INTO THIS ONE.
+      //
+      // ga_first_contact, late_anc_initiation, pregnancy_planned, lnmp and edd were stored ONCE PER
+      // WOMAN. So a woman who booked late a year ago came back for a NEW pregnancy and the tool told
+      // every provider "Late ANC initiation — first contact at 20 weeks" before she had had a single
+      // contact, printed "booked 20w (late)" on her delivery and postnatal forms, and fired the
+      // LATE_ANC and UNPLANNED risk codes — putting her on the high-risk worklist for something that
+      // happened in a pregnancy that is over. They are facts about a PREGNANCY. They are cleared when
+      // a new one starts, and (v35) they are recorded on the episode from now on.
+      if($cat==='anc'){
+        db()->prepare("UPDATE women SET ga_first_contact=NULL, late_anc_initiation=NULL,
+                              pregnancy_planned=NULL, first_contact_date=NULL, lnmp=NULL, edd=NULL
+                        WHERE id=?")->execute([$wid]);
+      }
+
       $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
       // came_from_facility etc: a woman booked at another health centre who arrives here in labour
       // was recorded as 'new' — as if nobody had ever seen her. The tool then screened her as
@@ -1092,6 +1122,9 @@ try {
       if(is_array($b['readiness_reasons']??null)) $b['readiness_reasons']=implode(' | ',$b['readiness_reasons']);
       if(is_array($b['cannot_assess']??null))     $b['cannot_assess']=implode('; ',$b['cannot_assess']);
       $pid=insert('pcc_assessments',array_intersect_key($b,array_flip($PCC_FIELDS)));
+      // A POSITIVE RESULT AT PRECONCEPTION IS A POSITIVE RESULT. It flags her, exactly as it would at
+      // ANC — otherwise the best moment we will ever get, when she is not yet pregnant, is wasted.
+      if(($b['hiv_status']??'')==='positive') mark_woman_hiv_positive((int)$b['woman_id']);
       audit('create_pcc','pcc_assessments',$pid,['readiness'=>$b['readiness']??null,'folate'=>$b['folate_dose']??null]);
       out(['id'=>$pid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['provider','admin']); $b=body();
@@ -1226,6 +1259,9 @@ try {
            // unsafe one, an ectopic — none of these had anywhere to be recorded, so a woman who had
            // one either stayed on the ANC worklist as if still pregnant, or her record was abandoned.
            'abortion'=>['abortion_care',['episode_id','care_date','ga_weeks','loss_type','presentation',
+             // The GROUND on which an induced abortion was lawful. The tool recorded the misoprostol
+             // and the MVA — everything that was done — and never why it was lawful to do it.
+             'legal_indication','indication_note',
              'procedure_done','procedure_note','comp_haemorrhage','comp_sepsis','comp_perforation','comp_shock','comp_anaemia',
              'tx_uterotonic','tx_antibiotics','tx_iv_fluids','tx_blood','anti_d_given','hgb','blood_loss_ml',
              'pac_fp_counselled','pac_fp_method','outcome','referred_to','remark','recorded_by']],
@@ -1387,6 +1423,30 @@ try {
       if($tbl==='anc_visits'){ foreach($rows as $row){ if(!empty($row['td_dose_no'])) td_to_register((int)$row['episode_id'],(int)$row['td_dose_no'],$row['visit_date']??null,$u); } }
       // An HIV-exposed newborn belongs in the HEI cohort, not only on the delivery record.
       if($tbl==='babies'){ foreach($ids as $bid) sync_hiv_from_baby((int)$bid); }
+      // THE CONTRACEPTION SHE ACCEPTED AFTER A PREGNANCY LOSS MUST REACH THE FAMILY PLANNING REGISTER.
+      //
+      // pac_fp_method was written onto the abortion record and stopped there. She does not appear in
+      // the FP register, in the method mix, or on the FP worklist — so the implant she is walking out
+      // with is invisible to the family planning room, and she cannot be followed up or removed from.
+      // Return of fertility after an abortion is almost immediate: this is the highest-yield moment
+      // there is to give contraception, and the tool was recording it as if it had never happened.
+      // (The negative-pregnancy-test path already does exactly this — see pregtest_link().)
+      if($tbl==='abortion_care'){
+        foreach($rows as $row){
+          $meth=$row['pac_fp_method']??null;
+          if(!$meth || $meth==='none') continue;
+          $wid=woman_of_episode((int)$row['episode_id']); if(!$wid) continue;
+          $w=db()->prepare("SELECT mrn, TRIM(CONCAT_WS(' ',first_name,father_name)) nm, age FROM women WHERE id=?");
+          $w->execute([$wid]); $wr=$w->fetch(); if(!$wr) continue;
+          $c=db()->prepare("SELECT id FROM fp_clients WHERE woman_id=? AND facility_id=?");
+          $c->execute([$wid,(int)$u['facility_id']]); $cr=$c->fetch();
+          $cid = $cr ? (int)$cr['id'] : (int)insert('fp_clients',[
+            'facility_id'=>(int)$u['facility_id'],'woman_id'=>$wid,'mrn'=>$wr['mrn'],'name'=>$wr['nm'],
+            'age'=>$wr['age'],'sex'=>'F','reg_date'=>($row['care_date']??date('Y-m-d')),'acceptor'=>'new']);
+          insert('fp_visits',['fp_client_id'=>$cid,'visit_date'=>($row['care_date']??date('Y-m-d')),
+            'method'=>$meth,'remark'=>'accepted after a pregnancy loss (post-abortion care)','recorded_by'=>$u['id']]);
+        }
+      }
       if($tx) db()->commit();
       } catch (Throwable $e) {
         // The DELETE is rolled back with the failed INSERT: her previous answer is still there.
