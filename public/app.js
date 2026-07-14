@@ -6527,6 +6527,9 @@ function pccDraft(){
     entry_point:v('p_entry')||'pcc', contact_date:v('p_date')||localDate(),
   };
   d.bmi = PCC.bmi(d.height_cm, d.weight_kg);
+  // Which components the provider says she actually went through. A negative finding is a finding —
+  // but it has to be RECORDED as one, and an empty checkbox is not a record of anything.
+  d.sections_reviewed = (window.PCC?PCC.COMPONENTS:[]).filter(c=>tk('rev_'+c.key)).map(c=>c.key).join(',');
   return d;
 }
 
@@ -6600,13 +6603,21 @@ async function pccScreen(wid){
     p_dent:'dental_problem',p_dentr:'dental_referred'};
 
   const C=window.PCC.COMPONENTS;
+  // Every section carries a "went through this" mark. It is not decoration: seven of the fifteen
+  // components are recorded only with checkboxes, and an unticked box reads 0 — indistinguishable
+  // from a question never asked. Without this mark the tool cannot tell "she has no diabetes" from
+  // "nobody asked her", and it was reporting the second as the first.
   const sec=(key,inner)=>{ const c=C.find(x=>x.key===key);
+    const rev=String((last&&last.sections_reviewed)||'').split(',').indexOf(key)>=0;
     return `<details class="pccsec" id="sec_${key}"><summary><b>${c.n}. ${esc(c.label)}</b> ${pccLevelTag(c.owns)}<span class="pccstat" id="st_${key}"></span></summary>
       <div class="muted" style="font-size:12px;margin:2px 0 8px">${esc(c.assess)}</div>
-      <div class="grid">${inner}</div>${c.note?`<div class="muted" style="font-size:12px;margin-top:6px">${esc(c.note)}</div>`:''}</details>`; };
+      <div class="grid">${inner}</div>${c.note?`<div class="muted" style="font-size:12px;margin-top:6px">${esc(c.note)}</div>`:''}
+      <label class="tick" style="margin-top:8px"><input type="checkbox" id="rev_${key}"${rev?' checked':''}> Asked and reviewed with her <span class="muted" style="font-weight:400">&mdash; tick this even when there is nothing to report</span></label>
+      </details>`; };
 
+  const wname=((w.first_name||'')+' '+(w.father_name||'')).trim();
   app().innerHTML=nav()+`<div class="card">
-    <h3>Preconception care &mdash; ${esc(((w.first_name||'')+' '+(w.father_name||'')).trim())}</h3>
+    <h3>Preconception care${wname?(' &mdash; '+esc(wname)):''}</h3>
     <p class="muted">MRN ${esc(w.mrn||'')}${w.age?' &middot; '+esc(w.age):''}${prev.length?(' &middot; '+prev.length+' previous assessment'+(prev.length>1?'s':'')):''}</p>
     ${ro?'<p class="muted"><b>VIEW ONLY</b> with your role.</p>':''}
 

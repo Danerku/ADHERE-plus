@@ -298,26 +298,48 @@
   };
 
   // ---- Completeness: has this contact actually delivered PCC? -------------------------------------
-  // Used by the screen (progress) and by the "PCC service delivered" indicator. A contact that
-  // touched two components is a contact, not a preconception assessment.
+  //
+  // THE TRAP THIS FUNCTION EXISTS TO AVOID, AND FELL INTO ONCE.
+  // It used to ask `is this field not null?`. An UNTICKED CHECKBOX READS 0, and 0 is not null — so on
+  // a form nobody had touched, seven components reported themselves as delivered. The tool would have
+  // told a supervisor that half a preconception assessment had been done when not one question had
+  // been asked. A number that flatters the facility is worse than no number.
+  //
+  // So: a component counts as delivered when it carries REAL DATA (a positive finding, a measurement,
+  // an explicit answer), or when the provider has marked that she went through it — `sections_reviewed`.
+  // A negative finding is a genuine clinical finding and must be recordable; an empty box is not one.
+  function reviewed(a, key){
+    return String((a && a.sections_reviewed) || '').split(',').indexOf(key) >= 0;
+  }
+  function on(v){ return v===1 || v==='1' || v===true; }         // a ticked box, never an empty one
+  function has(v){ return v!==null && v!==undefined && v!==''; } // an answered select / typed value
+
   function componentDone(key, a){
     a = a || {};
+    if(reviewed(a, key)) return true;
     switch(key){
-      case 'fp':          return !!(a.plans_pregnancy || a.fp_counselled || a.fp_current_method);
-      case 'nutrition':   return !!(a.height_cm && a.weight_kg) || bad(a.hgb) || !!a.diet_counselled;
-      case 'folate':      return !!a.folate_dose;
-      case 'chronic':     return bad(a.bp_systolic) || bad(a.dm_fbs) || a.dm_known != null || a.htn_known != null;
-      case 'substance':   return !!(a.alcohol || a.khat || a.tobacco);
+      case 'fp':          return has(a.plans_pregnancy) || on(a.fp_counselled) || has(a.fp_current_method)
+                              || has(a.infertility_screen) || on(a.birth_interval_ok);
+      case 'nutrition':   return (bad(a.height_cm) && bad(a.weight_kg)) || bad(a.hgb)
+                              || on(a.diet_counselled) || on(a.iodized_salt) || on(a.dewormed);
+      case 'folate':      return has(a.folate_dose);              // 'none' is an explicit answer
+      case 'chronic':     return on(a.dm_known) || on(a.htn_known) || on(a.ckd_known) || on(a.epilepsy)
+                              || bad(a.dm_fbs) || bad(a.dm_hba1c) || bad(a.creatinine)
+                              || has(a.cardiac_who_class) || has(a.cardiac_symptoms) || has(a.epilepsy_drug);
+      case 'substance':   return has(a.alcohol) || has(a.khat) || has(a.tobacco)
+                              || has(a.other_substance) || bad(a.coffee_cups);
       case 'activity':    return bad(a.activity_min_week);
-      case 'cxca':        return !!a.cxca_screened;
-      case 'gbv':         return a.gbv_screened != null;
-      case 'infection':   return !!(a.hiv_status || a.syphilis || a.hbsag || a.tb_screen);
-      case 'vaccine':     return bad(a.td_doses) || bad(a.hbv_vaccine_doses);
-      case 'genetic':     return a.consanguinity != null || a.prior_ntd != null || !!a.family_hx_genetic;
-      case 'medicines':   return a.current_medicines != null && a.current_medicines !== '' ? true : (a.teratogenic_flag != null);
-      case 'mental':      return a.mh_depression != null || a.mh_anxiety != null;
-      case 'environment': return a.exposure_pets != null || a.exposure_radiation != null || a.exposure_chemicals != null || a.exposure_counselled != null;
-      case 'dental':      return a.dental_problem != null;
+      case 'cxca':        return has(a.cxca_screened) || has(a.hpv_vaccinated) || has(a.cxca_result) || has(a.repro_anomaly);
+      case 'gbv':         return on(a.gbv_screened) || on(a.gbv_positive) || on(a.gbv_referred)
+                              || has(a.fgm) || on(a.fgm_counselled) || on(a.sexual_dysfunction);
+      case 'infection':   return has(a.hiv_status) || has(a.syphilis) || has(a.hbsag) || has(a.tb_screen)
+                              || on(a.malaria_risk) || has(a.sti_history);
+      case 'vaccine':     return bad(a.td_doses) || bad(a.hbv_vaccine_doses) || on(a.td_given_today);
+      case 'genetic':     return on(a.consanguinity) || on(a.prior_ntd) || has(a.family_hx_genetic);
+      case 'medicines':   return has(a.current_medicines) || on(a.teratogenic_flag) || has(a.teratogenic_named);
+      case 'mental':      return on(a.mh_depression) || on(a.mh_anxiety) || has(a.mh_known_illness) || on(a.mh_referred);
+      case 'environment': return on(a.exposure_pets) || on(a.exposure_radiation) || on(a.exposure_chemicals) || on(a.exposure_counselled);
+      case 'dental':      return on(a.dental_problem) || on(a.dental_referred);
       default:            return false;
     }
   }

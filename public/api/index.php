@@ -1033,6 +1033,10 @@ try {
     'exposure_pets','exposure_radiation','exposure_chemicals','exposure_counselled',
     'dental_problem','dental_referred',
     'readiness','readiness_reasons','cannot_assess','referred_to','care_plan','next_visit',
+    // Which of the fifteen components the provider actually went through. Without it, an unticked
+    // checkbox (0) is indistinguishable from a question never asked, and the completeness figure
+    // reports care that was never given.
+    'sections_reviewed',
     'recorded_by'];
 
   $PCC_UPTAKE_FIELDS = ['episode_id','woman_id','facility_id','asked_date','verified_against',
