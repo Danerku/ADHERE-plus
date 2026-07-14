@@ -1462,6 +1462,17 @@ function modal(title,body,kind){ const old=document.getElementById('mdl'); if(ol
   d.querySelector('#mdlok').focus();
 }
 
+// PRINT. The page size is decided by WHAT is being printed, which CSS alone cannot know: an MoH
+// register is twenty columns wide and belongs on landscape A4, while a referral letter and a care
+// record belong on portrait. Printed portrait, the register either overflowed the sheet or squeezed
+// its columns until the words broke apart — which is exactly what a register must never do.
+function printPage(orientation){
+  let s=document.getElementById('printpage');
+  if(!s){ s=document.createElement('style'); s.id='printpage'; document.head.appendChild(s); }
+  s.textContent = '@media print{@page{size:A4 '+(orientation==='landscape'?'landscape':'portrait')+';margin:'+(orientation==='landscape'?'10mm':'14mm')+'}}';
+  setTimeout(()=>window.print(), 60);   // let the style land before the print dialog snapshots the page
+}
+
 async function register(){
   const r=mrnRule();
   app().innerHTML=nav()+`<div class="card"><h3>Register / admit</h3>
@@ -2311,7 +2322,7 @@ async function overviewSection(){
 }
 function wireOverview(){
   const p=$('#ovp'); if(p) p.onchange=()=>{ window._ovDays=+p.value; dashboard(); };
-  const pr=$('#ovprint'); if(pr) pr.onclick=()=>window.print();
+  const pr=$('#ovprint'); if(pr) pr.onclick=()=>printPage('portrait');
   const cs=$('#ovcsv'); if(cs) cs.onclick=()=>{
     const o=window._ov||{}; const lines=[['Theme','Item','Value']];
     const push=(t,obj)=>Object.entries(obj||{}).forEach(([k,v])=>lines.push([t,LBL[k]||k,v]));
@@ -3205,22 +3216,32 @@ async function ancVisits(id){
                  : '<span class="pill red">Not done</span>';
     box.innerHTML=`<div class="card" style="margin:10px 0;padding:12px 14px;${missing.length?'border-left:4px solid #a32d2d':''}">
       <h4 style="margin:0 0 4px;font-size:14px">First-contact laboratory panel</h4>
-      <p class="muted" style="font-size:12px;margin:0 0 8px">The National ANC Guideline requires these at the first contact. They decide the rest of her pregnancy &mdash; a reactive syphilis to treat, an HIV result that opens PMTCT, a Rh-negative blood group that needs anti-D at 28 weeks, an anaemia to correct before she reaches labour.</p>
       <div class="rec-g">${st.map(s=>`<div class="rec-f"><span class="rec-l">${esc(s.label)}</span><span>${pill(s)}</span></div>`).join('')}</div>
       ${missing.length?`<div style="margin-top:8px">
         <button class="sec" id="labsendall" type="button">Send the ${missing.length} outstanding test${missing.length===1?'':'s'} to the lab</button>
-        <span class="muted" style="font-size:12px;margin-left:6px">Records the request now; enter the result here when it comes back.</span>
       </div>`:''}
     </div>`;
     const sb=$('#labsendall');
     if(sb) sb.onclick=async()=>{
       sb.disabled=true;
-      const today=new Date().toISOString().slice(0,10);
+      const today=ecGet('vd')||localDate();
+      const done=[];
       for(const m of missing){
-        await api('POST','labs',{episode_id:+id,test_code:m.code,requested:1,requested_date:today}).catch(()=>{});
+        try{
+          const r=await api('POST','labs',{episode_id:+id,test_code:m.code,requested:1,requested_date:today});
+          if(r && (r.ids||r.id||r.queued)){
+            const nid=(r.ids&&r.ids[0])||r.id||0;
+            labs.push({id:nid, test_code:m.code, requested:1, requested_date:today, result:null});
+            done.push(m.label);
+          }
+        }catch(e){ /* reported below */ }
       }
-      toast('Requested: '+missing.map(m=>m.label).join(', '),'ok');
-      setTimeout(()=>ancVisits(id),600);
+      if(!done.length){ sb.disabled=false; toast('Could not send the requests — please try again'); return; }
+      toast('Requested: '+done.join(', '),'ok');
+      // Refresh the panel and the table WITHOUT re-rendering the contact — she may be halfway through
+      // filling it in, and a re-render used to throw all of it away.
+      paintFirstLabs();
+      if(typeof renderLabTable==='function') renderLabTable();
     };
   };
   ['hb','htr','syr','hbr','up','cno'].forEach(k=>{ const el=$('#'+k); if(el){ el.addEventListener('change',paintFirstLabs); el.addEventListener('input',paintFirstLabs); } });
@@ -3332,13 +3353,68 @@ async function ancVisits(id){
   if(onART){ const vlEl=$('#vl'); if(vlEl) vlEl.addEventListener('change',()=>{ $('#vlbox').style.display=(vlEl.value==='unsuppressed')?'':'none'; }); }
 
   // ---- laboratory requests & results ----
-  $('#labadd').onclick=async()=>{ if(!labt.value) return;
-    const r=await api('POST','labs',{episode_id:+id,test_code:labt.value,requested:1,requested_date:ecGet('vd')||localDate()});
-    if(r&&(r.ids||r.queued)){ toast('Test requested','ok'); ancVisits(id); } };
-  document.querySelectorAll('[data-labsave]').forEach(b=>{ b.onclick=async()=>{ const lid=b.dataset.labsave;
+  //
+  // "Add request" felt DEAD, and it was dead in two different ways.
+  //
+  //  1. With no test chosen it returned in silence — no message, no hint. The provider pressed it and
+  //     the tool did nothing and said nothing.
+  //  2. When it DID work it called ancVisits(id), which re-renders the whole contact screen — throwing
+  //     away every field she had already typed into the form and collapsing the panel she was in. So a
+  //     working request looked like the screen had reset itself, and cost her the contact she was
+  //     halfway through entering.
+  //
+  // The request is now added IN PLACE: the row appears in the table under the button, the form she is
+  // filling in is untouched, and a failure says so out loud instead of doing nothing.
+  // Re-draw ONLY the lab table from the labs we now hold. Declared as a function so paintFirstLabs
+  // (which runs earlier) can call it after it sends the outstanding tests.
+  function renderLabTable(){
+    const tbl=$('#labtbl'); if(!tbl) return;
+    tbl.innerHTML=`<tr><th>Test</th><th>Requested</th><th>Result</th><th></th></tr>`+
+      ((labs||[]).map(l=>`<tr><td>${esc((LAB_TESTS.find(t=>t[0]===l.test_code)||[,l.test_code])[1])}</td><td>${esc(l.requested_date||'')}</td>
+        <td><input data-lab="${l.id}" value="${esc(l.result||'')}" placeholder="enter result" style="font-size:12px"></td>
+        <td>${(+l.id>0)?`<button class="sec" data-labsave="${l.id}" type="button" style="font-size:12px;padding:3px 8px">Save</button>`
+                       :'<span class="muted" style="font-size:11px">queued</span>'}</td></tr>`).join('')
+       || '<tr><td colspan=4 class=muted>No tests requested yet.</td></tr>');
+    tbl.querySelectorAll('[data-labsave]').forEach(wireLabSave);
+  }
+  function wireLabSave(b){ b.onclick=async()=>{
+    const lid=b.dataset.labsave;
     const inp=document.querySelector('[data-lab="'+lid+'"]');
-    const r=await api('PATCH','labs/'+lid,{result:inp.value,result_date:localDate()});
-    if(r&&(r.ok||r.queued)) toast('Result saved','ok'); }; });
+    if(!inp || !inp.value.trim()){ toast('Enter the result first'); return; }
+    b.disabled=true;
+    try{
+      const r=await api('PATCH','labs/'+lid,{result:inp.value.trim(),result_date:localDate()});
+      if(r&&(r.ok||r.queued)) toast(r.queued?'Result saved — it will sync when you are back online':'Result saved','ok');
+      else toast('Could not save the result — '+((r&&r.error)||'please try again'));
+    }catch(e){ toast('Could not save the result — '+(e.message||'please try again')); }
+    finally{ b.disabled=false; }
+  }; }
+
+  const labBtn=$('#labadd'), labSel=$('#labt');
+  if(labBtn && labSel){
+    labBtn.disabled = !labSel.value;                                  // nothing chosen = nothing to add
+    labSel.onchange = ()=>{ labBtn.disabled = !labSel.value; };
+    labBtn.onclick=async()=>{
+      if(!labSel.value){ toast('Choose a test first'); return; }
+      labBtn.disabled=true;
+      try{
+        const body={episode_id:+id, test_code:labSel.value, requested:1, requested_date:ecGet('vd')||localDate()};
+        const r=await api('POST','labs',body);
+        const newId = (r && r.ids && r.ids[0]) || (r && r.id) || 0;
+        if(r && (r.ids || r.id || r.queued)){
+          labs.push({id:newId, test_code:body.test_code, requested:1, requested_date:body.requested_date, result:null});
+          renderLabTable();
+          paintFirstLabs();                       // an outstanding first-contact test is now "sent"
+          labSel.value=''; labBtn.disabled=true;
+          toast(r.queued ? 'Test requested — it will sync when you are back online' : 'Test requested','ok');
+        } else {
+          labBtn.disabled=false;
+          toast('Could not request the test — '+((r&&r.error)||'please try again'));
+        }
+      }catch(e){ labBtn.disabled=false; toast('Could not request the test — '+(e.message||'please try again')); }
+    };
+  }
+  document.querySelectorAll('[data-labsave]').forEach(wireLabSave);
 
   // ---- MANDATORY fields (collaborator request; guideline requires these every contact) ----
   const REQ=[['vd','Visit date'],['cno','ANC contact number'],['ga','Gestational age'],['wt','Weight'],['bps','BP systolic'],['bpd','BP diastolic'],['muac','MUAC']];
@@ -4220,7 +4296,7 @@ async function registersScreen(){
       </table></div></div>`;
   };
   $('#rgen').onclick=load;
-  $('#rprint').onclick=()=>window.print();
+  $('#rprint').onclick=()=>printPage('landscape');   // an MoH register is 20 columns wide
   $('#rcsv').onclick=()=>{ if(!window._regCsv){ toast('Generate the register first'); return; }
     const bl=new Blob([window._regCsv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
     a.href=URL.createObjectURL(bl); a.download='moh_'+rt.value+'_register_'+rf.value+'_to_'+rto.value+'.csv'; a.click(); };
@@ -5091,7 +5167,6 @@ async function pregTest(){
    </div>
    <div id="ptpos" style="display:none;background:#e1f5ee;border:1px solid #5dcaa5;color:#04342c;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
      <b>Her test is positive. What does she want to do?</b>
-     <div class="muted" style="font-size:12px;margin:2px 0 6px;color:#04342c">Ask her before anything is booked. A positive test is not a decision, and the tool used to assume it was: the only door out of this screen was an antenatal booking.</div>
      <label style="margin-top:4px">Her decision<select id="ptint">
        <option value="">— not recorded —</option>
        <option value="continue">She is continuing the pregnancy</option>
@@ -5100,13 +5175,11 @@ async function pregTest(){
      </select></label>
 
      <div id="ptcont" style="display:none;margin-top:8px">
-       <div class="ticks">${tick('ptlink','Open her ANC episode now (link to the ANC room)')}</div>
-       <div>She will appear on the ANC worklist immediately, and her first-contact tests will be prompted there.</div>
+       <div class="ticks">${tick('ptlink','Open her ANC episode now')}</div>
      </div>
 
      <div id="ptterm" style="display:none;margin-top:8px;background:#fff;border:1px solid #cfe8df;border-radius:8px;padding:8px 10px">
-       <div class="muted" style="font-size:12px;color:#334155">Safe abortion care is provided at health-centre level in Ethiopia by trained midwives, clinical nurses and health officers, under the FMOH Technical and Procedural Guideline. Counsel her, and record what actually happened &mdash; a woman sent away with nothing is the pathway the guideline exists to prevent.</div>
-       <label style="margin-top:6px">Care<select id="ptac">
+       <label>Care<select id="ptac">
          <option value="">— select —</option>
          <option value="here">Provided here</option>
          <option value="referred">Referred to another facility</option>
@@ -5114,18 +5187,16 @@ async function pregTest(){
        </select></label>
        <label id="ptrefwrap" style="display:none;margin-top:6px">Referred to<input id="ptref" placeholder="facility name"></label>
        <div class="ticks" style="margin-top:4px">${tick('ptcns','Counselled (options, and contraception afterwards)')}</div>
-       <div class="muted" style="font-size:12px;color:#334155">Contraception after an abortion prevents the next unintended pregnancy, and she is here now. Open her family-planning record from the FP screen when she is ready.</div>
+       <div id="ptherenote" class="muted" style="display:none;font-size:12px;margin-top:4px">Saving opens her abortion-care record, where the procedure, the medication given and the contraception she leaves with are recorded.</div>
      </div>
 
      <div id="ptund" style="display:none;margin-top:8px;background:#fff;border:1px solid #cfe8df;border-radius:8px;padding:8px 10px">
-       <div class="muted" style="font-size:12px;color:#334155">Undecided is not a dead end &mdash; it is a date to see her again. Gestational age only goes one way, and every week narrows what she can safely choose.</div>
        ${ecPicker('ptfu','See her again on')}
        <div class="ticks" style="margin-top:4px">${tick('ptcns2','Counselled')}</div>
      </div>
    </div>
    <div id="ptneg" style="display:none;background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
      <div class="ticks">${tick('ptfp','Offer family planning now (open her as an FP client)')}</div>
-     <div style="margin-top:4px">She is not pregnant &mdash; and she is in the building, thinking about her fertility, with a provider in front of her. This is the highest-yield moment to offer contraception. Ticking this opens her family-planning record so she does not leave with nothing.</div>
    </div>
    <label>Note<input id="ptn" placeholder="optional"></label>
    <button class="act" id="ptsave" style="margin-top:10px">Save test</button> <span class="muted" id="ptm"></span></div>
@@ -5165,7 +5236,10 @@ async function pregTest(){
     const lk=$('#ptlink'); if(lk) lk.checked=(ptint.value==='continue');   // only continuing opens ANC
   });
   const ptac=$('#ptac');
-  if(ptac) ptac.addEventListener('change',()=>{ $('#ptrefwrap').style.display=(ptac.value==='referred')?'':'none'; });
+  if(ptac) ptac.addEventListener('change',()=>{
+    $('#ptrefwrap').style.display=(ptac.value==='referred')?'':'none';
+    const hn=$('#ptherenote'); if(hn) hn.style.display=(ptac.value==='here')?'':'none';
+  });
 
   // Record a result that has come back from the lab. THIS is where she gets routed.
   document.querySelectorAll('[data-save]').forEach(btn=>btn.onclick=async()=>{
@@ -5191,18 +5265,37 @@ async function pregTest(){
       document.body.appendChild(d);
       d.querySelectorAll('[data-i]').forEach(b=>b.onclick=()=>{ d.remove(); resolve(b.dataset.i); });
     });
-    let intent=null;
-    if(sel.value==='positive'){ intent=await askIntent(); }
+    // If she is not continuing, ask WHERE the care is happening — and if it is happening here, the
+    // save opens her abortion-care record. Recording the decision and then offering her nothing is
+    // the gap this whole flow exists to close.
+    const askCare=()=>new Promise(resolve=>{
+      const old=document.getElementById('mdl'); if(old) old.remove();
+      const d=document.createElement('div'); d.id='mdl';
+      d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px';
+      d.innerHTML=`<div style="background:#fff;border-radius:14px;max-width:460px;width:100%;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.25)">
+        <h3 style="margin:0 0 10px;font-size:16px">Where is her care happening?</h3>
+        <button class="act" data-c="here" style="width:100%;margin-bottom:6px">Provided here &mdash; open her care record</button>
+        <button class="sec" data-c="referred" style="width:100%;margin-bottom:6px">Referred to another facility</button>
+        <button class="sec" data-c="declined" style="width:100%;margin-bottom:6px">She declined care today</button>
+        <button class="sec" data-c="" style="width:100%">Not recorded yet</button>
+      </div>`;
+      document.body.appendChild(d);
+      d.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>{ d.remove(); resolve(b.dataset.c); });
+    });
+    let intent=null, care=null;
+    if(sel.value==='positive'){ intent=await askIntent(); if(intent==='not_continue') care=await askCare(); }
     btn.disabled=true;
     try{
       const neg=(sel.value==='negative');
       const r=await api('PATCH','pregnancy_tests/'+pid,{result:sel.value,
         intent:(sel.value==='positive'?(intent||null):null),
+        abortion_care:(intent==='not_continue')?(care||null):null,
         link_to_anc:(sel.value==='positive'&&intent==='continue')?1:0,
         link_to_fp:(neg&&tk('ptfpall'))?1:0, fp_offered:(neg&&tk('ptfpall'))?1:0});
+      if(r&&r.episode_id&&care==='here'){ toast('Abortion-care record opened','ok'); location.hash='#abortion/'+r.episode_id; return; }
       if(r&&r.episode_id){ toast('She is continuing — ANC episode opened','ok'); location.hash='#patient/'+r.episode_id; return; }
       if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); location.hash='#fpclient/'+r.fp_client_id; return; }
-      if(intent==='not_continue'){ toast('Recorded. Open her test below to record the care she was given or the referral.','ok'); }
+      if(intent==='not_continue'){ toast('Recorded','ok'); }
       else if(intent==='undecided'){ toast('Recorded. Set a date to see her again on the test below.','ok'); }
       else toast('Result recorded','ok');
       setTimeout(pregTest,700);
@@ -5226,7 +5319,12 @@ async function pregTest(){
         referred_to:(intent==='not_continue'&&(($('#ptac')||{}).value)==='referred')?((($('#ptref')||{}).value)||null):null,
         followup_date:(intent==='undecided')?ecGet('ptfu'):null,
         counselled:((intent==='not_continue'&&tk('ptcns'))||(intent==='undecided'&&tk('ptcns2')))?1:0});
-      if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+r.episode_id,700); }
+      // The server opens an ANC episode when she is continuing, and an ABORTION episode when she is not
+      // and the care is being given here. Take her straight to the record that care is written in —
+      // otherwise the tool has captured a decision and given her nowhere to receive treatment.
+      const careHere = (intent==='not_continue' && (($('#ptac')||{}).value)==='here');
+      if(r&&r.episode_id&&careHere){ toast('Abortion-care record opened','ok'); setTimeout(()=>location.hash='#abortion/'+r.episode_id,700); }
+      else if(r&&r.episode_id){ toast('Positive — ANC episode opened','ok'); setTimeout(()=>location.hash='#patient/'+r.episode_id,700); }
       else if(r&&r.fp_client_id){ toast('Negative — family planning record opened','ok'); setTimeout(()=>location.hash='#fpclient/'+r.fp_client_id,700); }
       else if(r&&(r.id||r.queued)){ $('#ptm').textContent=' saved'; setTimeout(()=>pregTest(),600); }
       else $('#ptm').textContent=' '+((r&&r.error)||'error');
@@ -5633,8 +5731,7 @@ async function reportScreen(id){
       ${vits.map(v=>`<tr><td>${esc(String(v.obs_datetime||'').slice(0,16))}</td><td>${esc((v.bp_systolic||'—')+'/'+(v.bp_diastolic||'—'))}</td><td>${esc(v.pulse||'—')}</td><td>${esc(v.temperature||'—')}</td><td>${esc(v.resp_rate||'—')}</td><td>${esc(v.spo2||'—')}</td></tr>`).join('')}</table></div>`:''}
 
    <div style="margin-top:12px">
-     <button class="sec" onclick="window.print()">Print / save as PDF</button>
-     <span class="muted" style="font-size:12px;margin-left:8px">Gives her a copy of her own record to carry &mdash; and the receiving facility a copy when she is referred.</span>
+     <button class="sec" onclick="printPage('portrait')">Print / save as PDF</button>
    </div>
   </div>`;
 }
@@ -5692,14 +5789,13 @@ async function abortionScreen(id){
       ['mva','Manual vacuum aspiration (MVA)'],['medical','Medical (misoprostol ± mifepristone)'],
       ['evacuation','Surgical evacuation'],['expectant','Expectant management'],
       ['laparotomy','Laparotomy (ectopic)'],['referred','Referred — not done here'],['none','None']], rec?rec.procedure_done:'')}</select></label>
-    <label>Note<input id="acpn" placeholder="optional" value="${esc(rec&&rec.procedure_note?rec.procedure_note:'')}"></label>
+    <label>Medication / details <span class="muted" style="font-weight:400">(drug, dose, route)</span><input id="acpn" placeholder="e.g. misoprostol 800 mcg sublingual; doxycycline 100 mg bd 7 days" value="${esc(rec&&rec.procedure_note?rec.procedure_note:'')}"></label>
    </div>
    <div class="ticks" style="margin-top:6px">
     ${tick('actu','Uterotonic')}${tick('acta','Antibiotics')}${tick('actf','IV fluids')}${tick('actb','Blood transfusion')}${tick('acad','Anti-D given (Rh negative)')}
    </div></details>
 
-   <details class="moh" open><summary>Contraception before she leaves <span class="muted">&mdash; the most effective thing that happens today</span></summary>
-    <div class="muted" style="font-size:12px;margin-bottom:6px">She is fertile again within about two weeks. Post-abortion contraception is the single most effective thing a facility can do to prevent the next unintended pregnancy &mdash; and she is here, now.</div>
+   <details class="moh" open><summary>Contraception before she leaves</summary>
     <div class="ticks">${tick('acfc','Counselled on family planning')}</div>
     <label>Method accepted<select id="acfm">${selOpts([['none','None / declined'],['POP','Pill'],['Inj','Injectable'],['Imp','Implant'],['IUCD','IUCD'],['Cond','Condoms'],['TL','Tubal ligation'],['Oth','Other']], rec?rec.pac_fp_method:'')}</select></label>
    </details>
@@ -5937,8 +6033,7 @@ async function letterScreen(id){
       <p class="muted sigline" style="font-size:12px">Signature: ______________________________ &nbsp;&nbsp; Phone: ______________________</p>
     </div>
     <div style="margin-top:12px">
-      <button class="act" onclick="window.print()">Print the letter</button>
-      <span class="muted" style="font-size:12px;margin-left:8px">One page &mdash; it is carried by her, in a bag, on a bus. A second page is a page that gets lost.</span>
+      <button class="act" onclick="printPage('portrait')">Print the letter</button>
       <a class="nav" href="#report/${esc(id)}" style="margin-left:8px">Her full record &rsaquo;</a>
     </div>
   </div>`;

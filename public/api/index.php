@@ -144,7 +144,25 @@ function pregtest_link(int $pid, int $wid, string $res, array $b, array $u): arr
   $intent = $b['intent'] ?? null;
   if($res==='positive' && $intent && $intent!=='continue'){
     audit('pregnancy_intent','pregnancy_tests',$pid,['intent'=>$intent,'care'=>($b['abortion_care']??null)]);
-    return [null,null];     // she is not continuing (or has not decided) — no ANC episode is opened
+    // SHE IS NOT CONTINUING, AND THE CARE IS BEING GIVEN HERE — so open the episode that care is
+    // recorded against. This screen used to store the WORD "here" and open nothing, so there was
+    // nowhere to record what was actually done: the method, the misoprostol/mifepristone, the
+    // antibiotics, the anti-D, the complications, the contraception she left with. The woman who is
+    // continuing gets an ANC episode opened for her; the woman who is not got a dropdown value.
+    //
+    // 'abortion' is an existing service category (migration v29) with its own screen, and the loss /
+    // abortion-care record hangs off an episode. Reuse an open one rather than splitting her record.
+    if($intent==='not_continue' && ($b['abortion_care']??'')==='here'){
+      $ex=db()->prepare("SELECT id FROM episodes WHERE voided=0 AND woman_id=? AND service_category='abortion' AND status NOT IN ('closed') ORDER BY id DESC LIMIT 1");
+      $ex->execute([$wid]); $row=$ex->fetch();
+      $eid = $row ? (int)$row['id']
+                  : insert('episodes',['woman_id'=>$wid,'service_category'=>'abortion','status'=>'active',
+                      'admitted_from'=>'new','admission_datetime'=>date('Y-m-d H:i:s'),
+                      'facility_id'=>$u['facility_id'],'created_by'=>$u['id']]);
+      db()->prepare("UPDATE pregnancy_tests SET linked_episode_id=?, linked_at=NOW() WHERE id=?")->execute([$eid,$pid]);
+      return [$eid,null];
+    }
+    return [null,null];     // referred elsewhere, declined, or undecided — nothing is opened behind her back
   }
   if($res==='positive' && !empty($b['link_to_anc'])){
     // Never open a SECOND ANC episode for a woman who already has one open — that splits her
