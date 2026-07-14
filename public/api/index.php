@@ -1333,7 +1333,11 @@ try {
        'labour'   =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id=? AND e.service_category='labour'$since"),
        'pnc'      =>$one("SELECT COUNT(DISTINCT p.episode_id) c FROM pnc_visits p JOIN episodes e ON e.voided=0 AND e.id=p.episode_id WHERE e.facility_id=?$since"),
        'deliveries'=>$one("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=?$since"),
-       'high_risk'=>$one("SELECT COUNT(*) c FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.voided=0 AND w.voided=0 AND e.facility_id=? AND $hrx$since"),
+       // ...AND the same SCOPE as the worklist. With the rule unified but the scope still different,
+       // the tile counted every high-risk episode ever (13) while the worklist a provider clicks
+       // through to shows only the ones still in her care (8) — the same confusing mismatch, for a new
+       // reason. A closed episode is finished care: it belongs in the register, not on a worklist tile.
+       'high_risk'=>$one("SELECT COUNT(*) c FROM episodes e JOIN women w ON w.id=e.woman_id WHERE e.voided=0 AND w.voided=0 AND e.facility_id=? AND e.status <> 'closed' AND $hrx$since"),
        'total'    =>$one("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id=?$since"),
      ],
      'mode_of_delivery'=>$grp("SELECT d.mode k, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id=? AND d.mode IS NOT NULL$since GROUP BY d.mode"),
