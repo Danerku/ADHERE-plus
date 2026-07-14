@@ -817,7 +817,20 @@ try {
       // validating the merge would refuse the very edit that fixes it.
       $f=blank_to_null($f);
       check_ranges($f,['age']);
-      foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      // A VALUE THE COLUMN CANNOT HOLD MUST FAIL AS A 400, NOT A 500.
+      //
+      // A correction carrying a value outside the column's domain (a code the form does not use, a
+      // string too long for the column) raised a PDOException and came back as a bare 500 "server
+      // error". That is not just an unhelpful message: the offline queue treats 5xx as "the server is
+      // having trouble, try again later" and RETRIES IT FOR EVER. One malformed row from an older
+      // build could pin a tablet in a permanent retry loop. A 4xx says "this will never work",
+      // which is the truth, and the entry goes to the failed list where a human can see it.
+      // (The POST path above already does this; the correction path did not.)
+      try{
+        foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      }catch(\PDOException $e){
+        err('One of the values is not valid for this field.',400);
+      }
 
       // A CORRECTION MUST TRIGGER THE SAME CONSEQUENCES AS THE ORIGINAL ENTRY.
       // These linkage functions were wired to POST only. So an ANC visit saved with the HIV result

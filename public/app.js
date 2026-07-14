@@ -4735,6 +4735,12 @@ const CODES = {
   nb_death_cause:{1:'Prematurity',2:'Infection',3:'Asphyxia',4:'Other'},
   place_of_delivery:{1:'This facility',2:'Other facility',3:'Home'},
   hiv_test_result:{P:'POSITIVE',N:'Negative'},
+  // The forms store the MoH CODES — R / NR / ND, Y / N. Rendering "R" back at a clinician is no
+  // better than not showing it: this is the whole point of the feature. Say the word.
+  syphilis_result:{R:'REACTIVE',NR:'Non-reactive',ND:'Not done'},
+  hepb_result:{R:'REACTIVE',NR:'Non-reactive',ND:'Not done'},
+  ultrasound_lt24w:{Y:'Yes',N:'No'},
+  partograph_used:{Y:'Yes',N:'No'},
   maternal_death_cause:{1:'Haemorrhage',2:'Hypertensive disorder',3:'Sepsis',4:'Obstructed labour',5:'Abortion complication',6:'Other'},
 };
 const CSV_CODES = {
@@ -4756,14 +4762,14 @@ const F = {
   muac:['MUAC (cm)','t'], muac_flag:['MUAC below 23 cm','y!'], pallor:['Pallor','t!'],
   urine_gramstain:['Urine gram stain','t!'], ogtt_result:['OGTT (diabetes)','t!'],
   malaria_assessed:['Malaria assessed','t'],
-  syphilis_result:['Syphilis','t!'], syphilis_treated:['Syphilis treated','y'],
-  hepb_result:['Hepatitis B','t!'], hepb_treated:['Hepatitis B treated','y'], hepb_prophylaxis:['HepB prophylaxis','y'],
+  syphilis_result:['Syphilis','c!'], syphilis_treated:['Syphilis treated','y'],
+  hepb_result:['Hepatitis B','c!'], hepb_treated:['Hepatitis B treated','y'], hepb_prophylaxis:['HepB prophylaxis','y'],
   hiv_test_accepted:['HIV test accepted','y'], hiv_test_result:['HIV result','c!'], hiv_posttest_counselled:['Post-test counselled','y'],
   art_continued:['ART continued','y'], viral_load:['Viral load','t!'], viral_load_date:['Viral load date','t'],
   art_clinic_linked:['Linked back to ART clinic','y'],
   td_dose_no:['Td dose given','t'], ifa_tabs:['Iron-folic acid given (tablets)','t'], ifa_tabs_consumed:['IFA tablets taken','t'],
   calcium_given:['Calcium given','y'], deworming:['Deworming given','y'], anti_d_given:['Anti-D given','y'],
-  ultrasound_lt24w:['Ultrasound before 24 weeks','t'],
+  ultrasound_lt24w:['Ultrasound before 24 weeks','c'],
   mental_health:['Mental health','t!'], ipv_screen:['Intimate partner violence','t!'], substance_use:['Substance use','v'],
   cnsl_danger_signs:['Counselled: danger signs','y'], cnsl_nutrition:['Counselled: nutrition','y'], cnsl_ecd:['Counselled: early child development','y'],
   cnsl_infant_feeding:['Counselled: infant feeding','y'], cnsl_family_planning:['Counselled: family planning','y'],
@@ -4815,7 +4821,11 @@ function isAlarming(col, v){
   if(v==null||v==='') return false;
   switch(col){
     case 'hiv_test_result': return s==='p';
-    case 'syphilis_result': case 'hepb_result': return s.indexOf('react')>=0 || s==='positive' || s==='p';
+    // 'R' = reactive, 'NR' = NON-reactive. A substring test on "react" would flag both, and a test
+    // on the letter r would flag "nr" — either way, a woman with a NEGATIVE test would be shown as
+    // positive. Match exactly.
+    case 'syphilis_result': case 'hepb_result':
+      return s==='r' || s==='positive' || s==='p' || s==='reactive';
     case 'urine_protein': return s==='+'||s==='++'||s==='+++';
     case 'anaemia_grade': return s==='moderate'||s==='severe';
     case 'viral_load': return (+v)>=1000;
@@ -4879,15 +4889,19 @@ function gapsFor(W, anc){
   const any=(col,val)=>anc.some(v=>String(v[col]||'').toLowerCase()===val);
   const ga=+(last('ga_weeks')||0);
   const rhNeg=String(W.rh_factor||'').toLowerCase()==='neg';
-  const syph=String(last('syphilis_result')||'').toLowerCase();
-  const hepb=String(last('hepb_result')||'').toLowerCase();
+  // R = reactive, NR = non-reactive. Match EXACTLY: a substring test would read "NR" as reactive and
+  // put a warning on a woman whose test was negative — and a clinician who is warned about nothing
+  // soon stops reading the warnings.
+  const reactive=v=>{ const s=String(v||'').toLowerCase(); return s==='r'||s==='reactive'||s==='positive'||s==='p'; };
+  const syph=last('syphilis_result');
+  const hepb=last('hepb_result');
   if(rhNeg && ga>=28 && !anc.some(v=>v.anti_d_given==1))
     g.push(['Anti-D has not been given','She is Rh negative and past 28 weeks. Without anti-D she can be sensitised, which threatens this baby and every pregnancy after it.']);
-  if((syph.indexOf('react')>=0||syph==='positive') && !anc.some(v=>v.syphilis_treated==1))
+  if(reactive(syph) && !anc.some(v=>v.syphilis_treated==1))
     g.push(['Syphilis is reactive and no treatment is recorded','Treat her and her partner. Untreated maternal syphilis causes stillbirth and congenital syphilis, and it is preventable with benzathine penicillin.']);
-  if((hepb.indexOf('react')>=0||hepb==='positive') && !anc.some(v=>v.hepb_prophylaxis==1))
+  if(reactive(hepb) && !anc.some(v=>v.hepb_prophylaxis==1))
     g.push(['Hepatitis B is reactive and no prophylaxis is recorded','Plan the birth dose of HBV vaccine (and immunoglobulin where available) for the newborn.']);
-  if(ga>=24 && !anc.some(v=>String(v.ultrasound_lt24w||'').toLowerCase()==='yes'||v.ultrasound_lt24w==1))
+  if(ga>=24 && !anc.some(v=>{const s=String(v.ultrasound_lt24w||'').toLowerCase(); return s==='y'||s==='yes'||v.ultrasound_lt24w==1;}))
     g.push(['No dating ultrasound before 24 weeks','Gestational age can no longer be established reliably by scan. Date her from the last menstrual period and record the uncertainty.']);
   if(ga>=20 && !anc.some(v=>v.calcium_given==1))
     g.push(['Calcium has not been started','From 20 weeks, calcium reduces the risk of pre-eclampsia in this population.']);
