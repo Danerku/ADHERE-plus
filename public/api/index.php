@@ -1245,6 +1245,9 @@ try {
   }
 
   // ---- AI risk score (server-stored; scoring done on-device) ----
+  if ($r==='risk_scores' && $m==='GET'){ require_role(['provider','admin','supervisor']); $eid=(int)($_GET['episode']??0); require_ep($eid);
+    $st=db()->prepare("SELECT id, episode_id, obs_id, model_version, probability, band, provider_ack, scored_at FROM risk_scores WHERE episode_id=? ORDER BY scored_at, id");
+    $st->execute([$eid]); out($st->fetchAll()); }
   if ($r==='risk_scores' && $m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0); $b=array_intersect_key($b,array_flip(['episode_id','obs_id','model_version','probability','band','features_json','provider_ack','override_reason']));
     if(isset($b['features_json'])&&is_array($b['features_json'])) $b['features_json']=json_encode($b['features_json']);
     $sid=insert('risk_scores',$b); audit('risk_score','risk_scores',$sid,['band'=>$b['band']??null]); out(['id'=>$sid],201); }
