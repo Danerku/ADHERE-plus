@@ -5199,7 +5199,8 @@ async function letterScreen(id){
       ${line('Name',name)}${line('MRN',W.mrn)}${line('Age',W.age)}
       ${line('Gravida / Para','G'+(W.gravida||'?')+' / P'+(W.para||'?'))}
       ${line('Gestational age', ep.anc_ga_weeks?(ep.anc_ga_weeks+' weeks'):(last('ga_weeks')?last('ga_weeks')+' weeks':''))}
-      ${line('Blood group', (W.blood_group||'')+(W.rh_factor?(' '+W.rh_factor):''))}
+      ${line('Blood group', W.blood_group||'')}
+      ${W.rh_factor?`<div class="rec-f"><span class="rec-l">Rh factor</span><span class="rec-v${String(W.rh_factor).toLowerCase()==='neg'?' rec-alarm':''}">${esc(String(W.rh_factor).toLowerCase()==='neg'?'NEGATIVE':'Positive')}</span></div>`:''}
       ${line('Phone',W.phone)}
     </div></div>
     <div class="rec-b"><h5>Why she is being referred</h5>
