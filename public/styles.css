@@ -374,6 +374,22 @@ button.sm{padding:5px 10px;font-size:12px;width:auto;margin:2px 4px 2px 0}
 .rec-t th{text-align:left;color:#64748b;font-weight:600;padding:4px 8px 4px 0;white-space:nowrap}
 .rec-t td{padding:4px 8px 4px 0;border-bottom:1px solid #eef2f1;white-space:nowrap}
 
+/* ===== THE LABOUR CARE GUIDE ======================================================================
+   The paper guide is a grid: parameters down the side, an ALERT column, then one column per hour.
+   On a tablet it scrolls sideways; the parameter and alert columns stay put, because a number with
+   no threshold next to it is what the old partograph made a provider go and look up. */
+.lcgwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table.lcg{border-collapse:collapse;font-size:12px;min-width:100%}
+table.lcg th,table.lcg td{border:1px solid var(--border);padding:3px 6px;white-space:nowrap;text-align:left}
+table.lcg th{background:#f7faf9;font-weight:600;color:#334155}
+table.lcg .lcgp{position:sticky;left:0;background:#fff;z-index:2;min-width:150px}
+table.lcg th.lcgp{background:#f7faf9}
+table.lcg .lcga{color:#64748b;font-weight:600;min-width:72px}
+table.lcg tr.lcgg td{background:#eef6f5;font-weight:600;color:#0f766e}
+table.lcg td.lcgc{text-align:center;min-width:52px}
+table.lcg td.lcgalert{background:#fcebeb;color:#791f1f;font-weight:700}
+@media print{ table.lcg .lcgp{position:static} table.lcg td.lcgalert{background:transparent;text-decoration:underline} }
+
 /* =================================================================================================
    PRINT — A PLAIN DOCUMENT, NOT A SCREENSHOT OF THE APP.
    Paper was inheriting the screen design, and the screen design is built for a tablet: cards, pills,

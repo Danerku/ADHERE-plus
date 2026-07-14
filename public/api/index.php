@@ -572,6 +572,9 @@ try {
       'danger_signs'  => $all("SELECT * FROM danger_signs      WHERE episode_id IN ($in) ORDER BY obs_datetime, id"),
       'vitals'        => $all("SELECT * FROM maternal_vitals   WHERE episode_id IN ($in) ORDER BY obs_datetime, id"),
       'referrals'     => $all("SELECT * FROM referrals         WHERE episode_id IN ($in) ORDER BY recorded_at, id"),
+      // Her labour, under whichever guideline it was recorded: the Labour Care Guide now, and the
+      // legacy partograph for the women who were monitored before it replaced it. Both are her record.
+      'lcg'           => $all("SELECT * FROM lcg_obs           WHERE episode_id IN ($in) ORDER BY obs_datetime, id"),
       'observations'  => $all("SELECT * FROM partograph_obs    WHERE episode_id IN ($in) ORDER BY recorded_at, id"),
       'checklist'     => $all("SELECT * FROM checklist_responses WHERE episode_id IN ($in) ORDER BY id"),
       'bemonc'        => $all("SELECT * FROM bemonc_care       WHERE episode_id IN ($in) ORDER BY id"),
@@ -864,7 +867,7 @@ try {
       // came_from_facility etc: a woman booked at another health centre who arrives here in labour
       // was recorded as 'new' — as if nobody had ever seen her. The tool then screened her as
       // unbooked, which is a different woman with a different risk.
-      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','ruptured_datetime','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob','came_from_facility','came_with_records','transfer_reason'])));
+      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','ruptured_datetime','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob','came_from_facility','came_with_records','transfer_reason','labour_onset','active_labour_dx','rom_unknown','risk_factors'])));
       audit('create','episodes',$eid); out(['id'=>$eid],201); }
     if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body();
       // REFERRAL IS NOT A CLINICAL STATE. It used to overwrite status with 'referred', which
@@ -900,25 +903,71 @@ try {
       // and hands that to the scorer, but it was in NO allow-list — so the column was never written
       // and the model's rom_hours was null for every woman. Prolonged rupture is the main driver of
       // intrapartum sepsis; the feature existed in name only.
-      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','ruptured_datetime','place_of_delivery','infant_dob','returned_at','came_from_facility','came_with_records','transfer_reason','admitted_from']));
+      // Section 1 of the Labour Care Guide belongs to the admission, not to an observation: how labour
+      // started, when active first stage (>=5 cm) was diagnosed — which is where the LCG clock starts —
+      // whether she can say when her membranes ruptured, and the risk factors she carries into labour.
+      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','ruptured_datetime','place_of_delivery','infant_dob','returned_at','came_from_facility','came_with_records','transfer_reason','admitted_from','labour_onset','active_labour_dx','rom_unknown','risk_factors']));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE episodes SET `$k`=? WHERE id=?")->execute([$v,$id]); }
       if($fields) audit('update','episodes',$id,$fields);
       out(['ok'=>true]); }
   }
 
-  // ---- partograph observations ----
+  // =================================================================================================
+  // INTRAPARTUM CARE — THE LABOUR CARE GUIDE
+  //
+  // Ethiopia's endorsed Intrapartum Care Guideline replaces the partograph with the WHO Labour Care
+  // Guide. One row per ASSESSMENT, which is how the provider works: assess -> record -> check the
+  // alert column -> plan with her. The alert codes that fired are stored ON the row, not recomputed
+  // later, because the record has to be able to say what the provider was actually shown.
+  //
+  // The allow-list is declared ONCE and reused by the write path and the offline replay path. It was
+  // two different lists before, and the replay list was SHORTER — so a tablet that synced late lost
+  // twelve of the twenty-two fields it had recorded, silently. Never again: one list, one truth.
+  // =================================================================================================
+  $LCG_FIELDS = ['episode_id','obs_datetime','hours_since_active','stage','guide_no',
+    'companion','pain_relief','oral_fluid','posture',
+    'fhr_baseline','fhr_decel','amniotic_fluid','fetal_position','caput','moulding',
+    'pulse','bp_systolic','bp_diastolic','temperature','urine_protein','urine_acetone',
+    'contractions_per10','contraction_dur_sec','cervix_cm','descent_fifths','pushing_started',
+    'oxytocin','oxytocin_units','oxytocin_drops','medicine','iv_fluids',
+    'assessment','plan','initials','alerts','recorded_by'];
+
+  if ($r==='lcg'){
+    if($m==='GET'){ require_ep($_GET['episode']??0);
+      $st=db()->prepare("SELECT * FROM lcg_obs WHERE episode_id=? ORDER BY obs_datetime, id");
+      $st->execute([$_GET['episode']]); out($st->fetchAll()); }
+    if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0);
+      $b = blank_to_null($b);
+      check_ranges($b);                                  // an impossible reading is refused here, not only in the browser
+      $b['recorded_by']=$u['id'];
+      if(is_array($b['alerts']??null)) $b['alerts']=implode(',',$b['alerts']);
+      $oid=insert('lcg_obs',array_intersect_key($b,array_flip($LCG_FIELDS)));
+      audit('create_lcg','lcg_obs',$oid,['alerts'=>$b['alerts']??null]); out(['id'=>$oid],201); }
+    if($m==='PATCH' && $id){ $u=require_role(['provider','admin']); $b=body();
+      $q=db()->prepare("SELECT episode_id FROM lcg_obs WHERE id=?"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      require_ep($row['episode_id']);                    // the episode must be hers, and not voided
+      $b = blank_to_null($b); check_ranges($b);
+      // A CORRECTION, NOT A REWRITE: the assessment/plan and the clinical values can be corrected,
+      // but the row cannot be moved to another episode and its time cannot be rewritten.
+      $f = array_intersect_key($b, array_flip(array_diff($LCG_FIELDS, ['episode_id','obs_datetime','recorded_by'])));
+      if(!$f) err('nothing to update');
+      if(is_array($f['alerts']??null)) $f['alerts']=implode(',',$f['alerts']);
+      foreach($f as $k=>$v){ db()->prepare("UPDATE lcg_obs SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      audit('update','lcg_obs',$id,array_keys($f)); out(['ok'=>true]); }
+  }
+
+  // ---- partograph observations — LEGACY, READ-ONLY -----------------------------------------------
+  // 33 observations on 17 real episodes were recorded with the partograph. They are part of those
+  // women's records: they stay readable, printable and countable. But no NEW partograph observation
+  // may be written — the national guideline has replaced the tool, and a facility running both would
+  // be recording labour against two different definitions of poor progress.
   if ($r==='observations'){
     if($m==='GET'){ require_ep($_GET['episode']??0); $st=db()->prepare("SELECT * FROM partograph_obs WHERE episode_id=? ORDER BY obs_datetime"); $st->execute([$_GET['episode']]); out($st->fetchAll()); }
-    if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0);
-      // THE PARTOGRAPH HAD NO SERVER-SIDE VALIDATION AT ALL — the one screen where the numbers are
-      // taken every half hour under pressure, and the one whose numbers the intrapartum model reads
-      // straight back out. A cervix of 99 cm, a fetal heart of 9999 and a systolic of 900 were all
-      // accepted and stored. The bounds are the same ones every other clinical write has had.
-      $b = blank_to_null($b);
-      check_ranges($b);
-      $b['recorded_by']=$u['id'];
-      $oid=insert('partograph_obs',array_intersect_key($b,array_flip(['episode_id','obs_datetime','hours_since_active','fetal_heart_rate','amniotic_fluid','moulding','caput','cervix_cm','descent_head','contractions_per10','contraction_strength','oxytocin_units','oxytocin_drops','drugs_iv_fluids','bp_systolic','bp_diastolic','pulse','temperature','urine_protein','urine_acetone','urine_volume','recorded_by'])));
-      audit('create_obs','partograph_obs',$oid); out(['id'=>$oid],201); }
+    // 410 Gone, not 404: the route existed, and an old tablet replaying a queued partograph entry
+    // deserves a clear answer rather than a silent failure. 4xx also means the offline queue surfaces
+    // it on the failed-entries screen instead of retrying it for ever.
+    if($m==='POST'){ err('The partograph has been replaced by the Labour Care Guide. Record this assessment under Intrapartum care.', 410); }
   }
 
   // ---- AI risk score (server-stored; scoring done on-device) ----
@@ -1120,10 +1169,18 @@ try {
   if ($r==='analytics' && $m==='GET'){ $u=require_auth(); $ids=scoped_facility_ids($u); $in=implode(',',array_fill(0,count($ids),'?'));  // scoped to the user's facility (supervisor: their woreda/zone/region)
     $months=[]; for($i=5;$i>=0;$i--){ $months[]=date('Y-m', strtotime("-$i month")); }
     $series=function($sql) use($months,$ids){ $out=[]; foreach($months as $mo){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$mo])); $out[]=(int)($st->fetch()['c']??0);} return $out; };
+    // Same, for a query that names the month twice (labour monitored under either guideline).
+    $series2=function($sql) use($months,$ids){ $out=[]; foreach($months as $mo){ $st=db()->prepare($sql); $st->execute(array_merge($ids,[$mo,$mo])); $out[]=(int)($st->fetch()['c']??0);} return $out; };
     $ind=[
       'labour'=>$series("SELECT COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.facility_id IN ($in) AND e.service_category='labour' AND DATE_FORMAT(e.admission_datetime,'%Y-%m')=?"),
       'deliveries'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
-      'partographs'=>$series("SELECT COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.voided=0 AND e.id=o.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?"),
+      // Labour monitored, under either guideline — the Labour Care Guide now, the partograph before it.
+      // $series2 binds the month TWICE (once per EXISTS); $series binds it once, which is why this one
+      // has its own runner rather than a clever query.
+      'partographs'=>$series2("SELECT COUNT(DISTINCT e.id) c FROM episodes e
+                                WHERE e.voided=0 AND e.facility_id IN ($in)
+                                  AND ( EXISTS(SELECT 1 FROM lcg_obs o        WHERE o.episode_id=e.id AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?)
+                                     OR EXISTS(SELECT 1 FROM partograph_obs o WHERE o.episode_id=e.id AND DATE_FORMAT(o.recorded_at,'%Y-%m')=?) )"),
       'checklists'=>$series("SELECT COUNT(DISTINCT c.episode_id) c FROM checklist_responses c JOIN episodes e ON e.voided=0 AND e.id=c.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(c.recorded_at,'%Y-%m')=?"),
       'amtsl'=>$series("SELECT COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in) AND d.amtsl_uterotonic='done' AND DATE_FORMAT(d.delivery_datetime,'%Y-%m')=?"),
       'referrals'=>$series("SELECT COUNT(*) c FROM referrals r JOIN episodes e ON e.voided=0 AND e.id=r.episode_id WHERE e.facility_id IN ($in) AND DATE_FORMAT(r.recorded_at,'%Y-%m')=?"),
@@ -1667,19 +1724,38 @@ try {
          'period'=>['start'=>$e['admission_datetime']]]);
   }
 
-  // ---- offline sync (batch apply queued entries) ----
+  // ---- offline sync (batch apply queued entries) --------------------------------------------------
+  // THE REPLAY PATH USED A SHORTER ALLOW-LIST THAN THE WRITE PATH, AND NOBODY COULD SEE IT.
+  //
+  // The partograph write accepted 22 columns. This one accepted 10. Every field in between —
+  // amniotic fluid (so, meconium), caput, descent, diastolic BP, pulse, urine — was silently dropped
+  // from any observation that came back through here. The record looked complete on the tablet that
+  // recorded it and arrived on the server with holes in it, and nothing said so.
+  //
+  // The two lists are now ONE list, declared with the route that owns the table. A field added to the
+  // Labour Care Guide is a field the replay accepts, by construction — it cannot drift again.
   if ($r==='sync' && $m==='POST'){ $u=require_role(['provider','admin']); $items=body()['items']??[]; $applied=[];
+    $map=['lcg'=>'lcg_obs','checklist'=>'checklist_responses','danger_signs'=>'danger_signs'];
+    $sallow=[
+      'lcg_obs'              => $LCG_FIELDS,                       // the same list the POST /lcg route uses
+      'checklist_responses'  => ['episode_id','pause_point','item_code','response','recorded_by'],
+      'danger_signs'         => ['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by'],
+    ];
     foreach($items as $it){ $ep=$it['entity']??''; $payload=$it['payload']??[];
-      $map=['observations'=>'partograph_obs','checklist'=>'checklist_responses','danger_signs'=>'danger_signs'];
-      $sallow=['partograph_obs'=>['episode_id','obs_datetime','hours_since_active','fetal_heart_rate','moulding','cervix_cm','contractions_per10','bp_systolic','temperature','recorded_by'],'checklist_responses'=>['episode_id','pause_point','item_code','response','recorded_by'],'danger_signs'=>['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by']];
-      // The replay path was the LAST unvalidated door into the record: a queued write from a tablet
+      // A queued PARTOGRAPH entry from a tablet that has not updated yet. The tool it was recorded
+      // with no longer exists. Refuse it clearly (4xx) so it lands on the failed-entries screen with
+      // her values intact and visible, instead of vanishing or retrying for ever.
+      if($ep==='observations') err('This was recorded on the old partograph, which has been replaced by the Labour Care Guide. Re-enter it under Intrapartum care — the values are shown on the failed-entries screen.', 410);
+      // The replay path was the last unvalidated door into the record: a queued write from a tablet
       // running an older build — precisely the case the bounds exist for — went straight to insert().
-      // It is validated exactly like the online write now, and a bad value comes back 400, which is
-      // the status that lands it on the failed-entries screen instead of retrying for ever.
+      // It is validated exactly like the online write now.
       if(isset($map[$ep])){ require_ep($payload['episode_id']??0);
         $payload = blank_to_null($payload);
         check_ranges($payload);
-        $payload['recorded_by']=$u['id']; $payload=array_intersect_key($payload,array_flip($sallow[$map[$ep]])); $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert($map[$ep],$payload)]; } }
+        $payload['recorded_by']=$u['id'];
+        if(is_array($payload['alerts']??null)) $payload['alerts']=implode(',',$payload['alerts']);
+        $payload=array_intersect_key($payload,array_flip($sallow[$map[$ep]]));
+        $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert($map[$ep],$payload)]; } }
     audit('sync',null,null,['count'=>count($applied)]); out(['applied'=>$applied]);
   }
 
@@ -1695,7 +1771,17 @@ try {
     // partograph_completion. The numerator (partographs_started) excludes voided episodes, so every
     // removed labour episode quietly dragged the facility's headline quality indicator down.
     $labour   = $grp("SELECT facility_id fid, COUNT(*) c FROM episodes WHERE voided=0 AND service_category='labour' AND facility_id IN ($in)".$dc('created_at')." GROUP BY facility_id");
-    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT o.episode_id) c FROM partograph_obs o JOIN episodes e ON e.voided=0 AND e.id=o.episode_id WHERE e.facility_id IN ($in)".$dc('o.recorded_at')." GROUP BY e.facility_id");
+    // LABOUR MONITORED — under whichever guideline. The Labour Care Guide replaced the partograph, but
+    // a woman monitored on the partograph before that WAS monitored: counting only the new table would
+    // drop every facility's quality indicator to zero on the day we deploy, which would be a lie about
+    // the care they gave. Both count. Union, not either/or.
+    // (One IN($in) only — the placeholder list is bound once, so the OR-EXISTS shape is used rather
+    //  than a UNION, which would need the facility ids bound twice.)
+    $partostd = $grp("SELECT e.facility_id fid, COUNT(DISTINCT e.id) c FROM episodes e
+                       WHERE e.voided=0 AND e.facility_id IN ($in)
+                         AND ( EXISTS(SELECT 1 FROM lcg_obs o        WHERE o.episode_id=e.id".$dc('o.recorded_at').")
+                            OR EXISTS(SELECT 1 FROM partograph_obs o WHERE o.episode_id=e.id".$dc('o.recorded_at').") )
+                       GROUP BY e.facility_id");
     $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
     $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
     $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.voided=0 AND e.id=rf.episode_id WHERE e.facility_id IN ($in)".$dc('rf.recorded_at')." GROUP BY e.facility_id");

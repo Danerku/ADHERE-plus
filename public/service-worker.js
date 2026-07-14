@@ -1,6 +1,6 @@
-const CACHE='adhere-v73';
+const CACHE='adhere-v80';
 const SHELL=['./','./index.html','./app.js','./styles.css','./config.js','./manifest.webmanifest',
-  './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js',
+  './model/score.js','./model/bayes_tracker.js','./model/rules_engine.js','./model/charts.js','./model/ethiopian.js','./model/lcg.js',
   './model/risk_model.json','./model/newborn_model.json','./model/mch_rules.json'];
 self.addEventListener('install', e=>{ e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL.filter(u=>u))).then(()=>self.skipWaiting())); });
 self.addEventListener('activate', e=>{ e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())); });

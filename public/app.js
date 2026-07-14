@@ -326,7 +326,7 @@ function idmapPut(tmp,real){ const m=idmap(); m[String(tmp)]=real; lsSet(OM,m); 
 // GET returns it. Anything not listed is queued as before (it is a child row that needs no local id).
 const CREATES={ women:'women', episodes:'episodes', pregnancy_tests:'pregnancy_tests',
   fp_clients:'fp_clients', imm_clients:'imm_clients', pmtct:'pmtct', babies:'babies',
-  observations:'observations', anc_visits:'anc_visits', pnc_visits:'pnc_visits',
+  lcg:'lcg', observations:'observations', anc_visits:'anc_visits', pnc_visits:'pnc_visits',
   danger_signs:'danger_signs', maternal_vitals:'maternal_vitals', delivery:'delivery',
   anc_screening:'anc_screening', referrals:'referrals', checklist:'checklist',
   // These are ALSO read back by id offline (labs?episode=, fp_visits?client=, imm_doses?client=,
@@ -862,7 +862,11 @@ function route(){
   // Without this, a risk popup raised for one woman stays on screen over the NEXT patient's
   // chart — showing her data and blocking the UI. Always tear it down on navigation.
   document.getElementById('mdl')?.remove();
-  ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,partograph:partograph,anc:ancScreen,
+  // `partograph` still routes — an old bookmark, an old link in a note, a provider's muscle memory —
+  // but it lands on Intrapartum care, which is where labour is monitored now. Her legacy partograph
+  // observations are shown on that screen, read-only, as part of her record.
+  ({home:home,register:register,antenatal:ancList,labour:labour,highrisk:highriskList,
+    intrapartum:intrapartum, partograph:intrapartum, anc:ancScreen,
     checklist:checklist,danger:danger,delivery:delivery,pnc:pnc,dashboard:dashboard,users:users,facilities:facilities,
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
@@ -903,7 +907,7 @@ function login(){
 function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===x?' on':'';
   const L=(href,txt)=>`<a class="nav${on(href)}" href="${href}">${txt}</a>`;
   const B=(href,txt)=>`<a class="bn${on(href)}" href="${href}">${esc(txt)}</a>`;
-  const _p=(location.hash||'').replace(/^#/,'').split('/'); const _EP=['partograph','anc','checklist','danger','delivery','baby','bemonc','handover','referral','report','vitals','ancvisit','pncvisit','abortion','death','letter'];
+  const _p=(location.hash||'').replace(/^#/,'').split('/'); const _EP=['intrapartum','partograph','anc','checklist','danger','delivery','baby','bemonc','handover','referral','report','vitals','ancvisit','pncvisit','abortion','death','letter'];
   const back=(_EP.indexOf(_p[0])>=0 && _p[1] && /^\d+$/.test(_p[1]))?`<a class="nav" href="#patient/${_p[1]}" style="font-weight:600">‹ Back to patient</a>`:'';
   // sticky patient context bar (uses cache set by patientHub)
   const _pid=(_p[0]==='patient'||_EP.indexOf(_p[0])>=0)?_p[1]:null;
@@ -936,8 +940,8 @@ function nav(){ const h=(location.hash||'#home').split('/')[0]; const on=x=>h===
   // know that without a fetch, and a tick that lies is worse than no tick.
   const STEPS={
     anc:[['#anc/','Risk screening'],['#ancvisit/','ANC contact'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#referral/','Refer'],['#report/','Full record']],
-    labour:[['#partograph/','Partograph'],['#checklist/','Safe-birth checklist'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#delivery/','Delivery'],['#baby/','Newborn'],['#bemonc/','Emergency care'],['#report/','Full record']],
-    highrisk:[['#partograph/','Partograph'],['#checklist/','Safe-birth checklist'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#delivery/','Delivery'],['#baby/','Newborn'],['#bemonc/','Emergency care'],['#report/','Full record']],
+    labour:[['#intrapartum/','Intrapartum care'],['#checklist/','Safe-birth checklist'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#delivery/','Delivery'],['#baby/','Newborn'],['#bemonc/','Emergency care'],['#report/','Full record']],
+    highrisk:[['#intrapartum/','Intrapartum care'],['#checklist/','Safe-birth checklist'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#delivery/','Delivery'],['#baby/','Newborn'],['#bemonc/','Emergency care'],['#report/','Full record']],
     pnc:[['#pncvisit/','PNC visit'],['#baby/','Newborn'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#referral/','Refer'],['#report/','Full record']],
     abortion:[['#abortion/','Loss / abortion care'],['#vitals/','Vital signs'],['#danger/','Danger signs'],['#referral/','Refer'],['#report/','Full record']],
   };
@@ -1011,7 +1015,7 @@ async function home(){
       tileHtml('#find','&#128269;','Find a woman','Already registered · new episode','teal',roIntake)+
       tileHtml('#pregtest','&#129514;','Pregnancy test',(pt?pt+' awaiting result':'Results & routing'),(pt?'red':'teal'),roIntake)+
       tileHtml('#antenatal','&#128197;','Antenatal',n(anc,'in care','8 contacts'),'teal',roClin)+
-      tileHtml('#labour','&#128147;','Labour ward',n(lab,'in labour','Partograph · AI'),'teal',roClin)+
+      tileHtml('#labour','&#128147;','Labour ward',n(lab,'in labour','Labour Care Guide · AI'),'teal',roClin)+
       tileHtml('#pnc','&#128118;','Postnatal',n(pnc,'in care','Mother + newborn'),'teal',roClin)+
       tileHtml('#highrisk','&#9888;&#65039;','High risk',n(hr,'flagged','None flagged'),(hr?'red':'soft'),roClin)
     )}
@@ -2012,6 +2016,345 @@ async function partograph(id){
   $('#ack').onclick=async()=>{ if(lastScoreId[id]){ try{ await api('PATCH','risk_scores/'+lastScoreId[id]); $('#hitl').textContent='acknowledged (saved)'; }catch(e){ $('#hitl').textContent='acknowledged (queued)'; } } else $('#hitl').textContent='record a score first'; };
   $('#ovr').onclick=async()=>{ const la=lastAI[id]||{p:0,band:'green'}; await api('POST','risk_scores',{episode_id:+id,model_version:'override',probability:la.p.toFixed(4),band:la.band,override_reason:'clinician judgement',provider_ack:1}); $('#hitl').textContent='override logged'; };
 }
+// =================================================================================================
+// INTRAPARTUM CARE — THE LABOUR CARE GUIDE
+//
+// Ethiopia's endorsed Intrapartum Care Guideline replaces the partograph with the WHO Labour Care
+// Guide. The provider works one ASSESSMENT at a time — assess, record, check the alert column, plan
+// with her — and the guide above the form is the record those assessments build.
+//
+// The alert column is the guideline and it is computed in model/lcg.js. The AI score sits UNDER it
+// and can never suppress it: an alert is a fact about a number, and no probability outranks that.
+// =================================================================================================
+
+// Ethiopian clock: 6:00 in the morning is 12:00 LD, noon is 6:00 LD, midnight is 6:00 LN.
+// The guideline asks for local 12-hour time with LD (day) / LN (night) — so that is what the guide shows.
+function ecClock(d){
+  if(!d || isNaN(d.getTime())) return '';
+  const h=d.getHours(), m=d.getMinutes();
+  const eh=((h+6)%12)||12;
+  return eh+':'+String(m).padStart(2,'0')+' '+((h>=6&&h<18)?'LD':'LN');
+}
+const LCG_LABELS={
+  companion:['Companion','N'], pain_relief:['Pain relief','N'], oral_fluid:['Oral fluid','N'], posture:['Posture','SP'],
+  fhr_baseline:['Baseline FHR','<110, ≥160'], fhr_decel:['FHR deceleration','L'],
+  amniotic_fluid:['Amniotic fluid','M+++, B'], fetal_position:['Fetal position','P, T'],
+  caput:['Caput','+++'], moulding:['Moulding','+++'],
+  pulse:['Pulse','<60, ≥120'], bp_systolic:['Systolic BP','<80, ≥140'], bp_diastolic:['Diastolic BP','≥90'],
+  temperature:['Temperature °C','<35, ≥37.5'], urine_protein:['Urine protein','P++'], urine_acetone:['Urine acetone','A++'],
+  contractions_per10:['Contractions / 10 min','<2, >5'], contraction_dur_sec:['Duration (sec)','<20, >60'],
+  cervix_cm:['Cervix (cm)','lag time'], descent_fifths:['Descent (fifths)','—'],
+  oxytocin:['Oxytocin','—'], medicine:['Medicine','—'], iv_fluids:['IV fluids','—']
+};
+const LCG_GROUPS=[
+  ['Supportive care',['companion','pain_relief','oral_fluid','posture']],
+  ['Baby',['fhr_baseline','fhr_decel','amniotic_fluid','fetal_position','caput','moulding']],
+  ['Woman',['pulse','bp_systolic','bp_diastolic','temperature','urine_protein','urine_acetone']],
+  ['Labour progress',['contractions_per10','contraction_dur_sec','cervix_cm','descent_fifths']],
+  ['Medication',['oxytocin','medicine','iv_fluids']],
+];
+
+async function intrapartum(id){
+  const [W, rows, legacy] = await Promise.all([
+    epOne(id),
+    api('GET','lcg?episode='+id).catch(()=>[]),
+    api('GET','observations?episode='+id).catch(()=>[])
+  ]);
+  const series=(rows||[]).slice().sort((a,b)=>String(a.obs_datetime).localeCompare(String(b.obs_datetime)));
+  const MF=motherFeats(W);
+  const done = (W.status==='delivered'||W.status==='closed');
+  const parity = (W.para==null||W.para==='') ? null : +W.para;
+  const activeDx = W.active_labour_dx || null;
+  const last = series.length ? series[series.length-1] : null;
+  const stage = (last && (+last.pushing_started===1 || +last.cervix_cm>=10)) ? 'second' : 'first';
+
+  // The alert column for the latest assessment, plus the two alerts that are about TIME, not a value.
+  const alerts = last ? LCG.alertsFor(last, series, {parity:parity, activeStart:activeDx}) : [];
+  const due = activeDx ? LCG.dueNow(series, stage, nowStr()) : [];
+
+  const cell=(o,f)=>{
+    const v=o[f];
+    if(v===null||v===undefined||v==='') return '<td class="lcgc muted">·</td>';
+    const bad = LCG.cellAlerts(f,v);
+    return '<td class="lcgc'+(bad?' lcgalert':'')+'">'+esc(String(v))+'</td>';
+  };
+  const grid = series.length ? `
+   <div class="lcgwrap"><table class="lcg">
+     <tr><th class="lcgp">Observation</th><th class="lcga">Alert</th>
+       ${series.map(o=>`<th>${esc(ecClock(parseLocal(o.obs_datetime)))}<div class="muted" style="font-weight:400">h${esc(o.hours_since_active??'')}</div></th>`).join('')}</tr>
+     ${LCG_GROUPS.map(([g,fields])=>`
+       <tr class="lcgg"><td colspan="${series.length+2}">${esc(g)}</td></tr>
+       ${fields.map(f=>`<tr><td class="lcgp">${esc(LCG_LABELS[f][0])}</td><td class="lcga">${esc(LCG_LABELS[f][1])}</td>
+          ${series.map(o=>cell(o,f)).join('')}</tr>`).join('')}`).join('')}
+     <tr class="lcgg"><td colspan="${series.length+2}">Shared decision-making</td></tr>
+     <tr><td class="lcgp">Assessment</td><td class="lcga">—</td>${series.map(o=>`<td class="lcgc">${esc(o.assessment||'·')}</td>`).join('')}</tr>
+     <tr><td class="lcgp">Plan</td><td class="lcga">—</td>${series.map(o=>`<td class="lcgc">${esc(o.plan||'·')}</td>`).join('')}</tr>
+     <tr><td class="lcgp">Initials</td><td class="lcga">—</td>${series.map(o=>`<td class="lcgc">${esc(o.initials||'·')}</td>`).join('')}</tr>
+   </table></div>` : '<p class="muted">No assessment recorded yet on this guide.</p>';
+
+  const alertBanner = alerts.length ? `<div class="card" style="border-left:4px solid #a32d2d;background:#fcebeb;margin-bottom:10px">
+      <b style="color:#791f1f">${alerts.length} observation${alerts.length===1?'':'s'} meet the alert threshold</b>
+      <ul style="margin:6px 0 0 18px;font-size:13px;color:#791f1f">
+        ${alerts.map(a=>`<li><b>${esc(a.label)}</b>${a.value?(' — '+esc(a.value)):''}${a.detail?(' <span class="muted" style="color:#791f1f">'+esc(a.detail)+'</span>'):''}<br><span style="font-weight:400">${esc(a.action)}</span></li>`).join('')}
+      </ul></div>` : '';
+
+  const legacyNote = (legacy&&legacy.length) ? `<div class="card" style="margin-bottom:10px">
+      <b>Recorded on the partograph</b> <span class="muted">— ${legacy.length} observation(s) before the Labour Care Guide replaced it. They remain part of her record.</span>
+      <table style="margin-top:6px;font-size:12px"><tr><th>Hours</th><th>Cervix</th><th>FHR</th><th>BP</th><th>Temp</th></tr>
+      ${legacy.map(o=>`<tr><td>${esc(o.hours_since_active??'')}</td><td>${esc(o.cervix_cm??'')}</td><td>${esc(o.fetal_heart_rate??'')}</td><td>${esc((o.bp_systolic||'')+'/'+(o.bp_diastolic||''))}</td><td>${esc(o.temperature??'')}</td></tr>`).join('')}
+      </table></div>` : '';
+
+  const sel=(idd,opts)=>`<select id="${idd}"><option value="">—</option>${opts.map(([v,t])=>`<option value="${v}">${t}</option>`).join('')}</select>`;
+
+  app().innerHTML=nav()+`
+   <div class="card"><h3>Intrapartum care <span class="muted" style="font-size:13px;font-weight:400">— Labour Care Guide · episode ${esc(id)}</span></h3>
+    <p class="muted">${esc(((W.first_name||'')+' '+(W.father_name||'')).trim())} · MRN ${esc(W.mrn||'')} · P${esc(W.para??'?')} · ${esc(W.labour_onset||'onset not recorded')}${W.ruptured_datetime?(' · ROM '+esc(String(W.ruptured_datetime).slice(0,16))):(W.rom_unknown==1?' · ROM unknown':'')}</p>
+    ${done?'<div class="card" style="background:#f7faf9;margin:6px 0"><b>This labour is complete.</b> The guide is read-only.</div>':''}
+
+    <details class="moh"${activeDx?'':' open'}><summary>Admission — labour characteristics ${activeDx?'':'<span class="pill red">start here</span>'}</summary>
+     <div class="grid">
+      <label>Labour onset<select id="lonset"><option value="">—</option><option value="spontaneous"${W.labour_onset==='spontaneous'?' selected':''}>Spontaneous</option><option value="induced"${W.labour_onset==='induced'?' selected':''}>Induced</option></select></label>
+      <label>Active labour diagnosed (≥5 cm)<input id="ldx" type="datetime-local" value="${esc(activeDx?String(activeDx).slice(0,16).replace(' ','T'):'')}"></label>
+      <label>Membranes ruptured<input id="lrom" type="datetime-local" value="${esc(W.ruptured_datetime?String(W.ruptured_datetime).slice(0,16).replace(' ','T'):'')}"></label>
+      <label>&nbsp;<span class="ticks">${tick('lromu','She cannot say when (U)')}</span></label>
+      <label style="grid-column:1/-1">Risk factors carried into labour<input id="lrisk" value="${esc(W.risk_factors||'')}" placeholder="e.g. chronic hypertension, previous caesarean, adolescent"></label>
+     </div>
+     <button class="sec" id="ladmsave" style="margin-top:8px">Save admission details</button> <span class="muted" id="ladmm"></span>
+     <div class="muted" style="font-size:12px;margin-top:6px">The guide starts when active first stage is diagnosed at 5 cm or more. Every hour on it is counted from that moment.</div>
+    </details>
+   </div>
+
+   ${alertBanner}
+
+   <div class="card"><h3>Her guide${stage==='second'?' <span class="pill amber">second stage</span>':''}</h3>
+     ${grid}
+   </div>
+
+   ${legacyNote}
+
+   ${done?'':`
+   <div class="card"><h3>New assessment</h3>
+    ${activeDx?'':'<div class="card" style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;margin-bottom:8px">Record the active-labour diagnosis above first — the guide is timed from it.</div>'}
+    ${due.length?`<p class="muted" style="font-size:12px">Due now: ${due.map(d=>esc(d.label)+(d.since?(' — last '+d.since+' min ago'):'')).join(' · ')}</p>`:''}
+
+    <details class="moh" open><summary>Supportive care</summary><div class="grid">
+     <label>Companion${sel('l_comp',[['Y','Yes'],['N','No'],['D','She declines']])}</label>
+     <label>Pain relief${sel('l_pain',[['Y','Yes'],['N','No'],['D','She declines']])}</label>
+     <label>Oral fluid${sel('l_fluid',[['Y','Yes'],['N','No'],['D','She declines']])}</label>
+     <label>Posture${sel('l_post',[['MO','Mobile / upright / lateral'],['SP','Supine']])}</label>
+    </div></details>
+
+    <details class="moh" open><summary>Baby</summary><div class="grid">
+     <label>Baseline FHR (1 full minute)<input id="l_fhr" type="number" inputmode="numeric"></label>
+     <label>FHR deceleration${sel('l_dec',[['N','None'],['E','Early'],['L','Late'],['V','Variable']])}</label>
+     <label>Amniotic fluid${sel('l_amn',[['I','Intact membranes'],['C','Clear'],['M+','Meconium +'],['M++','Meconium ++'],['M+++','Meconium +++ (thick)'],['B','Blood-stained']])}</label>
+     <label>Fetal position${sel('l_pos',[['A','Occiput anterior'],['P','Occiput posterior'],['T','Occiput transverse']])}</label>
+     <label>Caput${sel('l_cap',[['0','0'],['+','+'],['++','++'],['+++','+++']])}</label>
+     <label>Moulding${sel('l_mld',[['0','0'],['+','+ sutures apposed'],['++','++ overlapped, reducible'],['+++','+++ overlapped, not reducible']])}</label>
+    </div></details>
+
+    <details class="moh" open><summary>Woman</summary><div class="grid">
+     <label>Pulse<input id="l_pls" type="number" inputmode="numeric"></label>
+     <label>Systolic BP<input id="l_sbp" type="number" inputmode="numeric"></label>
+     <label>Diastolic BP<input id="l_dbp" type="number" inputmode="numeric"></label>
+     <label>Temperature °C<input id="l_tmp" type="number" step="0.1"></label>
+     <label>Urine protein${sel('l_up',[['-','Negative'],['trace','Trace'],['+','+'],['++','++'],['+++','+++'],['++++','++++']])}</label>
+     <label>Urine acetone${sel('l_ua',[['-','Negative'],['+','+'],['++','++'],['+++','+++'],['++++','++++']])}</label>
+    </div></details>
+
+    <details class="moh" open><summary>Labour progress</summary><div class="grid">
+     <label>Contractions per 10 min<input id="l_ctx" type="number" inputmode="numeric"></label>
+     <label>Duration of contractions (sec)<input id="l_dur" type="number" inputmode="numeric"></label>
+     <label>Cervix (cm)<input id="l_cvx" type="number" step="0.5" min="0" max="10"></label>
+     <label>Descent (fifths palpable)${sel('l_dsc',[['5','5/5'],['4','4/5'],['3','3/5'],['2','2/5'],['1','1/5'],['0','0/5']])}</label>
+     <label>&nbsp;<span class="ticks">${tick('l_push','Pushing has begun (second stage)')}</span></label>
+    </div></details>
+
+    <details class="moh"><summary>Medication</summary><div class="grid">
+     <label>Oxytocin${sel('l_oxy',[['N','No'],['Y','Yes']])}</label>
+     <label>Oxytocin U/L<input id="l_oxu" type="number" step="0.5"></label>
+     <label>Oxytocin drops/min<input id="l_oxd" type="number" inputmode="numeric"></label>
+     <label>IV fluids${sel('l_iv',[['N','No'],['Y','Yes']])}</label>
+     <label style="grid-column:1/-1">Medicine — name, dose, route<input id="l_med" placeholder="e.g. pethidine 50 mg IM"></label>
+    </div></details>
+
+    <details class="moh" open><summary>Shared decision-making</summary>
+     <label>Assessment<input id="l_as" placeholder="overall assessment, and anything not recorded above"></label>
+     <label>Plan agreed with her<input id="l_pl" placeholder="what was decided, in discussion with her"></label>
+     <label>Initials<input id="l_in" maxlength="16" value="${esc((ME.full_name||'').split(' ').map(s=>s[0]||'').join('').slice(0,4))}"></label>
+    </details>
+
+    <div id="l_alerts"></div>
+    <button class="act" id="l_save" style="margin-top:10px"${activeDx?'':' disabled'}>Save assessment</button> <span class="muted" id="l_m"></span>
+   </div>
+
+   <div class="card" id="ai" style="display:none">
+     <h3>Risk of intrapartum complication <span class="pill" id="band"></span></h3>
+     <div style="font-size:26px;font-weight:700" id="prob"></div>
+     <div class="muted" id="drv"></div>
+     <div id="why" style="margin-top:6px;font-size:13px"></div>
+     <div id="cover" class="muted" style="margin-top:6px;font-size:12px"></div>
+     <div id="nbrisk" style="display:none;margin-top:8px;font-size:13px"></div>
+     <div style="margin-top:10px">
+       <button class="sec" id="ack">Acknowledge</button>
+       <button class="sec" id="ovr">Disagree — record why</button>
+       <span class="muted" id="hitl" style="margin-left:8px"></span>
+     </div>
+   </div>`}`;
+
+  // ---- Section 1: the admission characteristics --------------------------------------------------
+  const ladm=$('#ladmsave');
+  if(ladm){ if(W.rom_unknown==1 && $('#lromu')) $('#lromu').checked=true;
+    ladm.onclick=async()=>{
+      if(ladm.disabled) return; ladm.disabled=true;
+      try{
+        const dx=($('#ldx').value||'').replace('T',' ');
+        const rom=($('#lrom').value||'').replace('T',' ');
+        const r=await api('PATCH','episodes/'+id,{
+          labour_onset:($('#lonset').value||null),
+          active_labour_dx:(dx?dx+':00':null),
+          ruptured_datetime:(rom?rom+':00':null),
+          ruptured_membrane:(rom||tk('lromu'))?1:0,
+          rom_unknown:tk('lromu'),
+          risk_factors:($('#lrisk').value||null)});
+        if(r&&(r.ok||r.queued)){ toast('Admission details saved','ok'); setTimeout(()=>intrapartum(id),500); }
+        else { ladm.disabled=false; $('#ladmm').textContent=' '+((r&&r.error)||'could not save'); }
+      }catch(e){ ladm.disabled=false; toast('Could not save — '+(e.message||'error')); }
+    };
+  }
+
+  // ---- Live alert preview: check the thresholds as she types, not after she saves -----------------
+  const readForm=()=>({
+    episode_id:+id,
+    companion:($('#l_comp')||{}).value||null, pain_relief:($('#l_pain')||{}).value||null,
+    oral_fluid:($('#l_fluid')||{}).value||null, posture:($('#l_post')||{}).value||null,
+    fhr_baseline:numOrNull(($('#l_fhr')||{}).value), fhr_decel:($('#l_dec')||{}).value||null,
+    amniotic_fluid:($('#l_amn')||{}).value||null, fetal_position:($('#l_pos')||{}).value||null,
+    caput:($('#l_cap')||{}).value||null, moulding:($('#l_mld')||{}).value||null,
+    pulse:numOrNull(($('#l_pls')||{}).value), bp_systolic:numOrNull(($('#l_sbp')||{}).value),
+    bp_diastolic:numOrNull(($('#l_dbp')||{}).value), temperature:numOrNull(($('#l_tmp')||{}).value),
+    urine_protein:($('#l_up')||{}).value||null, urine_acetone:($('#l_ua')||{}).value||null,
+    contractions_per10:numOrNull(($('#l_ctx')||{}).value), contraction_dur_sec:numOrNull(($('#l_dur')||{}).value),
+    cervix_cm:numOrNull(($('#l_cvx')||{}).value), descent_fifths:(($('#l_dsc')||{}).value===''?null:+($('#l_dsc')).value),
+    pushing_started:tk('l_push'),
+    oxytocin:($('#l_oxy')||{}).value||null, oxytocin_units:numOrNull(($('#l_oxu')||{}).value),
+    oxytocin_drops:numOrNull(($('#l_oxd')||{}).value), medicine:(($('#l_med')||{}).value||null),
+    iv_fluids:($('#l_iv')||{}).value||null,
+    assessment:(($('#l_as')||{}).value||null), plan:(($('#l_pl')||{}).value||null), initials:(($('#l_in')||{}).value||null)
+  });
+  const paintAlerts=()=>{
+    const box=$('#l_alerts'); if(!box) return;
+    const draft=Object.assign({obs_datetime:nowStr()}, readForm());
+    const a=LCG.alertsFor(draft, series.concat([draft]), {parity:parity, activeStart:activeDx});
+    box.innerHTML = a.length ? `<div style="background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px">
+        <b>${a.length} alert${a.length===1?'':'s'}</b> — ${a.map(x=>esc(x.label)+(x.value?(' '+esc(x.value)):'')).join(' · ')}
+      </div>` : '';
+  };
+  if(!done){ document.querySelectorAll('#app input,#app select').forEach(el=>{ el.addEventListener('change',paintAlerts); el.addEventListener('input',paintAlerts); }); }
+
+  // ---- Save the assessment, then score it ---------------------------------------------------------
+  const sv=$('#l_save');
+  if(sv) sv.onclick=async()=>{
+    if(sv.disabled) return;
+    const o=readForm();
+    // The guideline requires the fetal heart, the contractions and the cervix to mean anything at all.
+    // ADHERE+ does not fill them in for anyone.
+    if(o.fhr_baseline==null && o.cervix_cm==null && o.contractions_per10==null){
+      modal('Nothing recorded','Record at least the fetal heart rate, the contractions or the cervix. An empty assessment tells the next provider nothing.','risk'); return; }
+    if(!checkRanges([['l_fhr','fhr_baseline'],['l_sbp','bp_systolic'],['l_dbp','bp_diastolic'],['l_pls','pulse'],['l_tmp','temperature'],['l_cvx','cervix_cm'],['l_ctx','contractions_per10'],['l_dur','contraction_dur_sec']])) return;
+    sv.disabled=true; let saved=false;
+    try{
+      const now=nowStr();
+      const hrs = activeDx ? Math.max(0, Math.round(((parseLocal(now) - parseLocal(String(activeDx)))/3600000)*10)/10) : null;
+      const draft=Object.assign({}, o, {obs_datetime:now, hours_since_active:hrs,
+        stage:(o.pushing_started===1 || (+o.cervix_cm>=10))?'second':'first',
+        guide_no: (hrs!=null && hrs>12) ? (Math.floor(hrs/12)+1) : 1});
+      const fired=LCG.alertsFor(draft, series.concat([draft]), {parity:parity, activeStart:activeDx});
+      draft.alerts = fired.map(a=>a.code).join(',');
+
+      const res=await api('POST','lcg',draft);
+      if(!(res && (res.id || res.queued))) throw new Error((res&&res.error)||'could not save');
+      saved=true;
+      series.push(draft);
+
+      // ---- the AI layer. It reads what she recorded — and only what she recorded. ----------------
+      // Missing inputs are NOT quietly replaced with reassuring population values: the coverage is
+      // shown, and if the core of the assessment is absent the score is withheld rather than invented.
+      const mldN = {'0':0,'+':1,'++':2,'+++':3}[o.moulding];
+      const mecon = (o.amniotic_fluid==='M+'||o.amniotic_fluid==='M++'||o.amniotic_fluid==='M+++') ? 1 : 0;
+      const upN = {'+':1,'++':2,'+++':3,'++++':3}[o.urine_protein] || 0;
+      const DS=await api('GET','danger_signs?episode='+id).catch(()=>[]);
+      const ds=(DS||[]).slice(-1)[0]||{};
+      const sym={ headache:(ds.headache==='yes'||ds.headache==1)?1:0, blurred:(ds.blurred_vision==='yes'||ds.blurred_vision==1)?1:0,
+        epigastric:(ds.epigastric_pain==='yes'||ds.epigastric_pain==1)?1:0,
+        clonus:(String(ds.dtr_grade||'').match(/3|4|clonus/i))?1:0,
+        bleeding:(ds.vaginal_bleeding==='yes'||ds.vaginal_bleeding==1)?1:0, urine_prot:upN };
+      const romH=romHrs(W.ruptured_datetime);
+      const cvxRate = (hrs>0 && o.cervix_cm!=null) ? (o.cervix_cm-4)/hrs : null;
+      const feat=Object.assign({},FEAT_DEFAULTS,MF,sym,{hrs:hrs,cvx:o.cervix_cm,cvx_rate:cvxRate,fhr:o.fhr_baseline,
+        ctx:o.contractions_per10, mld:mldN, meconium:mecon, sbp:o.bp_systolic, dbp:o.bp_diastolic,
+        pulse:o.pulse, temp:o.temperature, rom_hours:romH});
+      Object.keys(feat).forEach(k=>{ if(feat[k]==null||Number.isNaN(feat[k])) delete feat[k]; });
+
+      const CORE=['hrs','cvx','fhr'];
+      const observed=['hrs','cvx','fhr','ctx','mld','meconium','sbp','dbp','pulse','temp','urine_prot'].filter(k=>feat[k]!=null);
+      const haveCore=CORE.filter(k=>feat[k]!=null).length;
+      const aiBox=$('#ai');
+      if(haveCore<2){
+        aiBox.style.display='block';
+        $('#prob').textContent='—'; $('#prob').className='';
+        $('#band').textContent=''; $('#band').className='pill';
+        $('#drv').textContent='Not enough recorded to score this assessment.';
+        $('#why').innerHTML='';
+        $('#cover').textContent='A score needs at least the hours in active labour, the cervix and the fetal heart. Nothing is guessed.';
+      } else {
+        const r=RM?RM.predict(feat):{probability:0,band:'green'};
+        const cfIn={sbp:o.bp_systolic,dbp:o.bp_diastolic,fhr:o.fhr_baseline,mld:mldN,tmp:o.temperature,hrs:hrs,cvx:o.cervix_cm};
+        const cf=clinicalFlags(cfIn);
+        // The guideline's own alert column also escalates: an LCG alert is never quietly green.
+        const lcgSevere = draft.alerts && /CERVIX_LAG|SECOND_STAGE_LAG|FHR|DECEL_LATE|MOULDING|FLUID|SBP|DBP|TEMP|PULSE/.test(draft.alerts);
+        let finalBand=escalate(r.band, cf.band);
+        if(lcgSevere) finalBand=escalate(finalBand,'amber');
+        aiBox.style.display='block';
+        $('#prob').textContent=Math.round(r.probability*100)+'%'; $('#prob').className=finalBand;
+        const bd=$('#band'); bd.textContent=finalBand.toUpperCase()+(finalBand!==r.band?' (clinical override)':''); bd.className='pill '+finalBand;
+        $('#drv').textContent=(cf.reasons.length?('red flags: '+cf.reasons.join(', ')):'model band '+r.band);
+        const drv=riskDrivers(cfIn,feat);
+        const lcgReasons=fired.map(a=>a.label+(a.value?(' '+a.value):''));
+        const allWhy=lcgReasons.concat(drv.filter(d=>!lcgReasons.some(l=>l.indexOf(d.split(' ')[0])>=0)));
+        $('#why').innerHTML=allWhy.length?('<b>What is driving it:</b> '+allWhy.map(esc).join(' · ')):'No abnormal intrapartum findings recorded.';
+        $('#cover').textContent='Scored on '+observed.length+' of 11 recorded inputs.'+(observed.length<8?' The fewer that are recorded, the less this score is worth.':'');
+        try{
+          const sc=await api('POST','risk_scores',{episode_id:+id,lcg_obs_id:(res&&res.id)||null,model_version:MODEL&&MODEL.version,
+            probability:r.probability.toFixed(4),band:finalBand,
+            features_json:Object.assign({ml_band:r.band,clinical:cf.reasons,lcg_alerts:draft.alerts},feat)});
+          lastScoreId[id]=sc&&sc.id; lastAI[id]={p:r.probability,band:finalBand};
+        }catch(e){ /* the assessment is saved; the score is advisory and must not claim otherwise */ }
+        if(NRM){
+          const nbf={ga:feat.ga,meconium:mecon,fhr:o.fhr_baseline,mld:mldN,cvx:o.cervix_cm,hrs:hrs,ctx:o.contractions_per10,
+            sbp:o.bp_systolic,temp:o.temperature,prior_cs:feat.prior_cs,age:feat.age,parity:feat.parity,rom_hours:feat.rom_hours};
+          Object.keys(nbf).forEach(k=>{ if(nbf[k]==null||Number.isNaN(nbf[k])) delete nbf[k]; });
+          const nb=NRM.predict(nbf); const nel=$('#nbrisk'); nel.style.display='block';
+          const nmsg=nb.band==='green'?'low — routine newborn care':(nb.band==='amber'?'elevated — have bag-mask ready, call for help':'high — prepare resuscitation now (bag-mask, skilled attendant)');
+          nel.innerHTML='<b>Newborn readiness</b> <span class="pill '+nb.band+'">'+Math.round(nb.probability*100)+'%</span> '+esc(nmsg);
+        }
+      }
+      toast(res.queued?'Assessment recorded — it will sync when you are back online':'Assessment recorded','ok');
+      setTimeout(()=>intrapartum(id), 900);
+    }catch(e){ sv.disabled=false; toast('Could not record the assessment — '+(e.message||'error')+'. Nothing was saved.'); }
+    finally{ if(!saved) sv.disabled=false; }
+  };
+
+  const ackb=$('#ack');
+  if(ackb) ackb.onclick=async()=>{ if(lastScoreId[id]){ try{ await api('PATCH','risk_scores/'+lastScoreId[id]); $('#hitl').textContent='acknowledged'; }catch(e){ $('#hitl').textContent='acknowledged (queued)'; } } else $('#hitl').textContent='record an assessment first'; };
+  const ovrb=$('#ovr');
+  if(ovrb) ovrb.onclick=async()=>{ const la=lastAI[id]||{p:0,band:'green'};
+    const why=prompt('Why do you disagree with this score? It is recorded with your name.');
+    if(!why) return;
+    await api('POST','risk_scores',{episode_id:+id,model_version:'override',probability:la.p.toFixed(4),band:la.band,override_reason:why,provider_ack:1});
+    $('#hitl').textContent='override recorded'; };
+}
+
 function renderMonSched(id,obs){ const el=$('#monsched'); if(!el) return;
   const last=(obs&&obs.length)?obs[obs.length-1]:null;
   // parseLocal, not new Date(): the stored value is CLINIC wall-clock. Parsing it against the
@@ -2244,7 +2587,7 @@ async function overviewSection(){
 
     <h4 style="margin-top:14px">Process of care</h4>
     <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
-      ${ovStat(pct(pr.partograph_used||0,c.deliveries||0),'Partograph used',(pr.partograph_used||0)+' of '+(c.deliveries||0))}
+      ${ovStat(pct(pr.partograph_used||0,c.deliveries||0),'Labour monitored (LCG)',(pr.partograph_used||0)+' of '+(c.deliveries||0))}
       ${ovStat(pct(pr.amtsl||0,c.deliveries||0),'AMTSL',(pr.amtsl||0)+' of '+(c.deliveries||0))}
       ${ovStat(pct(pr.checklist||0,c.labour||0),'Safe-birth checklist',(pr.checklist||0)+' of '+(c.labour||0))}
       ${ovStat(pr.referred||0,'Referred')}
@@ -2363,7 +2706,7 @@ async function dashboard(){
     <p class="muted">Care quality this month, with denominators. Flags mark a real change against an established baseline &mdash; not the initial roll-up when the system was new. Export: <a class="nav" href="${API_BASE}api/dhis2">DHIS2</a></p></div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">
       ${kpi('Deliveries', cur('deliveries')+delta('deliveries'), mo[last]||'')}
-      ${kpi('Partograph rate', pct(rlast(pgRate)), 'of labours')}
+      ${kpi('Labour monitoring rate', pct(rlast(pgRate)), 'of labours')}
       ${kpi('Checklist rate', pct(rlast(ckRate)), 'of deliveries')}
       ${kpi('AMTSL rate', pct(rlast(amRate)), 'uterotonic &lt;1 min')}
       ${kpi('PNC coverage', pct(rlast(pncRate)), 'of deliveries')}
@@ -2373,7 +2716,7 @@ async function dashboard(){
     </div>
     ${ovHtml}
     <div class="card"><h3>Trends over time</h3><p class="muted">Monthly rates against their denominators. A flag marks a real change against an established baseline &mdash; not the initial roll-up when the system was new.</p></div>
-    ${block(pgRate,'Partograph completion rate (%)','down')}
+    ${block(pgRate,'Labour monitoring rate (%)','down')}
     ${block(ckRate,'Safe-birth checklist rate (%)','down')}
     ${block(g('deliveries'),'Deliveries (count)','neutral')}
     ${block(sbRate,'Fresh stillbirths per 1,000 births','up')}
@@ -2417,7 +2760,9 @@ function drawVitals(id){
   $('#pgv').innerHTML=s;
 }
 
-const CHK={admission:['Referral needed?','Partograph started (≥4cm)?','Start antibiotics?','Start magnesium sulfate?','Start antihypertensive?','Supplies for clean hands/gloves?','Birth companion present?','Confirm call-for-help plan?'],
+// The stored item_code is positional ('admission_1'), so the ORDER of this array is a data contract —
+// the text may change, the position may not. Item 2 is now the Labour Care Guide, started at 5 cm.
+const CHK={admission:['Referral needed?','Labour Care Guide started (≥5 cm)?','Start antibiotics?','Start magnesium sulfate?','Start antihypertensive?','Supplies for clean hands/gloves?','Birth companion present?','Confirm call-for-help plan?'],
  before_birth:['Confirm ready supplies?','Assistant identified?','Uterotonic ready?','Baby resuscitation area ready?'],
  after_birth:['Uterotonic given <1min?','Bleeding controlled?','Baby breathing/warm/skin-to-skin?','Early breastfeeding started?'],
  before_discharge:['Bleeding controlled?','Danger signs counselled?','Follow-up scheduled?','Family planning discussed?']};
@@ -2542,11 +2887,19 @@ const DEL_TICKS={ epis:'episiotomy', cpe:'comp_preeclampsia', cec:'comp_eclampsi
 
 async function delivery(id){
   window._pphAck=false;                    // acknowledgement is per-open, never inherited from a prior patient
-  // MoH item 7 (Partograph used) is derived, not asked: Y only if maternal condition,
-  // fetal condition AND progress of labour were all monitored.
-  const obs=await api('GET','observations?episode='+id).catch(()=>[]);
-  const pUsed=(obs||[]).some(o=>o.fetal_heart_rate) && (obs||[]).some(o=>o.cervix_cm!=null) &&
-              (obs||[]).some(o=>o.bp_systolic||o.pulse||o.temperature) ? 'Y' : 'N';
+  // MoH item 7 is derived, not asked: Y only if the maternal condition, the fetal condition AND the
+  // progress of labour were all monitored. It now reads the Labour Care Guide — and still reads the
+  // legacy partograph, because a woman monitored before the guideline changed was monitored, and her
+  // register line must say so. The MoH register still calls this column "partograph used"; the tool
+  // calls it what it is.
+  const [lcgObs, obs] = await Promise.all([
+    api('GET','lcg?episode='+id).catch(()=>[]),
+    api('GET','observations?episode='+id).catch(()=>[])
+  ]);
+  const monitored=(rows,fhr,cvx,vit)=> (rows||[]).some(o=>o[fhr]) && (rows||[]).some(o=>o[cvx]!=null&&o[cvx]!=='') &&
+                                       (rows||[]).some(o=>vit.some(v=>o[v]));
+  const pUsed = ( monitored(lcgObs,'fhr_baseline','cervix_cm',['bp_systolic','pulse','temperature'])
+               || monitored(obs,'fetal_heart_rate','cervix_cm',['bp_systolic','pulse','temperature']) ) ? 'Y' : 'N';
   const [W,already,prevDel]=await Promise.all([
     epOne(id),
     api('GET','babies?episode='+id).catch(()=>[]),
@@ -2615,7 +2968,7 @@ async function delivery(id){
    </div></details>
 
    <label>Remark<input id="drmk"></label>
-   <div class="muted" style="font-size:12px;margin-top:8px">Partograph used (MoH item 7): <b>${pUsed==='Y'?'Yes':'No'}</b> &mdash; derived from the partograph record (maternal + fetal + progress all monitored).</div>
+   <div class="muted" style="font-size:12px;margin-top:8px">Intrapartum care (LCG) / partograph used &mdash; MoH item 7: <b>${pUsed==='Y'?'Yes':'No'}</b>. Derived from the labour record: the mother, the baby and the progress of labour were all monitored.</div>
    <div style="background:#eef6f5;border:1px solid #dbe7e4;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px">
      This screen records the <b>mother</b>. The <b>newborn</b> is recorded on the next screen &mdash; one row per baby, so twins are handled properly and every newborn gets the full assessment (APGAR checks, Vitamin K timing, HIV exposure, KMC, phototherapy, NICU).
      ${already.length?`<div style="margin-top:4px;color:#0f766e"><b>${already.length} newborn record(s) already exist</b> for this delivery.</div>`:''}
@@ -5414,7 +5767,7 @@ const F = {
   // delivery
   delivery_datetime:['Date and time of birth','t'], mode:['Mode of birth','t'], mode_other_text:['Mode (other)','t'],
   maternal_status:['Mother at discharge','t!'], maternal_outcome:['Maternal outcome','t!'], maternal_death_cause:['Cause of maternal death','c!'],
-  blood_loss_ml:['Blood loss (ml)','t!'], episiotomy:['Episiotomy','y'], partograph_used:['Partograph used','t'],
+  blood_loss_ml:['Blood loss (ml)','t!'], episiotomy:['Episiotomy','y'], partograph_used:['Intrapartum care (LCG) / partograph used','t'],
   amtsl_uterotonic:['AMTSL: uterotonic','t'], amtsl_uterotonic_type:['AMTSL: uterotonic type','t'], amtsl_cct:['AMTSL: cord traction','t'],
   amtsl_uterine_tone:['AMTSL: uterine tone','t!'], amtsl_massage:['AMTSL: uterine massage','t'], amtsl_placenta:['Placenta','t!'],
   comp_preeclampsia:['Pre-eclampsia','y!'], comp_eclampsia:['Eclampsia','y!'], comp_aph:['Antepartum haemorrhage','y!'],
@@ -5612,7 +5965,7 @@ async function reportScreen(id){
   }
   const W=C.woman, anc=C.anc_visits||[], pnc=C.pnc_visits||[], bbs=C.babies||[], dels=C.deliveries||[],
         refs=C.referrals||[], dgs=C.danger_signs||[], vits=C.vitals||[], labs=C.labs||[],
-        scr=C.anc_screening||[], obs=C.observations||[], eps=C.episodes||[];
+        scr=C.anc_screening||[], obs=C.observations||[], lcg=C.lcg||[], eps=C.episodes||[];
   const name=((W.first_name||'')+' '+(W.father_name||'')+' '+(W.grandfather_name||'')).trim();
   const gaps=gapsFor(W,anc,labs);
   const yesScr=scr.filter(s=>s.response==='yes');
@@ -5717,7 +6070,15 @@ async function reportScreen(id){
    ${ancBlocks?`<div class="rec-b"><h5>Antenatal contacts</h5>${ancBlocks}</div>`:''}
    ${labs.length?`<div class="rec-b"><h5>Laboratory</h5><table class="rec-t"><tr><th>Test</th><th>Requested</th><th>Result</th><th>Result date</th><th>Note</th></tr>
       ${labs.map(l=>`<tr><td>${esc(l.test_code||'')}</td><td>${esc(String(l.requested_date||'').slice(0,10))}</td><td>${esc(l.result||'— pending —')}</td><td>${esc(String(l.result_date||'').slice(0,10))}</td><td>${esc(l.note||'')}</td></tr>`).join('')}</table></div>`:''}
-   ${obs.length?`<div class="rec-b"><h5>Labour</h5><p class="muted" style="font-size:13px">${obs.length} partograph observation(s). Last: cervix ${esc(obs[obs.length-1].cervix_cm||'—')} cm, fetal heart ${esc(obs[obs.length-1].fetal_heart_rate||'—')}.</p></div>`:''}
+   ${lcg.length?`<div class="rec-b"><h5>Labour — Labour Care Guide</h5>
+      <table class="rec-t"><tr><th>Time</th><th>Hours</th><th>Cervix</th><th>FHR</th><th>Ctx / dur</th><th>BP</th><th>Temp</th><th>Alerts</th><th>Plan</th></tr>
+      ${lcg.map(o=>`<tr><td>${esc(String(o.obs_datetime||'').slice(0,16))}</td><td>${esc(o.hours_since_active??'')}</td>
+        <td>${esc(o.cervix_cm??'')}</td><td>${esc(o.fhr_baseline??'')}</td>
+        <td>${esc((o.contractions_per10??'')+(o.contraction_dur_sec?(' / '+o.contraction_dur_sec+'s'):''))}</td>
+        <td>${esc((o.bp_systolic||'')+'/'+(o.bp_diastolic||''))}</td><td>${esc(o.temperature??'')}</td>
+        <td class="${o.alerts?'rec-alarm':''}">${esc(o.alerts||'—')}</td><td>${esc(o.plan||'')}</td></tr>`).join('')}
+      </table></div>`:''}
+   ${obs.length?`<div class="rec-b"><h5>Labour — partograph <span class="muted" style="font-weight:400">(recorded before the Labour Care Guide replaced it)</span></h5><p class="muted" style="font-size:13px">${obs.length} observation(s). Last: cervix ${esc(obs[obs.length-1].cervix_cm||'—')} cm, fetal heart ${esc(obs[obs.length-1].fetal_heart_rate||'—')}.</p></div>`:''}
    ${delBlocks?`<div class="rec-b"><h5>Birth</h5>${delBlocks}</div>`:''}
    ${babyBlocks?`<div class="rec-b"><h5>Newborn(s)</h5>${babyBlocks}</div>`:''}
    ${pncBlocks?`<div class="rec-b"><h5>Postnatal care</h5>${pncBlocks}</div>`:''}
@@ -6116,9 +6477,9 @@ async function patientHub(id){
   else if(cat==='abortion') tiles=[tile('#abortion/'+id,'Pregnancy loss / abortion care'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),deathTile];
   else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),lossTile,deathTile];
   else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
-    if(isLab&&delivered){ const lab=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
+    if(isLab&&delivered){ const lab=[tile('#intrapartum/'+id,'Intrapartum care'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
       fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
+  else tiles=[tile('#intrapartum/'+id,'Intrapartum care'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
   tiles=tiles.filter(Boolean);
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
@@ -6324,9 +6685,9 @@ async function supervisorDash(){
   const totPct=tot.lab?Math.round(100*tot.ps/tot.lab):0;
   const card=(v,l)=>`<div class="hubx" style="cursor:default"><b style="font-size:20px">${v}</b><br>${l}</div>`;
   app().innerHTML=nav()+`<div class="card"><h3>Supervisor dashboard <span class="pill">${esc(d.scope||'facility')} scope</span></h3>
-   <p class="muted">Period: <select id="supp" style="width:auto;display:inline-block"><option value="0"${days===0?' selected':''}>All time</option><option value="30"${days===30?' selected':''}>Last 30 days</option><option value="90"${days===90?' selected':''}>Last 90 days</option></select> &middot; ${fac.length} facilit${fac.length===1?'y':'ies'} in your ${esc(d.scope||'facility')}. "Partograph started" = share of labour episodes with ≥1 observation recorded.</p>
-   <div class="hubgrid" style="margin-bottom:10px">${card(tot.lab,'Labour episodes')}${card(totPct+'%','Partograph started')}${card(tot.del,'Deliveries')}${card(tot.red,'Red AI alerts')}${card(tot.ref,'Referrals')}</div>
-   <table><tr><th>Facility</th><th>Woreda</th><th>Labour</th><th>Partograph started</th><th>Deliveries</th><th>Red alerts</th><th>Referrals</th></tr>${rows}</table></div>`;
+   <p class="muted">Period: <select id="supp" style="width:auto;display:inline-block"><option value="0"${days===0?' selected':''}>All time</option><option value="30"${days===30?' selected':''}>Last 30 days</option><option value="90"${days===90?' selected':''}>Last 90 days</option></select> &middot; ${fac.length} facilit${fac.length===1?'y':'ies'} in your ${esc(d.scope||'facility')}. "Labour monitored" = share of labour episodes with at least one assessment recorded — on the Labour Care Guide, or on the partograph before it replaced it.</p>
+   <div class="hubgrid" style="margin-bottom:10px">${card(tot.lab,'Labour episodes')}${card(totPct+'%','Labour monitored')}${card(tot.del,'Deliveries')}${card(tot.red,'Red AI alerts')}${card(tot.ref,'Referrals')}</div>
+   <table><tr><th>Facility</th><th>Woreda</th><th>Labour</th><th>Labour monitored</th><th>Deliveries</th><th>Red alerts</th><th>Referrals</th></tr>${rows}</table></div>`;
   const ps=$('#supp'); if(ps) ps.onchange=()=>{ window._supDays=+ps.value; supervisorDash(); };
 }
 

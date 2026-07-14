@@ -189,10 +189,15 @@ function ranges(){
     'resp_rate'=>[6,60,'Respiratory rate'],      'spo2'=>[50,100,'SpO2 (%)'],
     'fundal_height_cm'=>[10,45,'Fundal height (cm)'], 'fetal_heart_rate'=>[0,220,'Fetal heart rate'],
     'hgb'=>[3,20,'Haemoglobin'],                 'muac'=>[10,45,'MUAC (cm)'],
-    // partograph_obs
+    // labour monitoring (Labour Care Guide, and the legacy partograph rows)
     'cervix_cm'=>[0,10,'Cervical dilatation'],   'contractions_per10'=>[0,10,'Contractions / 10 min'],
     'hours_since_active'=>[0,48,'Hours in active labour'],
     'oxytocin_units'=>[0,100,'Oxytocin (units)'], 'oxytocin_drops'=>[0,120,'Oxytocin (drops/min)'],
+    // LCG additions. `fhr_baseline` is the LCG's name for what the partograph called fetal_heart_rate;
+    // both are bounded, because the model reads whichever one exists.
+    'fhr_baseline'=>[0,220,'Fetal heart rate'],
+    'contraction_dur_sec'=>[0,180,'Duration of contractions (seconds)'],
+    'descent_fifths'=>[0,5,'Descent (fifths palpable)'],
     'apgar_1min'=>[0,10,'APGAR (1 min)'],
     'apgar_5min'=>[0,10,'APGAR (5 min)'],        'weight_g'=>[300,6000,'Birth weight (g)'],
     'blood_loss_ml'=>[0,5000,'Blood loss (ml)'], 'td_dose_no'=>[1,5,'TD dose'],
