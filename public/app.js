@@ -6117,9 +6117,9 @@ async function reportScreen(id){
    ${babyBlocks?`<div class="rec-b"><h5>Newborn(s)</h5>${babyBlocks}</div>`:''}
    ${pncBlocks?`<div class="rec-b"><h5>Postnatal care</h5>${pncBlocks}</div>`:''}
    <!-- THE REFLEXES WERE THE ONE DANGER SIGN NOBODY EVER SAW.
-        dtr_grade was recorded, handed to the risk model as `clonus`, and rendered on no screen at all.
-        Brisk reflexes and clonus are the premonitory sign of eclampsia — the provider who found +3
-        wrote it down, and the next provider, the receiving hospital and the death review never saw it. -->
+        dtr_grade was recorded, handed to the risk model as a clonus feature, and rendered on no screen
+        at all. Brisk reflexes and clonus are the premonitory sign of eclampsia: the provider who found
+        +3 wrote it down, and the next provider, the receiving hospital and the death review never saw it. -->
    ${dgs.length?`<div class="rec-b"><h5>Danger signs recorded</h5><div class="rec-g">${dgs.map(d=>{
        const brisk=/3|4|clonus/i.test(String(d.dtr_grade||''));
        const w=[d.headache==1?'headache':'',d.blurred_vision==1?'blurred vision':'',d.epigastric_pain==1?'epigastric pain':'',
