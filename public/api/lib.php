@@ -183,13 +183,25 @@ function check_ranges(array $row, array $skip=[]){
     if($v===null || $v==='' ) continue;                       // "not measured" is a valid answer
     if(!is_numeric($v)) err("$label must be a number.");
     $n=$v+0;
-    if($n<$min || $n>$max) err("$label must be between $min and $max. You entered ".rtrim(rtrim((string)$n,'0'),'.').".");
+    // Echo the number back EXACTLY as it was typed. (A naive rtrim of trailing zeros turns 1700000
+    // into "17" — which makes the one message the clinician needs to understand a nonsense.)
+    if($n<$min || $n>$max){
+      $shown = (floor($n)==$n && abs($n)<1e15) ? (string)(int)$n : rtrim(rtrim(number_format($n,2,'.',''),'0'),'.');
+      err("$label must be between $min and $max. You entered $shown.");
+    }
   }
   // A diastolic at or above the systolic is a transposition or a typo, never a reading.
   if(isset($row['bp_systolic'],$row['bp_diastolic']) && is_numeric($row['bp_systolic']) && is_numeric($row['bp_diastolic'])
      && $row['bp_systolic']!=='' && $row['bp_diastolic']!=='' && ($row['bp_diastolic']+0) >= ($row['bp_systolic']+0)){
     err('Diastolic BP must be lower than systolic BP.');
   }
+}
+// An empty string is not a measurement — it is "not measured", which is NULL. MySQL in strict mode
+// rejects '' for a numeric column, so a provider clearing a field she filled in by mistake got an
+// opaque "one of the values is not valid" instead of a cleared field.
+function blank_to_null(array $row){
+  foreach(ranges() as $col=>$x){ if(array_key_exists($col,$row) && $row[$col]==='') $row[$col]=null; }
+  return $row;
 }
 function insert($table,$data){
   $cols=array_keys($data); $ph=implode(',',array_fill(0,count($cols),'?'));
