@@ -863,6 +863,7 @@ function route(){
     referral:referralScreen,ancvisit:ancVisits,pncvisit:pncVisits,baby:babiesScreen,handover:handoverScreen,vitals:vitalsScreen,report:reportScreen,editwoman:editWoman,patient:patientHub,facilityedit:facilityEdit,bemonc:bemoncScreen,supervisor:supervisorDash,reminders:remindersScreen,registers:registersScreen,pregtest:pregTest,
     fp:fpScreen,fpclient:fpClient,imm:immScreen,immclient:immClient,pmtct:pmtctScreen,pmtctclient:pmtctClient,
     find:findWoman,failed:failedScreen,voided:voidedScreen,
+    letter:letterScreen, export:exportScreen,
     account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
@@ -999,6 +1000,7 @@ async function home(){
       (isAdmin?tileHtml('#users','&#128101;','Users','','plain'):'')+
       (isAdmin?tileHtml('#reminders','&#128276;','Reminders','','plain'):'')+
       (isAdmin?tileHtml('#voided','&#128465;&#65039;','Removed records','Review · restore','plain'):'')+
+      ((isAdmin||ME.role==='provider'||ME.role==='supervisor')?tileHtml('#export','&#128190;','Export','The facility&rsquo;s data as a spreadsheet','plain'):'')+
       tileHtml('#account','&#9881;&#65039;','My account','Profile · password','plain')
     )}
   </div>`;
@@ -2739,6 +2741,42 @@ const LAB_TESTS=[['HGB','Haemoglobin / haematocrit'],['BLOOD_GROUP_RH','Blood gr
  ['URINE_GRAM','Urine microscopy / gram stain'],['HIV','HIV test'],['SYPHILIS','Syphilis (RPR/VDRL)'],['HBV','Hepatitis B (HBsAg)'],
  ['OGTT','OGTT (75g, 2-hour)'],['USS','Obstetric ultrasound'],['OTHER','Other']];
 
+// ---- THE FIRST-CONTACT LABORATORY PANEL ---------------------------------------------------------
+// A clinician in the field asked for this: the tests that are MANDATORY at the first ANC contact
+// were nowhere in the tool, so whether they had been done was a matter of memory. These six decide
+// what happens for the rest of the pregnancy — a reactive syphilis to be treated, an HIV result that
+// opens PMTCT, a Rh-negative blood group that needs anti-D at 28 weeks, an anaemia to treat before
+// she reaches labour. Missing one is not a paperwork failure; it is the failure the guideline exists
+// to prevent.
+//
+// It PROMPTS, it does not BLOCK. The lab is sometimes shut, the reagent is sometimes out, and a
+// provider who cannot save a contact because a test she cannot do is missing will simply stop using
+// the tool. So: show what is outstanding, offer to send it to the lab in one tap, and let her save.
+const FIRST_LABS=[
+  ['BLOOD_GROUP_RH','Blood group and Rh'],
+  ['HGB','Haemoglobin'],
+  ['HIV','HIV test'],
+  ['SYPHILIS','Syphilis (RPR/VDRL)'],
+  ['HBV','Hepatitis B (HBsAg)'],
+  ['URINE_DIP','Urine dipstick (protein)'],
+];
+// done = a result exists · sent = a request is with the lab · missing = neither
+function firstLabState(W, anc, labs){
+  const c1=(anc||[]).find(v=>String(v.contact_no)==='1')||null;
+  const has=v=>v!==null&&v!==undefined&&v!=='';
+  const done={
+    BLOOD_GROUP_RH: has(W.blood_group)||has(W.rh_factor),
+    HGB:            !!(c1&&has(c1.hgb)),
+    HIV:            !!(c1&&has(c1.hiv_test_result)) || String(W.hiv_known_positive||'')==='1',
+    SYPHILIS:       !!(c1&&has(c1.syphilis_result)),
+    HBV:            !!(c1&&has(c1.hepb_result)),
+    URINE_DIP:      !!(c1&&has(c1.urine_protein)),
+  };
+  const sent=code=>(labs||[]).some(l=>l.test_code===code);
+  return FIRST_LABS.map(([code,label])=>({code,label,
+    state: done[code] ? 'done' : (sent(code) ? 'sent' : 'missing')}));
+}
+
 // The HIV result on a past contact. If it is recorded, show it. If it is not — because the sample
 // went to the lab and the result was not back on the day — offer the control that records it.
 //
@@ -2868,6 +2906,8 @@ async function ancVisits(id){
     ${tick('c1','Danger signs')}${tick('c2','Maternal nutrition')}${tick('cl','Lifestyle modification')}${tick('cb','Birth preparedness &amp; complication readiness')}${tick('c3','Early childhood development')}${tick('c4','Breast / infant feeding')}${tick('c5','Family planning')}
    </div></details>
 
+   <div id="firstlabs"></div>
+
    <details class="moh"><summary>Laboratory — requests &amp; results</summary>
     <div class="muted" style="font-size:12px;margin-bottom:6px">Request a test now; enter the result here or at a later contact.</div>
     <div class="grid">
@@ -2894,6 +2934,49 @@ async function ancVisits(id){
    </table>
    <p class="muted" style="font-size:12px">A test sent to the lab has no result on the day. Record it here when it comes back &mdash; it updates <b>this</b> contact, and a positive result puts her on the high-risk worklist and into PMTCT.<br>
    Use <b>Correct</b> to fix a value that was written down wrong. It updates the contact &mdash; it does not create a second one.</p></div>`;
+
+  // ---- THE MANDATORY FIRST-CONTACT LABORATORY PANEL ----------------------------------------
+  // Rendered from what is STORED (her blood group, contact 1, the lab requests), and refreshed when
+  // the provider fills a result in on this screen, so it always reflects the truth in front of her.
+  const paintFirstLabs=()=>{
+    const box=$('#firstlabs'); if(!box) return;
+    // fold the values being typed right now into the picture — she should not be told a test is
+    // missing while she is looking at the result she has just entered.
+    const liveC1 = (+((cno||{}).value)===1) ? {
+      contact_no:'1', hgb:(hb||{}).value, hiv_test_result:(htr||{}).value,
+      syphilis_result:(syr||{}).value, hepb_result:(hbr||{}).value, urine_protein:(up||{}).value
+    } : null;
+    const rows=(past||[]).slice();
+    if(liveC1){ const i=rows.findIndex(v=>String(v.contact_no)==='1'); if(i>=0) rows[i]={...rows[i],...liveC1}; else rows.push(liveC1); }
+    const st=firstLabState(e||{}, rows, labs||[]);   // `e` is the episode row, which carries her woman-level fields
+    const missing=st.filter(s=>s.state==='missing');
+    const isFirst = (+((cno||{}).value)===1) || !(past||[]).some(v=>String(v.contact_no)==='1');
+    if(!isFirst && !missing.length){ box.innerHTML=''; return; }   // nothing to say at a later contact once they are done
+    const pill=s=> s.state==='done' ? '<span class="pill green">Result recorded</span>'
+                 : s.state==='sent' ? '<span class="pill amber">Sent to the lab</span>'
+                 : '<span class="pill red">Not done</span>';
+    box.innerHTML=`<div class="card" style="margin:10px 0;padding:12px 14px;${missing.length?'border-left:4px solid #a32d2d':''}">
+      <h4 style="margin:0 0 4px;font-size:14px">First-contact laboratory panel</h4>
+      <p class="muted" style="font-size:12px;margin:0 0 8px">The National ANC Guideline requires these at the first contact. They decide the rest of her pregnancy &mdash; a reactive syphilis to treat, an HIV result that opens PMTCT, a Rh-negative blood group that needs anti-D at 28 weeks, an anaemia to correct before she reaches labour.</p>
+      <div class="rec-g">${st.map(s=>`<div class="rec-f"><span class="rec-l">${esc(s.label)}</span><span>${pill(s)}</span></div>`).join('')}</div>
+      ${missing.length?`<div style="margin-top:8px">
+        <button class="sec" id="labsendall" type="button">Send the ${missing.length} outstanding test${missing.length===1?'':'s'} to the lab</button>
+        <span class="muted" style="font-size:12px;margin-left:6px">Records the request now; enter the result here when it comes back.</span>
+      </div>`:''}
+    </div>`;
+    const sb=$('#labsendall');
+    if(sb) sb.onclick=async()=>{
+      sb.disabled=true;
+      const today=new Date().toISOString().slice(0,10);
+      for(const m of missing){
+        await api('POST','labs',{episode_id:+id,test_code:m.code,requested:1,requested_date:today}).catch(()=>{});
+      }
+      toast('Requested: '+missing.map(m=>m.label).join(', '),'ok');
+      setTimeout(()=>ancVisits(id),600);
+    };
+  };
+  ['hb','htr','syr','hbr','up','cno'].forEach(k=>{ const el=$('#'+k); if(el){ el.addEventListener('change',paintFirstLabs); el.addEventListener('input',paintFirstLabs); } });
+  paintFirstLabs();
 
   // ---- CORRECT A PAST CONTACT --------------------------------------------------------------
   // Until now a wrong BP, weight, GA, Td dose or counselling tick recorded at contact 2 could not be
@@ -3020,6 +3103,22 @@ async function ancVisits(id){
       modal('Contact incomplete','These required fields are missing: '+miss.map(m=>m[1]).join(', ')+'.\n\nThe National ANC Guideline requires blood pressure, weight and MUAC to be measured at every contact.','risk');
       return; }
     $('#ancreqbox').style.display='none';
+
+    // THE FIRST-CONTACT LABS. She is told once, and then she may save. The lab is sometimes shut and
+    // the reagent is sometimes out — a provider who cannot record the contact because of a test she
+    // cannot do today will go back to paper, and then the tool has cost the woman her record.
+    if(+cno.value===1 && !window._ancLabAck){
+      const st=firstLabState(e||{}, [{contact_no:'1',hgb:hb.value,hiv_test_result:htr.value,syphilis_result:syr.value,hepb_result:hbr.value,urine_protein:up.value}], labs||[]);
+      const missLab=st.filter(s=>s.state==='missing');
+      if(missLab.length){
+        window._ancLabAck=true;
+        modal('First-contact tests outstanding',
+          'These are required at the first contact and are not recorded: <b>'+missLab.map(m=>esc(m.label)).join(', ')+'</b>.<br><br>'+
+          'If the lab can do them, send them now — the button on the panel records the request in one tap. If it cannot, save the contact and record the results when they come back.<br><br>'+
+          '<i>Press Save again to record the contact.</i>','risk');
+        return;
+      }
+    }
     // RANGE CHECK BEFORE THE CLINICAL ALERTS. A mistyped number must not be allowed to raise a red
     // flag — a BP of 1480/96 is a slip, not severe hypertension, and alerting on it teaches the
     // provider to dismiss alerts.
@@ -4884,8 +4983,19 @@ const recBlock = (title, body, note) => body.trim()
 // WHAT IS MISSING, AND STILL MATTERS. Some omissions are only visible as omissions: a Rh-negative
 // woman with no anti-D at 28 weeks, a woman past 24 weeks with no dating scan, a reactive syphilis
 // never treated. These are the ones worth putting in front of the provider — not a wall of blanks.
-function gapsFor(W, anc){
+function gapsFor(W, anc, labs){
   const g=[]; const last=(col)=>{ for(let i=anc.length-1;i>=0;i--){ const v=anc[i][col]; if(v!==null&&v!==undefined&&v!=='') return v; } return null; };
+  // The mandatory first-contact panel. An outstanding test follows her to every screen until it is
+  // done — that is the whole point: at contact 1 it is a prompt, by contact 4 it is a failure.
+  if((anc||[]).length && typeof firstLabState==='function'){
+    const st=firstLabState(W, anc, labs||[]);
+    const notDone=st.filter(s=>s.state!=='done');
+    if(notDone.length) g.push([
+      'First-contact tests not resulted: '+notDone.map(s=>s.label).join(', '),
+      notDone.every(s=>s.state==='sent')
+        ? 'The requests are with the laboratory. Record the results here as soon as they come back — until then they cannot change her care.'
+        : 'These are required at the first contact. Each one changes what happens next: treatment for syphilis, PMTCT for HIV, anti-D for a Rh-negative woman, iron for anaemia.']);
+  }
   const any=(col,val)=>anc.some(v=>String(v[col]||'').toLowerCase()===val);
   const ga=+(last('ga_weeks')||0);
   const rhNeg=String(W.rh_factor||'').toLowerCase()==='neg';
@@ -4935,7 +5045,7 @@ async function reportScreen(id){
         refs=C.referrals||[], dgs=C.danger_signs||[], vits=C.vitals||[], labs=C.labs||[],
         scr=C.anc_screening||[], obs=C.observations||[], eps=C.episodes||[];
   const name=((W.first_name||'')+' '+(W.father_name||'')+' '+(W.grandfather_name||'')).trim();
-  const gaps=gapsFor(W,anc);
+  const gaps=gapsFor(W,anc,labs);
   const yesScr=scr.filter(s=>s.response==='yes');
 
   // A single fundal height says nothing. The SERIES is the only growth screen a health centre has
@@ -5021,6 +5131,113 @@ async function reportScreen(id){
      <button class="sec" onclick="window.print()">Print / save as PDF</button>
      <span class="muted" style="font-size:12px;margin-left:8px">Gives her a copy of her own record to carry &mdash; and the receiving facility a copy when she is referred.</span>
    </div>
+  </div>`;
+}
+
+// ---- EXPORT: the facility's data, in its own hands ----------------------------------------------
+// The record belongs to the facility, not to this application. If the tool goes away, or the woreda
+// wants the figures in a spreadsheet, there has to be a way out. CSV, because Excel is what the
+// facility and the woreda office actually use.
+async function exportScreen(){
+  if(!(ME.role==='provider'||ME.role==='supervisor'||ADMIN())){ app().innerHTML=nav()+'<div class="card">Providers, supervisors and admins only.</div>'; return; }
+  const today=new Date().toISOString().slice(0,10);
+  const first=today.slice(0,8)+'01';
+  const T=[['women','Patients registered'],['anc','ANC contacts'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals']];
+  app().innerHTML=nav()+`<div class="card">
+    <h3>Export the facility&rsquo;s records</h3>
+    <p class="muted">A spreadsheet of what this facility recorded, for the dates you choose. It opens in Excel.</p>
+    <div class="grid">
+      <label>From<input id="xf" type="date" value="${first}"></label>
+      <label>To<input id="xt" type="date" value="${today}"></label>
+    </div>
+    <div style="margin-top:10px">${T.map(t=>`<button class="sec" data-x="${t[0]}" style="margin:3px 6px 3px 0">${t[1]}</button>`).join('')}</div>
+    <div id="xm" class="muted" style="margin-top:8px;font-size:13px"></div>
+    <p class="muted" style="font-size:12px;margin-top:12px">These files contain names, MRNs and clinical results, including HIV status. Treat them as you would the paper register: they do not go on an unlocked computer, and they are not sent over an unencrypted channel. Every export is recorded in the audit log with your name.</p>
+  </div>`;
+  document.querySelectorAll('[data-x]').forEach(b=>b.onclick=async()=>{
+    const from=$('#xf').value, to=$('#xt').value;
+    if(!from||!to){ $('#xm').textContent='Choose both dates.'; return; }
+    b.disabled=true; $('#xm').textContent='Preparing the file…';
+    try{
+      // NOT through api(): that helper parses JSON and would queue this offline. An export is a file,
+      // and it only makes sense with a live server.
+      const res=await fetch(API_BASE+'api/export?type='+b.dataset.x+'&from='+from+'&to='+to, {credentials:'include'});
+      if(!res.ok){ $('#xm').textContent='Could not export — '+(res.status===403?'you do not have permission.':'the server refused ('+res.status+').'); b.disabled=false; return; }
+      const blob=await res.blob();
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download=b.dataset.x+'_'+from+'_to_'+to+'.csv';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+      $('#xm').textContent='Downloaded. Check your downloads folder.';
+    }catch(e){ $('#xm').textContent='Could not export — '+(e.message||'error'); }
+    finally{ b.disabled=false; }
+  });
+}
+
+// ---- THE REFERRAL LETTER ------------------------------------------------------------------------
+// A woman referred from a health centre arrives at the hospital with whatever she can remember. The
+// facility that referred her holds her blood group, her haemoglobin, her HIV status, what she was
+// given and why she is being sent — and none of it travelled with her. This is the piece of paper
+// that does.
+async function letterScreen(id){
+  const C=await api('GET','chart?episode='+id).catch(()=>null);
+  if(!C||!C.woman){ app().innerHTML=nav()+'<div class="card"><h3>Record could not be loaded</h3></div>'; return; }
+  const W=C.woman, anc=C.anc_visits||[], refs=C.referrals||[], dels=C.deliveries||[], bbs=C.babies||[];
+  const ref=refs[refs.length-1]||null;
+  const last=(col)=>{ for(let i=anc.length-1;i>=0;i--){ const v=anc[i][col]; if(v!==null&&v!==undefined&&v!=='') return v; } return null; };
+  const name=((W.first_name||'')+' '+(W.father_name||'')+' '+(W.grandfather_name||'')).trim();
+  const ep=(C.episodes||[]).find(e=>String(e.id)===String(id))||{};
+  const line=(l,v)=>v?`<div class="rec-f"><span class="rec-l">${esc(l)}</span><span class="rec-v">${esc(v)}</span></div>`:'';
+  const gaps=gapsFor(W,anc,C.labs);
+  app().innerHTML=nav()+`<div class="card rec">
+    <div style="text-align:center;margin-bottom:10px">
+      <h3 style="margin-bottom:2px">Referral letter</h3>
+      <div class="muted">${esc(ME.facility_name||'')}${ME.facility_name?' &middot; ':''}${esc(new Date().toISOString().slice(0,10))}</div>
+    </div>
+    <div class="rec-b"><h5>The patient</h5><div class="rec-g">
+      ${line('Name',name)}${line('MRN',W.mrn)}${line('Age',W.age)}
+      ${line('Gravida / Para','G'+(W.gravida||'?')+' / P'+(W.para||'?'))}
+      ${line('Gestational age', ep.anc_ga_weeks?(ep.anc_ga_weeks+' weeks'):(last('ga_weeks')?last('ga_weeks')+' weeks':''))}
+      ${line('Blood group', (W.blood_group||'')+(W.rh_factor?(' '+W.rh_factor):''))}
+      ${line('Phone',W.phone)}
+    </div></div>
+    <div class="rec-b"><h5>Why she is being referred</h5>
+      ${ref?`<div class="rec-g">
+        ${line('Referred to',ref.referred_to)}${line('Urgency',ref.urgency)}${line('Transport',ref.transport)}
+        <div class="rec-f" style="grid-column:1/-1"><span class="rec-l">Reason</span><span class="rec-v${String(ref.urgency||'')==='emergency'?' rec-alarm':''}">${esc(ref.reason||'')}</span></div>
+      </div>`:'<p class="muted">No referral has been recorded for this episode. Record it on the Refer screen and this letter will carry the reason.</p>'}
+    </div>
+    <div class="rec-b"><h5>What we found</h5><div class="rec-g">
+      ${fld('hiv_test_result', last('hiv_test_result'))}
+      ${fld('syphilis_result', last('syphilis_result'))}
+      ${fld('hepb_result', last('hepb_result'))}
+      ${fld('hgb', last('hgb'))}${fld('anaemia_grade', last('anaemia_grade'))}
+      ${fld('bp_systolic', last('bp_systolic'))}${fld('bp_diastolic', last('bp_diastolic'))}
+      ${fld('urine_protein', last('urine_protein'))}
+      ${fld('fundal_height_cm', last('fundal_height_cm'))}${fld('fetal_heart_rate', last('fetal_heart_rate'))}
+      ${fld('presentation', last('presentation'))}
+      ${['prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal']
+        .filter(k=>String(W[k]||'').toLowerCase()==='yes')
+        .map(k=>`<div class="rec-f"><span class="rec-l">${esc({prior_cs:'Previous caesarean',prior_stillbirth:'Previous stillbirth',prior_pph:'Previous PPH',prior_preeclampsia:'Previous pre-eclampsia',prior_obstructed:'Previous obstructed labour',chronic_htn:'Chronic hypertension',diabetes:'Diabetes',cardiac_renal:'Cardiac / renal disease'}[k])}</span><span class="rec-v rec-alarm">Yes</span></div>`).join('')}
+      ${dels.length?fld('mode',dels[0].mode)+fld('blood_loss_ml',dels[0].blood_loss_ml):''}
+      ${bbs.map(b=>fld('weight_g',b.weight_g)+fld('apgar_5min',b.apgar_5min)+fld('outcome',b.outcome)).join('')}
+    </div></div>
+    <div class="rec-b"><h5>What we gave her</h5><div class="rec-g">
+      ${fld('td_dose_no', last('td_dose_no'))}${fld('ifa_tabs', last('ifa_tabs'))}
+      ${fld('calcium_given', last('calcium_given'))}${fld('deworming', last('deworming'))}
+      ${fld('anti_d_given', last('anti_d_given'))}${fld('syphilis_treated', last('syphilis_treated'))}
+    </div></div>
+    ${gaps.length?`<div class="rec-b"><h5>Still outstanding at the time of referral</h5>
+      <ul style="margin:4px 0 0 18px;font-size:13px">${gaps.map(g=>`<li>${esc(g[0])}</li>`).join('')}</ul></div>`:''}
+    <div class="rec-b"><h5>Referring provider</h5>
+      <p style="font-size:13px">${esc(ME.full_name||'')}${ME.cadre?(' &middot; '+esc(ME.cadre)):''} &middot; ${esc(ME.facility_name||'')}</p>
+      <p class="muted" style="font-size:12px;margin-top:24px">Signature: ______________________________</p>
+    </div>
+    <div style="margin-top:12px">
+      <button class="act" onclick="window.print()">Print the letter</button>
+      <a class="nav" href="#report/${esc(id)}" style="margin-left:8px">Her full record &rsaquo;</a>
+    </div>
   </div>`;
 }
 
@@ -5110,11 +5327,11 @@ async function patientHub(id){
   const scrTile = tile('#anc/'+id,'Risk screening');
   let tiles, fold='';
   if(ME.role==='observer') tiles=[tile('#report/'+id,'Full record')];   // read-only role: view the summary, no data-entry screens
-  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details')];
-  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Full record')];
+  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details')];
+  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record')];
     if(isLab&&delivered){ const lab=[tile('#partograph/'+id,'Partograph &amp; AI'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
       fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
-  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#report/'+id,'Full record')];
+  else tiles=[tile('#partograph/'+id,'Partograph &amp; AI'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record')];
   tiles=tiles.filter(Boolean);
   const _nm=((e.first_name||'')+' '+(e.father_name||'')).trim();
   const _ini=(_nm.split(/\s+/).map(s=>s[0]||'').join('').slice(0,2)||'—').toUpperCase();
@@ -5160,7 +5377,7 @@ async function patientHub(id){
       const C=await api('GET','chart?episode='+id).catch(()=>null);
       const box=$('#hubknown'); if(!C||!C.woman||!box) return;
       const anc=C.anc_visits||[], pnc=C.pnc_visits||[], bbs=C.babies||[], dels=C.deliveries||[];
-      const gaps=gapsFor(C.woman,anc);
+      const gaps=gapsFor(C.woman,anc,C.labs);
       const lastOf=(rows,col)=>{ for(let i=rows.length-1;i>=0;i--){ const v=rows[i][col]; if(v!==null&&v!==undefined&&v!=='') return v; } return null; };
 
       // The findings that persist and must not be re-asked or forgotten.

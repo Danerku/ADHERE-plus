@@ -528,6 +528,52 @@ try {
     ]);
   }
 
+  // ==========================================================================================
+  // EXPORT — the facility's own data, in its own hands.
+  //
+  // Everything the facility records has, until now, only been readable through this application. If
+  // the tool goes away, the tablet is wiped, or the woreda asks for the figures in a spreadsheet,
+  // there is no way out. That is not acceptable for a clinical record: the data belongs to the
+  // facility, not to the software.
+  //
+  // This is a LINE LIST containing names, MRNs and HIV results — the most sensitive data in the
+  // system. Gated to provider/admin/supervisor, scoped to the caller's own facility, and voided
+  // records are excluded (a removed record is removed from the export too).
+  // ==========================================================================================
+  if ($r==='export' && $m==='GET'){
+    $u=require_role(['provider','admin','supervisor']);
+    $fac=(int)$u['facility_id'];
+    $type=$_GET['type']??'women';
+    $from=$_GET['from']??'2000-01-01'; $to=$_GET['to']??date('Y-m-d');
+    if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$from)||!preg_match('/^\d{4}-\d{2}-\d{2}$/',$to)) err('bad date range');
+    $W="w.mrn, TRIM(CONCAT_WS(' ',w.first_name,w.father_name,w.grandfather_name)) AS name, w.age";
+    $EP="JOIN episodes e ON e.voided=0 AND e.id=%s JOIN women w ON w.voided=0 AND w.id=e.woman_id";
+    $Q=[
+      'women'      => ["SELECT w.* FROM women w WHERE w.facility_id=? AND w.voided=0 AND DATE(w.created_at) BETWEEN ? AND ? ORDER BY w.id", 'patients'],
+      'anc'        => ["SELECT $W, a.* FROM anc_visits a ".sprintf($EP,'a.episode_id')." WHERE e.facility_id=? AND a.visit_date BETWEEN ? AND ? ORDER BY a.visit_date, a.id", 'anc_contacts'],
+      'deliveries' => ["SELECT $W, d.* FROM delivery_summary d ".sprintf($EP,'d.episode_id')." WHERE e.facility_id=? AND DATE(d.delivery_datetime) BETWEEN ? AND ? ORDER BY d.delivery_datetime, d.id", 'deliveries'],
+      'babies'     => ["SELECT $W, b.* FROM babies b ".sprintf($EP,'b.episode_id')." WHERE e.facility_id=? AND DATE(b.recorded_at) BETWEEN ? AND ? ORDER BY b.id", 'newborns'],
+      'pnc'        => ["SELECT $W, p.* FROM pnc_visits p ".sprintf($EP,'p.episode_id')." WHERE e.facility_id=? AND p.visit_date BETWEEN ? AND ? ORDER BY p.visit_date, p.id", 'pnc_visits'],
+      'referrals'  => ["SELECT $W, rf.* FROM referrals rf ".sprintf($EP,'rf.episode_id')." WHERE e.facility_id=? AND DATE(rf.recorded_at) BETWEEN ? AND ? ORDER BY rf.id", 'referrals'],
+    ];
+    if(!isset($Q[$type])) err('unknown export type');
+    [$sql,$fname]=$Q[$type];
+    $st=db()->prepare($sql); $st->execute([$fac,$from,$to]); $rows=$st->fetchAll();
+
+    audit('export',$type,null,['from'=>$from,'to'=>$to,'rows'=>count($rows)]);   // a line list leaving the building is an auditable act
+
+    // CSV, not JSON: it opens in Excel, which is what a facility and a woreda office actually use.
+    header_remove('Content-Type');
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="'.$fname.'_'.$from.'_to_'.$to.'.csv"');
+    $out=fopen('php://output','w');
+    fwrite($out,"\xEF\xBB\xBF");                       // BOM, so Excel reads the Amharic names correctly
+    if($rows) fputcsv($out, array_keys($rows[0]));
+    foreach($rows as $row) fputcsv($out, array_values($row));
+    fclose($out);
+    exit;
+  }
+
   // ---- providers list (for handover picker; any logged-in user) ----
   if ($r==='providers' && $m==='GET'){ $u=user(); $st=db()->prepare("SELECT id,full_name,role FROM users WHERE is_active=1 AND role IN ('provider','admin') AND facility_id=? ORDER BY full_name"); $st->execute([$u['facility_id']]); out($st->fetchAll()); }
 
