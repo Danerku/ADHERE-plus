@@ -32,6 +32,7 @@
 -- above), but the marker row was never written. Matching the existing convention fixes both.
 CREATE TABLE IF NOT EXISTS schema_fixups (
   name       VARCHAR(64) NOT NULL PRIMARY KEY,
+  applied_at DATETIME    NOT NULL,
   note       VARCHAR(255)
 );
 
