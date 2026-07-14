@@ -217,7 +217,51 @@ function ranges(){
     // facility dashboard could never be populated. The numeric copies/mL is a different column.
     'vl_value'=>[0,10000000,'Viral load (copies/mL)'],
     'cd4_count'=>[0,2000,'CD4 count'],
+    // PRECONCEPTION CARE. These are the numbers the guideline's advice actually turns on — the folic
+    // acid dose, "contraception until fasting glucose is 80-110", the WHO cardiac class, severe renal
+    // disease. A mistyped creatinine of 31 instead of 3.1 does not just look wrong, it changes what
+    // the woman is told, so it is refused at the door and not merely in the browser.
+    'height_cm'=>[100,220,'Height (cm)'],        'weight_kg'=>[25,250,'Weight (kg)'],
+    'bmi'=>[8,80,'BMI'],
+    'dm_fbs'=>[20,600,'Fasting blood glucose (mg/dL)'],
+    'dm_hba1c'=>[3,20,'HbA1c (%)'],
+    'creatinine'=>[0.1,20,'Creatinine (mg/dL)'],
+    'coffee_cups'=>[0,30,'Cups of coffee per day'],
+    'activity_min_week'=>[0,2000,'Physical activity (min/week)'],
+    'td_doses'=>[0,5,'Td doses'],                'hbv_vaccine_doses'=>[0,3,'Hepatitis B vaccine doses'],
+    'parity'=>[0,20,'Parity'],
   ];
+}
+// The woman-level equivalent of require_ep(). Preconception care is NOT an episode — it happens
+// before there is a pregnancy to have an episode of — so it needs its own choke point, and it needs
+// the same two properties: she must belong to the caller's facility, and she must not be voided. A
+// tablet that was offline when a record was voided will replay its queue afterwards, and this is
+// what stops that replay from writing to a record that no longer exists.
+function woman_facility_ok($wid){
+  $u=user(); if(!$u) return false;
+  $st=db()->prepare("SELECT facility_id, voided FROM women WHERE id=?");
+  $st->execute([$wid]); $r=$st->fetch();
+  return $r && $r['facility_id']==$u['facility_id'] && (int)($r['voided']??0)===0;
+}
+function require_woman($wid){ if(!woman_facility_ok($wid)) err('not found',404); }
+
+// PCC uptake status (MoH PCC guideline, Table 8), derived on the server whatever the client sent:
+//   none    = none of the fifteen components
+//   partial = at least one
+//   optimal = folic acid PLUS at least one other
+// Written exactly as the guideline states it. This is a national indicator: a helpful
+// reinterpretation of it is just a wrong number that agrees with itself.
+function pcc_uptake_items(){
+  return ['i1_family_planning','i2_nutrition_bmi','i3_folic_acid','i4_chronic_disease','i5_substance_use',
+          'i6_physical_activity','i7_repro_cxca','i8_sexual_gbv_fgm','i9_infectious','i10_vaccine',
+          'i11_genetic','i12_medication','i13_mental_health','i14_environmental','i15_dental'];
+}
+function pcc_uptake_status(array $b){
+  $yes=0;
+  foreach(pcc_uptake_items() as $k){ if(isset($b[$k]) && $b[$k]!==null && $b[$k]!=='' && $b[$k]!=='0' && (int)$b[$k]===1) $yes++; }
+  if(!$yes) return 'none';
+  $folate = isset($b['i3_folic_acid']) && (int)$b['i3_folic_acid']===1;
+  return ($folate && $yes>=2) ? 'optimal' : 'partial';
 }
 // Rejects a row that carries an impossible measurement. Call it BEFORE the insert/update.
 //

@@ -554,9 +554,17 @@ try {
     $ep->execute([$wid,$fac]);
     $eps=$ep->fetchAll();
     $ids=array_map(function($e){return (int)$e['id'];}, $eps);
+
+    // Her preconception care is HERS, not an episode's. A woman can have a full PCC record and no
+    // pregnancy at all — that is the point of preconception care — so it is fetched woman-level and
+    // it must survive the no-episodes case below. It was the first thing that would have gone missing.
+    $pccq=db()->prepare("SELECT * FROM pcc_assessments WHERE woman_id=? AND voided=0 ORDER BY contact_date, id");
+    $pccq->execute([$wid]); $pcc=$pccq->fetchAll();
+
     if(!$ids) out(['woman'=>$woman,'episodes'=>[],'anc_visits'=>[],'anc_screening'=>[],'labs'=>[],
                    'deliveries'=>[],'babies'=>[],'pnc_visits'=>[],'danger_signs'=>[],'vitals'=>[],
-                   'referrals'=>[],'observations'=>[],'checklist'=>[],'bemonc'=>[],'risk_scores'=>[]]);
+                   'referrals'=>[],'observations'=>[],'checklist'=>[],'bemonc'=>[],'risk_scores'=>[],
+                   'lcg'=>[],'abortion_care'=>[],'deaths'=>[],'pcc'=>$pcc,'pcc_uptake'=>[]]);
     $in=implode(',', array_fill(0,count($ids),'?'));
 
     $all=function($sql) use ($ids){ $st=db()->prepare($sql); $st->execute($ids); return $st->fetchAll(); };
@@ -580,6 +588,11 @@ try {
       'bemonc'        => $all("SELECT * FROM bemonc_care       WHERE episode_id IN ($in) ORDER BY id"),
       'risk_scores'   => $all("SELECT * FROM risk_scores       WHERE episode_id IN ($in) ORDER BY scored_at, id"),
       'abortion_care' => $all("SELECT * FROM abortion_care     WHERE episode_id IN ($in) ORDER BY care_date, id"),
+      // Preconception care (woman-level) and the PCC uptake she was asked about at ANC (episode-level).
+      // Both belong on her chart: the first is what we did for her before she conceived, the second is
+      // what she says was done for her — and where both exist, they should agree.
+      'pcc'           => $pcc,
+      'pcc_uptake'    => $all("SELECT * FROM pcc_uptake        WHERE episode_id IN ($in) AND voided=0 ORDER BY asked_date, id"),
       // Her death belongs to HER, not to an episode — she may have died before any episode was open.
       'deaths'        => (function() use ($wid,$fac){
           $st=db()->prepare("SELECT * FROM maternal_deaths WHERE woman_id=? AND facility_id=? ORDER BY death_datetime");
@@ -622,6 +635,18 @@ try {
       'deaths'     => ["SELECT w.mrn, TRIM(CONCAT_WS(' ',w.first_name,w.father_name)) AS name, w.age, d.*
                           FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id
                          WHERE d.facility_id=? AND DATE(d.death_datetime) BETWEEN ? AND ? ORDER BY d.death_datetime", 'maternal_deaths'],
+      // Preconception care. Woman-level, so it does NOT join episodes — a woman can have a full PCC
+      // record and no pregnancy, which is the entire point of preconception care. Joining episodes
+      // here would have quietly excluded exactly the women the module exists for.
+      'pcc'        => ["SELECT $W, p.* FROM pcc_assessments p JOIN women w ON w.voided=0 AND w.id=p.woman_id
+                         WHERE p.facility_id=? AND p.voided=0 AND p.contact_date BETWEEN ? AND ?
+                         ORDER BY p.contact_date, p.id", 'preconception_care'],
+      // What women arriving at ANC say was done for them BEFORE they conceived (MoH Table 8). This is
+      // the source of three of the five national PCC indicators, and it is the one a woreda will ask
+      // for by name.
+      'pcc_uptake' => ["SELECT $W, e.service_category, u2.* FROM pcc_uptake u2 ".sprintf($EP,'u2.episode_id')."
+                         WHERE e.facility_id=? AND u2.voided=0 AND u2.asked_date BETWEEN ? AND ?
+                         ORDER BY u2.asked_date, u2.id", 'pcc_uptake_at_anc'],
     ];
     if(!isset($Q[$type])) err('unknown export type');
     [$sql,$fname]=$Q[$type];
@@ -972,6 +997,142 @@ try {
     // deserves a clear answer rather than a silent failure. 4xx also means the offline queue surfaces
     // it on the failed-entries screen instead of retrying it for ever.
     if($m==='POST'){ err('The partograph has been replaced by the Labour Care Guide. Record this assessment under Intrapartum care.', 410); }
+  }
+
+  // =================================================================================================
+  // PRECONCEPTION CARE
+  //
+  // Two routes, because the guideline asks two different questions.
+  //
+  //   /pcc         — care DELIVERED to a woman who is not pregnant. Woman-level, never episode-level:
+  //                  preconception care happens before there is a pregnancy to have an episode of.
+  //                  Guarded by require_woman(), the woman-level twin of require_ep().
+  //   /pcc-uptake  — care she says she RECEIVED before conceiving, asked at ANC (MoH Table 8).
+  //                  Episode-level, one row per ANC episode, and the status is derived by the same
+  //                  rule the screen shows her: none / partial / optimal (folic acid PLUS one other).
+  //
+  // The allow-list is declared ONCE and reused by the write path and the offline replay path. Two
+  // lists that drift apart is how a tablet syncing after a week silently loses half of what it
+  // recorded — it happened once here already, and it is not going to happen twice.
+  // =================================================================================================
+  $PCC_FIELDS = ['woman_id','facility_id','contact_date','entry_point',
+    'plans_pregnancy','couple_counselled','partner_present','parity','prior_apo',
+    'fp_current_method','fp_counselled','birth_interval_ok','infertility_screen','disability',
+    'height_cm','weight_kg','bmi','hgb','diet_counselled','iodized_salt','dewormed',
+    'folate_dose','folate_start_date','iron_supplied','folate_adherence',
+    'dm_known','dm_fbs','dm_hba1c','htn_known','bp_systolic','bp_diastolic',
+    'cardiac_symptoms','cardiac_who_class','ckd_known','creatinine','epilepsy','epilepsy_drug',
+    'alcohol','khat','tobacco','other_substance','coffee_cups','activity_min_week',
+    'cxca_screened','cxca_result','hpv_vaccinated','repro_anomaly',
+    'gbv_screened','gbv_positive','gbv_referred','fgm','fgm_counselled','sexual_dysfunction',
+    'hiv_status','syphilis','hbsag','tb_screen','malaria_risk','sti_history',
+    'td_doses','td_given_today','td_next_due','hbv_vaccine_doses',
+    'consanguinity','family_hx_genetic','prior_ntd',
+    'current_medicines','teratogenic_flag','teratogenic_named',
+    'mh_depression','mh_anxiety','mh_known_illness','mh_referred',
+    'exposure_pets','exposure_radiation','exposure_chemicals','exposure_counselled',
+    'dental_problem','dental_referred',
+    'readiness','readiness_reasons','cannot_assess','referred_to','care_plan','next_visit',
+    'recorded_by'];
+
+  $PCC_UPTAKE_FIELDS = ['episode_id','woman_id','facility_id','asked_date','verified_against',
+    'i1_family_planning','i2_nutrition_bmi','i3_folic_acid','i4_chronic_disease','i5_substance_use',
+    'i6_physical_activity','i7_repro_cxca','i8_sexual_gbv_fgm','i9_infectious','i10_vaccine',
+    'i11_genetic','i12_medication','i13_mental_health','i14_environmental','i15_dental',
+    'status','planned_pregnancy','remark','recorded_by'];
+
+  // The uptake status is derived by pcc_uptake_status() in lib.php — on the SERVER, whatever the
+  // client sent. A national indicator cannot depend on a client being honest, or being current.
+
+  if ($r==='pcc'){
+    if($m==='GET'){
+      $u=require_auth();
+      if($id){                                              // one assessment
+        $st=db()->prepare("SELECT p.* FROM pcc_assessments p JOIN women w ON w.id=p.woman_id
+                            WHERE p.id=? AND w.facility_id=? AND w.voided=0 AND p.voided=0");
+        $st->execute([$id,$u['facility_id']]); out($st->fetch()?:[]);
+      }
+      $wid=(int)($_GET['woman']??0);
+      if($wid){ require_woman($wid);
+        $st=db()->prepare("SELECT * FROM pcc_assessments WHERE woman_id=? AND voided=0 ORDER BY contact_date DESC, id DESC");
+        $st->execute([$wid]); out($st->fetchAll());
+      }
+      // The facility's PCC caseload. A voided woman appears nowhere — the same rule as every other list.
+      $st=db()->prepare("SELECT p.*, w.mrn, w.first_name, w.father_name, w.age
+                           FROM pcc_assessments p JOIN women w ON w.id=p.woman_id
+                          WHERE p.facility_id=? AND p.voided=0 AND w.voided=0
+                          ORDER BY p.contact_date DESC, p.id DESC LIMIT 200");
+      $st->execute([$u['facility_id']]); out($st->fetchAll());
+    }
+    if($m==='POST'){ $u=require_role(['provider','admin']); $b=body();
+      require_woman($b['woman_id']??0);                     // hers, and not voided
+      $b=blank_to_null($b); check_ranges($b);
+      $b['facility_id']=$u['facility_id'];                  // never taken from the client
+      $b['recorded_by']=$u['id'];
+      if(empty($b['contact_date'])) $b['contact_date']=date('Y-m-d');
+      if(is_array($b['readiness_reasons']??null)) $b['readiness_reasons']=implode(' | ',$b['readiness_reasons']);
+      if(is_array($b['cannot_assess']??null))     $b['cannot_assess']=implode('; ',$b['cannot_assess']);
+      $pid=insert('pcc_assessments',array_intersect_key($b,array_flip($PCC_FIELDS)));
+      audit('create_pcc','pcc_assessments',$pid,['readiness'=>$b['readiness']??null,'folate'=>$b['folate_dose']??null]);
+      out(['id'=>$pid],201); }
+    if($m==='PATCH' && $id){ $u=require_role(['provider','admin']); $b=body();
+      $q=db()->prepare("SELECT woman_id FROM pcc_assessments WHERE id=? AND voided=0"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      require_woman($row['woman_id']);
+      $b=blank_to_null($b); check_ranges($b);
+      if(is_array($b['readiness_reasons']??null)) $b['readiness_reasons']=implode(' | ',$b['readiness_reasons']);
+      if(is_array($b['cannot_assess']??null))     $b['cannot_assess']=implode('; ',$b['cannot_assess']);
+      // A correction, not a re-parenting: the assessment can be corrected, but it cannot be moved to
+      // another woman and its facility cannot be rewritten.
+      $f=array_intersect_key($b, array_flip(array_diff($PCC_FIELDS,['woman_id','facility_id','recorded_by'])));
+      if(!$f) err('nothing to update');
+      foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_assessments SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      audit('update','pcc_assessments',$id,array_keys($f)); out(['ok'=>true]); }
+    if($m==='DELETE' && $id){ $u=require_role(['provider','admin']); $b=body();
+      $reason=trim((string)($b['reason']??'')); if(strlen($reason)<5) err('a reason is required to void a record');
+      $q=db()->prepare("SELECT woman_id FROM pcc_assessments WHERE id=? AND voided=0"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      require_woman($row['woman_id']);
+      db()->prepare("UPDATE pcc_assessments SET voided=1, voided_at=NOW(), voided_by=?, void_reason=? WHERE id=?")
+          ->execute([$u['id'],$reason,$id]);
+      audit('void','pcc_assessments',$id,['reason'=>$reason]); out(['ok'=>true]); }
+  }
+
+  if ($r==='pcc-uptake'){
+    if($m==='GET'){ require_auth(); $eid=(int)($_GET['episode']??0); require_ep($eid);
+      $st=db()->prepare("SELECT * FROM pcc_uptake WHERE episode_id=? AND voided=0"); $st->execute([$eid]);
+      out($st->fetch()?:[]); }
+    if($m==='POST'){ $u=require_role(['provider','admin']); $b=body(); require_ep($b['episode_id']??0);
+      $b=blank_to_null($b);
+      $e=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $e->execute([$b['episode_id']]); $ep=$e->fetch();
+      $b['woman_id']=$ep['woman_id']; $b['facility_id']=$u['facility_id']; $b['recorded_by']=$u['id'];
+      if(empty($b['asked_date'])) $b['asked_date']=date('Y-m-d');
+      $b['status']=pcc_uptake_status($b);                   // the server decides, always
+      $row=array_intersect_key($b,array_flip($PCC_UPTAKE_FIELDS));
+      // One row per episode (UNIQUE on episode_id). Asking her again at a later contact CORRECTS the
+      // answer; it does not create a second, contradictory one — and it must not 500 on the duplicate
+      // key when a tablet replays a queued entry it already sent.
+      $ex=db()->prepare("SELECT id FROM pcc_uptake WHERE episode_id=?"); $ex->execute([$b['episode_id']]); $old=$ex->fetch();
+      if($old){
+        $f=array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by']));
+        foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+        db()->prepare("UPDATE pcc_uptake SET voided=0, voided_at=NULL, voided_by=NULL, void_reason=NULL WHERE id=?")->execute([$old['id']]);
+        audit('update','pcc_uptake',$old['id'],['status'=>$b['status']]);
+        out(['id'=>(int)$old['id'],'status'=>$b['status']]);
+      }
+      $uid=insert('pcc_uptake',$row);
+      audit('create_pcc_uptake','pcc_uptake',$uid,['status'=>$b['status']]);
+      out(['id'=>$uid,'status'=>$b['status']],201); }
+    if($m==='PATCH' && $id){ $u=require_role(['provider','admin']); $b=body();
+      $q=db()->prepare("SELECT * FROM pcc_uptake WHERE id=? AND voided=0"); $q->execute([$id]); $row=$q->fetch();
+      if(!$row) err('not found',404);
+      require_ep($row['episode_id']);
+      $b=blank_to_null($b);
+      $merged=array_merge($row,$b); $b['status']=pcc_uptake_status($merged);
+      $f=array_intersect_key($b, array_flip(array_diff($PCC_UPTAKE_FIELDS,['episode_id','woman_id','facility_id','recorded_by'])));
+      if(!$f) err('nothing to update');
+      foreach($f as $k=>$v){ db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$id]); }
+      audit('update','pcc_uptake',$id,array_keys($f)); out(['ok'=>true,'status'=>$b['status']]); }
   }
 
   // ---- AI risk score (server-stored; scoring done on-device) ----
@@ -1529,6 +1690,33 @@ try {
        'dbs_sent'    =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.dbs_sample='sent'$since"),
        'low_apgar'   =>$one("SELECT COUNT(*) c FROM babies b JOIN episodes e ON e.voided=0 AND e.id=b.episode_id WHERE e.facility_id=? AND b.apgar_flag='low'$since"),
      ],
+
+     // ---- PRECONCEPTION CARE ----
+     // The left half is what we DELIVERED (pcc_assessments). The right half is what women arriving at
+     // ANC say was done for them BEFORE they conceived (pcc_uptake) — which is where the national
+     // indicators live, and where a facility can see whether preconception care is actually reaching
+     // the women who go on to be pregnant. The PCC row is aliased `e` so the $nvE guard applies as it
+     // does everywhere else on this screen: a voided woman is counted nowhere.
+     'pcc'=>[
+       'assessments'  =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'women'        =>$one("SELECT COUNT(DISTINCT e.woman_id) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'folate_started'=>$one("SELECT COUNT(DISTINCT e.woman_id) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.folate_dose IN ('0.4mg','5mg')".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'folate_high'  =>$one("SELECT COUNT(DISTINCT e.woman_id) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.folate_dose='5mg'".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'defer'        =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.readiness='defer'".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'optimize'     =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.readiness='optimize'".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'ready'        =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.readiness='ready'".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       // An assessment that could not be completed because a test was not available. This number is
+       // the facility's own lab gap, said out loud instead of being hidden inside a green tick.
+       'incomplete'   =>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.readiness='incomplete'".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'couple_counselled'=>$one("SELECT COUNT(*) c FROM pcc_assessments e WHERE e.facility_id=? AND e.voided=0 AND e.couple_counselled=1".$nvE.($days>0?" AND e.contact_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),   // Table 7 indicator 5
+       // ---- uptake at ANC (Table 8) — the national indicators ----
+       'asked'        =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_none'  =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.status='none'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_partial'=>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.status='partial'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'uptake_optimal'=>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.status='optimal'".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'planned_preg' =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.planned_pregnancy=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 2
+       'ifa_before'   =>$one("SELECT COUNT(*) c FROM pcc_uptake e WHERE e.facility_id=? AND e.voided=0 AND e.i3_folic_acid=1".$nvE.($days>0?" AND e.asked_date >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),  // Table 7 indicator 3
+     ],
     ]);
   }
 
@@ -1745,6 +1933,48 @@ try {
       'checklist_responses'  => ['episode_id','pause_point','item_code','response','recorded_by'],
       'danger_signs'         => ['episode_id','obs_datetime','headache','blurred_vision','epigastric_pain','dtr_grade','vaginal_bleeding','remark','recorded_by'],
     ];
+
+    // PRECONCEPTION CARE REPLAYS ON THE WOMAN, NOT ON AN EPISODE.
+    //
+    // Every other entity in this queue is guarded by require_ep(). A PCC assessment has no episode —
+    // it is care given before there is a pregnancy — so it needs its own guard, require_woman(), with
+    // the same two properties: hers, and not voided. Handled separately rather than bent into $map,
+    // because bending it would have meant passing episode_id=0 to require_ep() and either failing
+    // every queued PCC entry or, worse, letting it through unguarded.
+    foreach($items as $it){
+      if(($it['entity']??'')!=='pcc') continue;
+      $p=$it['payload']??[];
+      require_woman($p['woman_id']??0);
+      $p=blank_to_null($p); check_ranges($p);
+      $p['facility_id']=$u['facility_id']; $p['recorded_by']=$u['id'];
+      if(empty($p['contact_date'])) $p['contact_date']=date('Y-m-d');
+      if(is_array($p['readiness_reasons']??null)) $p['readiness_reasons']=implode(' | ',$p['readiness_reasons']);
+      if(is_array($p['cannot_assess']??null))     $p['cannot_assess']=implode('; ',$p['cannot_assess']);
+      $p=array_intersect_key($p,array_flip($PCC_FIELDS));   // the SAME list POST /pcc uses
+      $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_assessments',$p)];
+    }
+    // The ANC uptake checklist replays on the episode, and it is an UPSERT: the row is unique per
+    // episode, so a tablet that queued it twice must correct the row rather than hit the unique key
+    // and 500 (a 5xx retries for ever — the queue would wedge on it).
+    foreach($items as $it){
+      if(($it['entity']??'')!=='pcc_uptake') continue;
+      $p=$it['payload']??[]; require_ep($p['episode_id']??0);
+      $p=blank_to_null($p);
+      $e=db()->prepare("SELECT woman_id FROM episodes WHERE id=?"); $e->execute([$p['episode_id']]); $er=$e->fetch();
+      $p['woman_id']=$er['woman_id']; $p['facility_id']=$u['facility_id']; $p['recorded_by']=$u['id'];
+      if(empty($p['asked_date'])) $p['asked_date']=date('Y-m-d');
+      $p['status']=pcc_uptake_status($p);
+      $row=array_intersect_key($p,array_flip($PCC_UPTAKE_FIELDS));
+      $ex=db()->prepare("SELECT id FROM pcc_uptake WHERE episode_id=?"); $ex->execute([$p['episode_id']]); $old=$ex->fetch();
+      if($old){
+        foreach(array_diff_key($row,array_flip(['episode_id','woman_id','facility_id','recorded_by'])) as $k=>$v){
+          db()->prepare("UPDATE pcc_uptake SET `$k`=? WHERE id=?")->execute([$v,$old['id']]); }
+        $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>(int)$old['id']];
+      } else {
+        $applied[]=['uuid'=>$it['client_uuid']??null,'id'=>insert('pcc_uptake',$row)];
+      }
+    }
+
     foreach($items as $it){ $ep=$it['entity']??''; $payload=$it['payload']??[];
       // A queued PARTOGRAPH entry from a tablet that has not updated yet. The tool it was recorded
       // with no longer exists. Refuse it clearly (4xx) so it lands on the failed-entries screen with
@@ -1789,10 +2019,27 @@ try {
     $deliv    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM delivery_summary d JOIN episodes e ON e.voided=0 AND e.id=d.episode_id WHERE e.facility_id IN ($in)".$dc('d.recorded_at')." GROUP BY e.facility_id");
     $reds     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM risk_scores s JOIN episodes e ON e.voided=0 AND e.id=s.episode_id WHERE s.band='red' AND e.facility_id IN ($in)".$dc('s.scored_at')." GROUP BY e.facility_id");
     $refs     = $grp("SELECT e.facility_id fid, COUNT(*) c FROM referrals rf JOIN episodes e ON e.voided=0 AND e.id=rf.episode_id WHERE e.facility_id IN ($in)".$dc('rf.recorded_at')." GROUP BY e.facility_id");
+    // PRECONCEPTION CARE across the woreda. `pcc_women` is the MoH's "facility started providing PCC"
+    // indicator in its only honest form — a facility with zero is a facility not doing it. `anc_asked`
+    // is the denominator for uptake: the share of women arriving at ANC who were even ASKED matters
+    // more, early on, than the uptake figure itself, because an unasked woman is recorded as nothing.
+    $pccW     = $grp("SELECT p.facility_id fid, COUNT(DISTINCT p.woman_id) c FROM pcc_assessments p JOIN women w ON w.id=p.woman_id AND w.voided=0
+                       WHERE p.voided=0 AND p.facility_id IN ($in)".$dc('p.contact_date')." GROUP BY p.facility_id");
+    $ancEp    = $grp("SELECT e.facility_id fid, COUNT(*) c FROM episodes e WHERE e.voided=0 AND e.service_category='anc' AND e.facility_id IN ($in)".$dc('e.created_at')." GROUP BY e.facility_id");
+    $asked    = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x JOIN women w ON w.id=x.woman_id AND w.voided=0
+                       WHERE x.voided=0 AND x.facility_id IN ($in)".$dc('x.asked_date')." GROUP BY x.facility_id");
+    $optimal  = $grp("SELECT x.facility_id fid, COUNT(*) c FROM pcc_uptake x JOIN women w ON w.id=x.woman_id AND w.voided=0
+                       WHERE x.voided=0 AND x.status='optimal' AND x.facility_id IN ($in)".$dc('x.asked_date')." GROUP BY x.facility_id");
     $rows=[]; foreach($facRows as $f){ $fid=(int)$f['id']; $lab=$labour[$fid]??0; $ps=$partostd[$fid]??0;
+      $anc=$ancEp[$fid]??0; $ak=$asked[$fid]??0;
       $rows[]=['id'=>$fid,'name'=>$f['name'],'woreda'=>$f['woreda'],'zone'=>$f['zone'],
         'labour_episodes'=>$lab,'partographs_started'=>$ps,'partograph_completion'=>$lab?(int)round(100*$ps/$lab):0,
-        'deliveries'=>$deliv[$fid]??0,'red_alerts'=>$reds[$fid]??0,'referrals'=>$refs[$fid]??0]; }
+        'deliveries'=>$deliv[$fid]??0,'red_alerts'=>$reds[$fid]??0,'referrals'=>$refs[$fid]??0,
+        'pcc_women'=>$pccW[$fid]??0,
+        'anc_episodes'=>$anc,'pcc_asked'=>$ak,
+        'pcc_asked_pct'=>$anc?(int)round(100*$ak/$anc):0,
+        'pcc_optimal'=>$optimal[$fid]??0,
+        'pcc_optimal_pct'=>$ak?(int)round(100*($optimal[$fid]??0)/$ak):0]; }
     out(['scope'=>$u['scope']??'facility','base_facility'=>(int)$u['facility_id'],'days'=>$days,'facilities'=>$rows]);
   }
 
@@ -1803,6 +2050,26 @@ try {
       $st=db()->prepare("SELECT r.*, w.first_name, w.father_name FROM reminders r LEFT JOIN women w ON w.id=r.woman_id WHERE r.facility_id IN ($in) ORDER BY r.id DESC LIMIT 300");
       $st->execute($ids); out($st->fetchAll()); }
     if($m==='POST' && $id==='run'){ require_role(['admin']); require __DIR__.'/reminders_lib.php'; out(reminders_run(db()), 200); }
+    // A RECALL A PROVIDER CAN SET.
+    //
+    // Until now a reminder could only be created by the scheduler. The folic-acid clock needs one it
+    // cannot generate: "you may try to conceive from this date", three months after she starts the
+    // supplement. That date is the single most actionable thing she leaves a preconception visit with.
+    //
+    // CONSENT IS NOT OPTIONAL AND IS NOT INFERRED. The phone number is attached ONLY if she has
+    // consented to be texted. Without consent the reminder is still created — it appears on the
+    // facility's recall list, and someone tells her when she comes — but no message can be sent to
+    // her, because the row has no number to send it to.
+    if($m==='POST' && !$id){ $u=require_role(['provider','admin']); $b=body();
+      $wid=(int)($b['woman_id']??0); require_woman($wid);
+      $due=$b['due_date']??''; if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$due)) err('a due date is required');
+      $kind=preg_replace('/[^a-z_]/','',strtolower((string)($b['kind']??'custom'))) ?: 'custom';
+      $w=db()->prepare("SELECT phone, sms_consent FROM women WHERE id=?"); $w->execute([$wid]); $wr=$w->fetch();
+      $phone=((int)($wr['sms_consent']??0)===1) ? ($wr['phone']??null) : null;
+      $rid=insert('reminders',['woman_id'=>$wid,'facility_id'=>(int)$u['facility_id'],'kind'=>$kind,
+        'due_date'=>$due,'phone'=>$phone,'message'=>mb_substr((string)($b['message']??''),0,300),'status'=>'pending']);
+      audit('create','reminders',$rid,['kind'=>$kind,'due'=>$due,'sms'=>$phone?1:0]);
+      out(['id'=>$rid,'sms'=>$phone?1:0],201); }
   }
 
   err('not found: '.$r, 404);

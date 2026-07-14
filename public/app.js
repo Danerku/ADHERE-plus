@@ -334,7 +334,13 @@ const CREATES={ women:'women', episodes:'episodes', pregnancy_tests:'pregnancy_t
   // no local record, so the screen re-rendered from the stale cache without the new row and the
   // provider entered it again — a duplicate on sync. They store a local record like everything else.
   labs:'labs', fp_visits:'fp_visits', imm_doses:'imm_doses', pmtct_infants:'pmtct_infants',
-  pmtct_fu:'pmtct_fu', bemonc:'bemonc', handover:'handover', lafp:'lafp' };
+  pmtct_fu:'pmtct_fu', bemonc:'bemonc', handover:'handover', lafp:'lafp',
+  // Preconception care. `pcc` is read back by woman (GET pcc?woman=) and the ANC uptake checklist by
+  // episode (GET pcc-uptake?episode=), so both need a local id — without one, a tablet that recorded
+  // a PCC assessment offline re-renders from the cache without it and the provider enters it twice,
+  // which syncs as a duplicate. The KEY IS THE FIRST PATH SEGMENT, so it must be the literal route
+  // name, hyphen and all.
+  pcc:'pcc', 'pcc-uptake':'pcc-uptake' };
 
 // Serve a GET from the device. The query shapes the app actually uses are bounded (episode=, ep=,
 // woman=, category=, flag=, client=, mother=, id=, programme=, q=), so the matcher is exact rather
@@ -900,6 +906,9 @@ function route(){
     find:findWoman,failed:failedScreen,voided:voidedScreen,
     letter:letterScreen, export:exportScreen,
     abortion:abortionScreen, death:deathScreen,
+    // Preconception care. `pcc` takes a WOMAN id, not an episode id — she may have no episode at all,
+    // which is the whole point of the module. `pccuptake` takes an ANC episode id.
+    pcc:pccScreen, pcclist:pccList, pccuptake:pccUptake,
     account:accountScreen}[screen]||(ME.role==='supervisor'?supervisorDash:home))(arg);
 }
 
@@ -1026,6 +1035,8 @@ async function home(){
        anc=(eps||[]).filter(e=>e.service_category==='anc'&&e.status==='active').length;
        pnc=(eps||[]).filter(e=>e.service_category==='pnc'&&e.status==='active').length; }catch(e){}
   try{ const pms=await api('GET','pmtct'); pm=(pms||[]).filter(pmtctNeedsAction).length; }catch(e){}
+  let pcc=0;
+  try{ const pa=await api('GET','pcc'); pcc=(pa||[]).length; }catch(e){}
   let pt=0;
   try{ const pts=await api('GET','pregnancy_tests'); pt=(pts||[]).filter(x=>x.result==='pending').length; }catch(e){}
   const roClin=!canDo('clinical'), roIntake=!canDo('intake'), roFp=!canDo('fp');
@@ -1049,6 +1060,7 @@ async function home(){
 
     ${sectionLabel('FAMILY PLANNING &amp; PREVENTION')}
     ${tileGrid(
+      tileHtml('#pcclist','&#127793;','Preconception care',n(pcc,'assessed','Before she conceives'),'soft',roClin)+
       tileHtml('#fp','&#128737;','Family planning','Methods · LAFP removal','soft',roFp)+
       tileHtml('#pmtct','&#129656;','PMTCT',n(pm,'need action','Mother + exposed infant'),(pm?'red':'soft'),roClin)+
       tileHtml('#imm','&#128137;','Immunization','Td · HPV','soft',roFp)
@@ -2490,7 +2502,7 @@ async function overviewSection(){
   let o; try{ o=await api('GET','overview'+(days?('?days='+days):'')); }catch(e){ return '<div class="card">Could not load overview: '+esc(e.message||'error')+'</div>'; }
   window._ov=o;
   const c=o.caseload||{}, pr=o.process||{}, nb=o.newborn_care||{}, cx=o.complications||{};
-  const fp=o.fp||{}, im=o.immunization||{}, pt=o.pregnancy_test||{}, pm=o.pmtct||{};
+  const fp=o.fp||{}, im=o.immunization||{}, pt=o.pregnancy_test||{}, pm=o.pmtct||{}, pc=o.pcc||{};
   const pct=(a,b)=>b?Math.round(100*a/b)+'%':'—';
   const hrPct=c.total?Math.round(100*c.high_risk/c.total):0;
   return `<div class="card">
@@ -2617,6 +2629,26 @@ async function overviewSection(){
       ${ovStat(pct(im.hpv_complete||0,im.hpv_girls||0),'HPV complete',(im.hpv_complete||0)+' of '+(im.hpv_girls||0))}
     </div>
     <p class="muted" style="font-size:12px;margin-top:4px">Td-2 is the minimum that protects a newborn against tetanus (80% protection; Td-3 gives 95%).</p>
+
+    <h4 style="margin-top:14px">Preconception care</h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(pc.women||0,'Women assessed',(pc.assessments||0)+' assessments')}
+      ${ovStat(pc.folate_started||0,'On folic acid',(pc.folate_high||0)+' on 5 mg')}
+      ${ovStat(pc.defer||0,'Defer &mdash; refer','pregnancy not advised yet')}
+      ${ovStat(pc.optimize||0,'Optimise first')}
+      ${ovStat(pc.incomplete||0,'Could not complete','a test was not available')}
+      ${ovStat(pc.couple_counselled||0,'Couple counselled')}
+    </div>
+    <h4 style="margin-top:12px">What women arriving at ANC received <span class="muted" style="font-weight:400;font-size:12px">&mdash; before they conceived</span></h4>
+    <div class="hubgrid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      ${ovStat(pc.asked||0,'Asked at ANC')}
+      ${ovStat(pct(pc.uptake_optimal||0,pc.asked||0),'Optimal uptake',(pc.uptake_optimal||0)+' of '+(pc.asked||0))}
+      ${ovStat(pct(pc.uptake_partial||0,pc.asked||0),'Partial uptake',(pc.uptake_partial||0)+' of '+(pc.asked||0))}
+      ${ovStat(pct(pc.uptake_none||0,pc.asked||0),'No uptake',(pc.uptake_none||0)+' of '+(pc.asked||0))}
+      ${ovStat(pct(pc.ifa_before||0,pc.asked||0),'IFA before pregnancy',(pc.ifa_before||0)+' of '+(pc.asked||0))}
+      ${ovStat(pct(pc.planned_preg||0,pc.asked||0),'Planned pregnancy',(pc.planned_preg||0)+' of '+(pc.asked||0))}
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:4px"><b>Optimal</b> means she took folic acid <b>and</b> at least one other component &mdash; the MoH definition, not ours. <b>Could not complete</b> is this facility&rsquo;s own laboratory gap, said out loud: an assessment where a test the guideline asks for was not available. It is not a failure of the provider, and it must never be counted as a normal result.</p>
   </div>`;
 }
 function wireOverview(){
@@ -2633,6 +2665,7 @@ function wireOverview(){
     push('LAFP removal reason',o.lafp_reasons);
     push('PMTCT',o.pmtct); push('PMTCT entry point',o.pmtct_entry); push('PMTCT infant feeding',o.pmtct_feeding);
     push('Immunization',o.immunization);
+    push('Preconception care',o.pcc);
     push('Pregnancy loss',o.loss); push('Maternal deaths',o.maternal_deaths);
     const csv=lines.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\n');
     const bl=new Blob([csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a');
@@ -4456,7 +4489,7 @@ const REG_COLS={
     ['Ptnr acc',tickCell('partner_hiv_accepted')],['Ptnr res','partner_hiv_result'],['Ptnr pop','partner_target_pop_code'],['Ptnr ART',tickCell('partner_linked_art')],
     ['C:Danger',tickCell('cnsl_danger_signs')],['C:Nutr',tickCell('cnsl_nutrition')],['C:ECD',tickCell('cnsl_ecd')],['C:Feed',tickCell('cnsl_infant_feeding')],['C:FP',tickCell('cnsl_family_planning')],['Remark','remark']],
   delivery:[['S.N',(r,i)=>i+1],['MRN','mrn'],['Name',r=>((r.first_name||'')+' '+(r.father_name||'')).trim()],['Age','age'],['Kebele','kebele'],
-    ['Delivery date/time','delivery_datetime'],['Partograph','partograph_used'],['Mode','mode'],['Episiotomy',tickCell('episiotomy')],
+    ['Delivery date/time','delivery_datetime'],['Intrapartum care (LCG) / partograph','partograph_used'],['Mode','mode'],['Episiotomy',tickCell('episiotomy')],
     ['Uterotonic','amtsl_uterotonic_type'],['CCT','amtsl_cct'],['Mother','maternal_status'],['Death cause','maternal_death_cause'],
     ['PE',tickCell('comp_preeclampsia')],['E',tickCell('comp_eclampsia')],['APH',tickCell('comp_aph')],['PPH',tickCell('comp_pph')],['Other',tickCell('comp_other')],['Referred',tickCell('referred')],
     ['Birth order','birth_order'],['Outcome','outcome'],['APGAR',r=>(r.apgar_1min||'')+'/'+(r.apgar_5min||'')],['Sex','sex'],['Weight (g)','weight_g'],
@@ -5889,6 +5922,11 @@ async function reportScreen(id){
   const W=C.woman, anc=C.anc_visits||[], pnc=C.pnc_visits||[], bbs=C.babies||[], dels=C.deliveries||[],
         refs=C.referrals||[], dgs=C.danger_signs||[], vits=C.vitals||[], labs=C.labs||[],
         scr=C.anc_screening||[], obs=C.observations||[], lcg=C.lcg||[], eps=C.episodes||[];
+  // Preconception care is part of HER record, not this episode's — what was done before she conceived
+  // is exactly what the next provider needs to know, and it was the first thing that would have been
+  // captured and then never shown to anybody.
+  const pccRows=C.pcc||[];
+  const pccUp=((C.pcc_uptake||[]).filter(u=>String(u.episode_id)===String(id))[0])||null;
   const name=((W.first_name||'')+' '+(W.father_name||'')+' '+(W.grandfather_name||'')).trim();
   const gaps=gapsFor(W,anc,labs);
   const yesScr=scr.filter(s=>s.response==='yes');
@@ -6002,6 +6040,20 @@ async function reportScreen(id){
         <td class="${o.alerts?'rec-alarm':''}">${esc(o.alerts||'—')}</td><td>${esc(o.plan||'')}</td></tr>`).join('')}
       </table></div>`:''}
    ${obs.length?`<div class="rec-b"><h5>Labour — partograph <span class="muted" style="font-weight:400">(recorded before the Labour Care Guide replaced it)</span></h5><p class="muted" style="font-size:13px">${obs.length} observation(s). Last: cervix ${esc(obs[obs.length-1].cervix_cm||'—')} cm, fetal heart ${esc(obs[obs.length-1].fetal_heart_rate||'—')}.</p></div>`:''}
+   ${pccRows.length?`<div class="rec-b"><h5>Preconception care <span class="muted" style="font-weight:400">(before this pregnancy)</span></h5>
+      <table class="rec-t"><tr><th>Date</th><th>Seen at</th><th>Folic acid</th><th>Readiness</th><th>Why</th></tr>
+      ${pccRows.map(p=>`<tr><td>${esc(String(p.contact_date||'').slice(0,10))}</td><td>${esc(p.entry_point||'')}</td>
+        <td>${esc(p.folate_dose||'—')}${p.folate_start_date?(' from '+esc(String(p.folate_start_date).slice(0,10))):''}</td>
+        <td>${esc((window.PCC&&PCC.STATE_LABEL[p.readiness])||p.readiness||'—')}</td>
+        <td>${esc(p.readiness_reasons||'')}</td></tr>`).join('')}
+      </table>
+      ${pccRows.some(p=>p.cannot_assess)?`<p class="muted" style="font-size:12px;margin-top:4px"><b>Not assessed:</b> ${esc(pccRows.filter(p=>p.cannot_assess).map(p=>p.cannot_assess).join('; '))} &mdash; a test that was not done is not a normal result.</p>`:''}
+     </div>`:''}
+   ${pccUp?`<div class="rec-b"><h5>Preconception care she received before conceiving <span class="muted" style="font-weight:400">(asked at ANC)</span></h5>
+      <p style="font-size:13px">${esc((window.PCC&&PCC.UPTAKE_LABEL[pccUp.status])||pccUp.status||'')}
+      ${pccUp.verified_against?`<span class="muted">&middot; verified against ${esc(pccUp.verified_against==='lmp'?'her LMP':(pccUp.verified_against==='ga'?'gestational age':'nothing — she could not be sure'))}</span>`:''}</p>
+      <p class="muted" style="font-size:12px">${esc((window.PCC?PCC.UPTAKE_ITEMS.filter(i=>pccUp[i.key]==1).map(i=>i.label):[]).join(', ')||'none of the fifteen components')}</p>
+     </div>`:''}
    ${delBlocks?`<div class="rec-b"><h5>Birth</h5>${delBlocks}</div>`:''}
    ${babyBlocks?`<div class="rec-b"><h5>Newborn(s)</h5>${babyBlocks}</div>`:''}
    ${pncBlocks?`<div class="rec-b"><h5>Postnatal care</h5>${pncBlocks}</div>`:''}
@@ -6208,7 +6260,8 @@ async function exportScreen(){
   if(!(ME.role==='provider'||ME.role==='supervisor'||ADMIN())){ app().innerHTML=nav()+'<div class="card">Providers, supervisors and admins only.</div>'; return; }
   const today=new Date().toISOString().slice(0,10);
   const first=today.slice(0,8)+'01';
-  const T=[['women','Patients registered'],['anc','ANC contacts'],['labour','Labour monitoring (LCG)'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals'],['loss','Pregnancy loss / abortion care'],['deaths','Maternal deaths']];
+  const T=[['women','Patients registered'],['anc','ANC contacts'],['labour','Labour monitoring (LCG)'],['deliveries','Births'],['babies','Newborns'],['pnc','Postnatal visits'],['referrals','Referrals'],['loss','Pregnancy loss / abortion care'],['deaths','Maternal deaths'],
+    ['pcc','Preconception care'],['pcc_uptake','PCC uptake at ANC']];
   app().innerHTML=nav()+`<div class="card">
     <h3>Export the facility&rsquo;s records</h3>
     <p class="muted">A spreadsheet of what this facility recorded, for the dates you choose. It opens in Excel.</p>
@@ -6288,6 +6341,27 @@ async function letterScreen(id){
       ${lg.assessment?`<p style="font-size:13px;margin:4px 0 0"><b>Assessment:</b> ${esc(lg.assessment)}</p>`:''}
       ${lg.plan?`<p style="font-size:13px;margin:2px 0 0"><b>Plan agreed with her:</b> ${esc(lg.plan)}</p>`:''}
     </div>` : '';
+
+  // A woman referred FROM a preconception visit is being referred BECAUSE of what it found — a WHO
+  // class III/IV heart, severe renal disease, uncontrolled diabetes, a teratogenic medicine she must
+  // not simply stop. The receiving unit needs the finding and the dose she is already on, or it starts
+  // the assessment again from nothing and she is the one who pays for that in time.
+  const pc0=(C.pcc||[])[0]||null;
+  const pccBlock = pc0 ? `<div class="rec-b"><h5>Her preconception assessment <span class="muted" style="font-weight:400">(${esc(String(pc0.contact_date||'').slice(0,10))})</span></h5>
+      <div class="rec-g">
+        ${lrow('Plans pregnancy', {within_3m:'Within 3 months',within_1y:'Within a year',no:'No',unsure:'Unsure'}[pc0.plans_pregnancy]||'')}
+        ${lrow('Folic acid', pc0.folate_dose && pc0.folate_dose!=='none' ? (pc0.folate_dose+(pc0.folate_start_date?(' from '+String(pc0.folate_start_date).slice(0,10)):'')) : '')}
+        ${lrow('BMI', pc0.bmi)}
+        ${lrow('Blood pressure', (pc0.bp_systolic&&pc0.bp_diastolic)?(pc0.bp_systolic+'/'+pc0.bp_diastolic):'')}
+        ${lrow('Fasting glucose', pc0.dm_fbs)}${lrow('HbA1c', pc0.dm_hba1c)}
+        ${lrow('Creatinine', pc0.creatinine)}
+        ${lrow('WHO cardiac class', pc0.cardiac_who_class)}
+        ${lrow('Current medicines', pc0.current_medicines)}
+        ${lrow('Readiness', (window.PCC&&PCC.STATE_LABEL[pc0.readiness])||pc0.readiness||'')}
+      </div>
+      ${pc0.readiness_reasons?`<p style="font-size:13px;margin:6px 0 0"><b>Why:</b> <span class="${pc0.readiness==='defer'?'rec-alarm':''}">${esc(pc0.readiness_reasons)}</span></p>`:''}
+      ${pc0.cannot_assess?`<p style="font-size:13px;margin:2px 0 0"><b>Not assessed here:</b> ${esc(pc0.cannot_assess)}</p>`:''}
+    </div>` : '';
   app().innerHTML=nav()+`<div class="card rec letter">
     <div style="text-align:center;margin-bottom:10px">
       <h3 style="margin-bottom:2px">Referral letter</h3>
@@ -6338,6 +6412,7 @@ async function letterScreen(id){
       ${bbs.map(b=>fld('weight_g',b.weight_g)+fld('apgar_5min',b.apgar_5min)+fld('outcome',b.outcome)).join('')}
     </div></div>
     ${lcgBlock}
+    ${pccBlock}
     <div class="rec-b"><h5>What we gave her</h5><div class="rec-g">
       ${fld('td_dose_no', last('td_dose_no'))}${fld('ifa_tabs', last('ifa_tabs'))}
       ${fld('calcium_given', last('calcium_given'))}${fld('deworming', last('deworming'))}
@@ -6384,6 +6459,418 @@ async function bemoncScreen(id){
     } finally{ b.disabled=false; } };
 }
 
+// =================================================================================================
+// PRECONCEPTION CARE
+//
+// The guideline is fifteen components long. A flat form of seventy fields put in front of a midwife
+// with eight minutes gets abandoned half-filled, and a half-filled preconception assessment is worse
+// than none — it looks like care was given. So:
+//
+//   * TRIAGE FIRST. The reproductive life plan, height, weight, BP. Four answers, and they decide
+//     what the rest of the form is even for.
+//   * FIFTEEN SECTIONS, COLLAPSED, each showing its own one-line status. She opens what she needs.
+//   * PRE-FILLED FROM HER OWN RECORD. Her HIV status, her last haemoglobin, her Td doses, her height
+//     are already in this tool. Asking her again is not thoroughness, it is a tax on her time.
+//   * READINESS, NOT A SCORE. Three states with the reasons written out, and a fourth — INCOMPLETE —
+//     for when a test the guideline asks for was not run. A missing test never reads as a normal one.
+//
+// There is no model on this screen and that is deliberate: the guideline states its own thresholds,
+// and the outcomes it exists to prevent are too rare and too far downstream to learn from honestly.
+// =================================================================================================
+
+// The state pill. `incomplete` is amber, not green — it is a gap, and it has to look like one.
+function pccPill(state){
+  const c={ready:['#e8f5ee','#166534'],optimize:['#faeeda','#633806'],defer:['#fdecec','#a32d2d'],incomplete:['#eef1f0','#4a5754']}[state]||['#eef1f0','#4a5754'];
+  return `<span class="pill" style="background:${c[0]};color:${c[1]}">${esc((window.PCC&&PCC.STATE_LABEL[state])||state||'not assessed')}</span>`;
+}
+function pccLevelTag(owns){
+  return owns===0
+    ? '<span class="muted" style="font-size:11px">community &amp; above</span>'
+    : '<span class="muted" style="font-size:11px">primary &amp; above</span>';
+}
+// Read the whole form into the shape the server and the rules engine both expect.
+function pccDraft(){
+  const v=id=>{ const el=document.getElementById(id); return el?el.value:''; };
+  const n=id=>{ const x=v(id); return x===''?null:+x; };
+  const t=id=>tk(id);
+  const d={
+    plans_pregnancy:v('p_plan')||null, couple_counselled:t('p_couple'), partner_present:t('p_partner'),
+    parity:n('p_parity'), prior_apo:v('p_apo')||null,
+    fp_current_method:v('p_fpm')||null, fp_counselled:t('p_fpc'), birth_interval_ok:t('p_bi'),
+    infertility_screen:v('p_inf')||null, disability:v('p_dis')||null,
+    height_cm:n('p_ht'), weight_kg:n('p_wt'), hgb:n('p_hgb'),
+    diet_counselled:t('p_diet'), iodized_salt:t('p_iod'), dewormed:t('p_dew'),
+    folate_dose:v('p_fol')||null, folate_start_date:v('p_folst')||null, iron_supplied:t('p_iron'),
+    folate_adherence:v('p_folad')||null,
+    dm_known:t('p_dm'), dm_fbs:n('p_fbs'), dm_hba1c:n('p_a1c'),
+    htn_known:t('p_htn'), bp_systolic:n('p_sbp'), bp_diastolic:n('p_dbp'),
+    cardiac_symptoms:v('p_cardsx')||null, cardiac_who_class:v('p_who')||null,
+    ckd_known:t('p_ckd'), creatinine:n('p_creat'),
+    epilepsy:t('p_epi'), epilepsy_drug:v('p_epid')||null,
+    alcohol:v('p_alc')||null, khat:v('p_khat')||null, tobacco:v('p_tob')||null,
+    other_substance:v('p_oth')||null, coffee_cups:n('p_cof'),
+    activity_min_week:n('p_act'),
+    cxca_screened:v('p_cxca')||null, cxca_result:v('p_cxcar')||null, hpv_vaccinated:v('p_hpv')||null,
+    repro_anomaly:v('p_ranom')||null,
+    gbv_screened:t('p_gbvs'), gbv_positive:t('p_gbvp'), gbv_referred:t('p_gbvr'),
+    fgm:v('p_fgm')||null, fgm_counselled:t('p_fgmc'), sexual_dysfunction:t('p_sxd'),
+    hiv_status:v('p_hiv')||null, syphilis:v('p_syph')||null, hbsag:v('p_hbsag')||null,
+    tb_screen:v('p_tb')||null, malaria_risk:t('p_mal'), sti_history:v('p_sti')||null,
+    td_doses:n('p_td'), td_given_today:t('p_tdgiven'), hbv_vaccine_doses:n('p_hbv'),
+    consanguinity:t('p_cons'), family_hx_genetic:v('p_fhx')||null, prior_ntd:t('p_ntd'),
+    current_medicines:v('p_meds')||null, teratogenic_flag:t('p_tera'), teratogenic_named:v('p_teran')||null,
+    mh_depression:t('p_dep'), mh_anxiety:t('p_anx'), mh_known_illness:v('p_mhi')||null, mh_referred:t('p_mhr'),
+    exposure_pets:t('p_pets'), exposure_radiation:t('p_rad'), exposure_chemicals:t('p_chem'),
+    exposure_counselled:t('p_expc'),
+    dental_problem:t('p_dent'), dental_referred:t('p_dentr'),
+    referred_to:v('p_refto')||null, care_plan:v('p_plan_text')||null, next_visit:v('p_next')||null,
+    entry_point:v('p_entry')||'pcc', contact_date:v('p_date')||localDate(),
+  };
+  d.bmi = PCC.bmi(d.height_cm, d.weight_kg);
+  return d;
+}
+
+async function pccList(){
+  if(!canDo('clinical')&&!ADMIN()){ app().innerHTML=nav()+'<div class="card">Preconception care is a clinical record.</div>'; return; }
+  let rows=[]; try{ rows=await api('GET','pcc')||[]; }catch(e){}
+  const body = rows.length
+    ? `<table class="tbl"><thead><tr><th>Date</th><th>MRN</th><th>Name</th><th>Age</th><th>Folic acid</th><th>Readiness</th><th></th></tr></thead><tbody>
+       ${rows.map(r=>`<tr>
+         <td>${esc(String(r.contact_date||'').slice(0,10))}</td><td>${esc(r.mrn||'')}</td>
+         <td>${esc(((r.first_name||'')+' '+(r.father_name||'')).trim())}</td><td>${esc(r.age||'')}</td>
+         <td>${r.folate_dose&&r.folate_dose!=='none'?esc(r.folate_dose):'<span class="muted">&mdash;</span>'}</td>
+         <td>${pccPill(r.readiness)}</td>
+         <td><a class="sm" href="#pcc/${esc(r.woman_id)}">Open</a></td></tr>`).join('')}
+       </tbody></table>`
+    : `<p class="muted">No preconception assessments recorded yet.</p>`;
+  app().innerHTML=nav()+`<div class="card">
+    <h3>Preconception care</h3>
+    <p class="muted">Care given to a woman <b>before</b> she conceives. Start it from any woman&rsquo;s record &mdash; at family planning, at her postnatal visit, or after a pregnancy loss.</p>
+    <a class="act" href="#find">Find a woman</a>
+    <div style="margin-top:14px">${body}</div></div>`;
+}
+
+async function pccScreen(wid){
+  if(!wid){ location.hash='#pcclist'; return; }
+  const ro=!canDo('clinical');
+  let w=null; try{ w=await api('GET','women/'+wid); }catch(e){}
+  if(!w||!w.id){
+    app().innerHTML=nav()+`<div class="card"><h3>Record could not be loaded</h3>
+      <p class="muted">This woman could not be found &mdash; she may belong to another facility, or the connection failed. <b>Nothing has been changed.</b></p>
+      <a class="nav" href="#pcclist">&lsaquo; Preconception care</a></div>`;
+    return;
+  }
+  let prev=[]; try{ prev=await api('GET','pcc?woman='+wid)||[]; }catch(e){}
+  const last=prev[0]||null;                       // the API returns newest first
+
+  // ---- PRE-FILL FROM HER OWN RECORD ------------------------------------------------------------
+  // Everything below is already written down somewhere in this tool. Asking her again is not
+  // thoroughness — it is a tax on her time and a chance to record two different answers to the same
+  // question. Her last assessment wins; otherwise her chart; otherwise blank.
+  let pre={};
+  try{
+    const CH=await api('GET','chart?woman='+wid);
+    const anc=(CH&&CH.anc_visits)||[];
+    const lastOf=(rows,col)=>{ for(let i=rows.length-1;i>=0;i--){ const v=rows[i][col]; if(v!==null&&v!==undefined&&v!=='') return v; } return null; };
+    const hiv=lastOf(anc,'hiv_test_result'), syp=lastOf(anc,'syphilis_result'), hbv=lastOf(anc,'hepb_result');
+    pre = {
+      height_cm: w.height_cm||null,
+      hgb: lastOf(anc,'hgb'),
+      td_doses: lastOf(anc,'td_dose_no'),
+      hiv_status: (w.hiv_known_positive==1) ? 'positive' : (hiv==='R'||hiv==='positive' ? 'positive' : (hiv==='NR'||hiv==='negative' ? 'negative' : null)),
+      syphilis: (syp==='R'||syp==='positive') ? 'positive' : ((syp==='NR'||syp==='negative') ? 'negative' : null),
+      hbsag: (hbv==='R'||hbv==='positive') ? 'positive' : ((hbv==='NR'||hbv==='negative') ? 'negative' : null),
+      parity: w.para,
+      htn_known: w.chronic_htn==1?1:null, dm_known: w.diabetes==1?1:null,
+      ckd_known: w.cardiac_renal==1?1:null,
+    };
+  }catch(e){}
+  const g=(k)=> (last&&last[k]!==null&&last[k]!==undefined&&last[k]!=='') ? last[k] : (pre[k]!==undefined&&pre[k]!==null?pre[k]:'');
+  const opt=(k,vals)=> vals.map(([v,l])=>`<option value="${v}"${String(g(k))===v?' selected':''}>${l}</option>`).join('');
+  // tick() renders an UNCHECKED box, so a pre-filled boolean has to be restored after the markup is
+  // in the DOM (fillTicks, the same helper the ANC/PNC corrections use). Without this every checkbox
+  // she ticked last time would come back empty and be silently re-saved as "no".
+  const TICKMAP={p_couple:'couple_counselled',p_partner:'partner_present',p_fpc:'fp_counselled',p_bi:'birth_interval_ok',
+    p_diet:'diet_counselled',p_iod:'iodized_salt',p_dew:'dewormed',p_iron:'iron_supplied',
+    p_dm:'dm_known',p_htn:'htn_known',p_ckd:'ckd_known',p_epi:'epilepsy',
+    p_gbvs:'gbv_screened',p_gbvp:'gbv_positive',p_gbvr:'gbv_referred',p_fgmc:'fgm_counselled',p_sxd:'sexual_dysfunction',
+    p_mal:'malaria_risk',p_tdgiven:'td_given_today',p_cons:'consanguinity',p_ntd:'prior_ntd',
+    p_tera:'teratogenic_flag',p_dep:'mh_depression',p_anx:'mh_anxiety',p_mhr:'mh_referred',
+    p_pets:'exposure_pets',p_rad:'exposure_radiation',p_chem:'exposure_chemicals',p_expc:'exposure_counselled',
+    p_dent:'dental_problem',p_dentr:'dental_referred'};
+
+  const C=window.PCC.COMPONENTS;
+  const sec=(key,inner)=>{ const c=C.find(x=>x.key===key);
+    return `<details class="pccsec" id="sec_${key}"><summary><b>${c.n}. ${esc(c.label)}</b> ${pccLevelTag(c.owns)}<span class="pccstat" id="st_${key}"></span></summary>
+      <div class="muted" style="font-size:12px;margin:2px 0 8px">${esc(c.assess)}</div>
+      <div class="grid">${inner}</div>${c.note?`<div class="muted" style="font-size:12px;margin-top:6px">${esc(c.note)}</div>`:''}</details>`; };
+
+  app().innerHTML=nav()+`<div class="card">
+    <h3>Preconception care &mdash; ${esc(((w.first_name||'')+' '+(w.father_name||'')).trim())}</h3>
+    <p class="muted">MRN ${esc(w.mrn||'')}${w.age?' &middot; '+esc(w.age):''}${prev.length?(' &middot; '+prev.length+' previous assessment'+(prev.length>1?'s':'')):''}</p>
+    ${ro?'<p class="muted"><b>VIEW ONLY</b> with your role.</p>':''}
+
+    <div class="grid">
+      <label>Date of contact<input id="p_date" type="date" value="${esc(localDate())}"></label>
+      <label>Where she was seen<select id="p_entry">${opt('entry_point',[['pcc','Preconception clinic / visit'],['fp','Family planning'],['pnc','Postnatal care'],['post_abortion','Post-abortion care'],['ayh','Adolescent &amp; youth'],['anc','Antenatal (asked about before)'],['other','Other']])}</select></label>
+    </div>
+
+    <div class="pcctriage">
+      <h4 style="margin:12px 0 6px;font-size:14px">Reproductive life plan</h4>
+      <div class="grid">
+        <label>Does she plan to become pregnant?<select id="p_plan">${opt('plans_pregnancy',[['','&mdash;'],['within_3m','Yes &mdash; within 3 months'],['within_1y','Yes &mdash; within a year'],['no','No'],['unsure','Unsure']])}</select></label>
+        <label>Parity<input id="p_parity" type="number" min="0" max="20" value="${esc(g('parity'))}"></label>
+        <label>Height (cm)<input id="p_ht" type="number" step="0.1" value="${esc(g('height_cm'))}"></label>
+        <label>Weight (kg)<input id="p_wt" type="number" step="0.1" value="${esc(g('weight_kg'))}"></label>
+        <label>Systolic BP<input id="p_sbp" type="number" value="${esc(g('bp_systolic'))}"></label>
+        <label>Diastolic BP<input id="p_dbp" type="number" value="${esc(g('bp_diastolic'))}"></label>
+        <label style="grid-column:1/-1">Previous adverse pregnancy outcome <span class="muted" style="font-weight:400">(neural tube defect, stillbirth, abortion, preterm, low birth weight, unintended)</span><input id="p_apo" value="${esc(g('prior_apo'))}" placeholder="none, or what happened"></label>
+      </div>
+      <div style="margin-top:6px">${tick('p_couple','Counselled together with her partner')} ${tick('p_partner','Partner present today')}</div>
+      <div id="p_bmi" class="muted" style="font-size:12px;margin-top:6px"></div>
+    </div>
+
+    <div id="pccready" style="margin:12px 0"></div>
+
+    ${sec('fp',`
+      <label>Current method<input id="p_fpm" value="${esc(g('fp_current_method'))}" placeholder="none / injectable / implant&hellip;"></label>
+      <label>Infertility<select id="p_inf">${opt('infertility_screen',[['','&mdash;'],['no','No'],['suspected','Suspected'],['known','Known']])}</select></label>
+      <label style="grid-column:1/-1">Disability / special need<input id="p_dis" value="${esc(g('disability'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_fpc','Counselled on contraception')} ${tick('p_bi','Birth interval of at least 24 months discussed')}</div>`)}
+
+    ${sec('nutrition',`
+      <label>Haemoglobin (g/dL)<input id="p_hgb" type="number" step="0.1" value="${esc(g('hgb'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_diet','Counselled on diet &amp; healthy weight')} ${tick('p_iod','Counselled on iodised salt')} ${tick('p_dew','Dewormed')}</div>`)}
+
+    ${sec('folate',`
+      <label>Folic acid dose<select id="p_fol">${opt('folate_dose',[['','&mdash;'],['none','Not started'],['0.4mg','0.4 mg (routine)'],['5mg','5 mg (high dose)']])}</select></label>
+      <label>Started on<input id="p_folst" type="date" value="${esc(String(g('folate_start_date')||'').slice(0,10))}"></label>
+      <label>Adherence<select id="p_folad">${opt('folate_adherence',[['','&mdash;'],['good','Good'],['partial','Partial'],['poor','Poor'],['na','Not applicable']])}</select></label>
+      <div style="grid-column:1/-1">${tick('p_iron','Iron supplied (30-60 mg elemental daily)')}</div>
+      <div id="p_folwhy" class="muted" style="font-size:12px;grid-column:1/-1"></div>`)}
+
+    ${sec('chronic',`
+      <div style="grid-column:1/-1">${tick('p_dm','Known diabetes')} ${tick('p_htn','Known hypertension')} ${tick('p_ckd','Known kidney disease')} ${tick('p_epi','Epilepsy')}</div>
+      <label>Fasting glucose (mg/dL)<input id="p_fbs" type="number" value="${esc(g('dm_fbs'))}"></label>
+      <label>HbA1c (%)<input id="p_a1c" type="number" step="0.1" value="${esc(g('dm_hba1c'))}"></label>
+      <label>Creatinine (mg/dL)<input id="p_creat" type="number" step="0.01" value="${esc(g('creatinine'))}"></label>
+      <label>WHO cardiac risk class<select id="p_who">${opt('cardiac_who_class',[['','&mdash;'],['I','I'],['II','II'],['II-III','II-III'],['III','III'],['IV','IV'],['unknown','Not assessed']])}</select></label>
+      <label style="grid-column:1/-1">Cardiac symptoms<input id="p_cardsx" value="${esc(g('cardiac_symptoms'))}" placeholder="breathlessness, orthopnoea, palpitations, chest pain&hellip;"></label>
+      <label style="grid-column:1/-1">Anti-epileptic drug<input id="p_epid" value="${esc(g('epilepsy_drug'))}" placeholder="name and dose"></label>`)}
+
+    ${sec('substance',`
+      <label>Alcohol<select id="p_alc">${opt('alcohol',[['','&mdash;'],['none','None'],['occasional','Occasional'],['frequent','Frequent']])}</select></label>
+      <label>Khat<select id="p_khat">${opt('khat',[['','&mdash;'],['none','None'],['occasional','Occasional'],['frequent','Frequent']])}</select></label>
+      <label>Tobacco<select id="p_tob">${opt('tobacco',[['','&mdash;'],['none','None'],['occasional','Occasional'],['frequent','Frequent']])}</select></label>
+      <label>Coffee (cups/day)<input id="p_cof" type="number" value="${esc(g('coffee_cups'))}"></label>
+      <label style="grid-column:1/-1">Other substances<input id="p_oth" value="${esc(g('other_substance'))}"></label>`)}
+
+    ${sec('activity',`<label>Moderate activity (minutes per week)<input id="p_act" type="number" value="${esc(g('activity_min_week'))}"></label>`)}
+
+    ${sec('cxca',`
+      <label>Cervical screening<select id="p_cxca">${opt('cxca_screened',[['','&mdash;'],['yes','Done'],['no','Never'],['due','Due'],['unknown','Unknown']])}</select></label>
+      <label>Result<input id="p_cxcar" value="${esc(g('cxca_result'))}"></label>
+      <label>HPV vaccine<select id="p_hpv">${opt('hpv_vaccinated',[['','&mdash;'],['yes','Yes'],['no','No'],['unknown','Unknown']])}</select></label>
+      <label>Reproductive organ anomaly<input id="p_ranom" value="${esc(g('repro_anomaly'))}"></label>`)}
+
+    ${sec('gbv',`
+      <label>FGM<select id="p_fgm">${opt('fgm',[['','&mdash;'],['none','No'],['yes','Yes'],['unknown','Unknown']])}</select></label>
+      <div style="grid-column:1/-1">${tick('p_gbvs','Asked about violence, in private')} ${tick('p_gbvp','She discloses violence')} ${tick('p_gbvr','Referred to the GBV pathway')}</div>
+      <div style="grid-column:1/-1">${tick('p_fgmc','Counselled on FGM and its consequences')} ${tick('p_sxd','Sexual dysfunction discussed')}</div>`)}
+
+    ${sec('infection',`
+      <label>HIV<select id="p_hiv">${opt('hiv_status',[['','&mdash;'],['negative','Negative'],['positive','Positive'],['unknown','Not known'],['declined','Declined']])}</select></label>
+      <label>Syphilis<select id="p_syph">${opt('syphilis',[['','&mdash;'],['negative','Non-reactive'],['positive','Reactive'],['not_done','Not done']])}</select></label>
+      <label>HBsAg<select id="p_hbsag">${opt('hbsag',[['','&mdash;'],['negative','Negative'],['positive','Positive'],['not_done','Not done']])}</select></label>
+      <label>TB screen<select id="p_tb">${opt('tb_screen',[['','&mdash;'],['negative','No symptoms'],['presumptive','Presumptive TB'],['on_treatment','On treatment'],['not_done','Not done']])}</select></label>
+      <label style="grid-column:1/-1">STI history<input id="p_sti" value="${esc(g('sti_history'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_mal','Lives in a malarious area')}</div>`)}
+
+    ${sec('vaccine',`
+      <label>Td doses received<input id="p_td" type="number" min="0" max="5" value="${esc(g('td_doses'))}"></label>
+      <label>Hepatitis B vaccine doses<input id="p_hbv" type="number" min="0" max="3" value="${esc(g('hbv_vaccine_doses'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_tdgiven','Td given today')}</div>`)}
+
+    ${sec('genetic',`
+      <label style="grid-column:1/-1">Family history (three generations, both parents-to-be)<input id="p_fhx" value="${esc(g('family_hx_genetic'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_cons','Consanguineous union')} ${tick('p_ntd','Previous neural tube defect')}</div>`)}
+
+    ${sec('medicines',`
+      <label style="grid-column:1/-1">Current medicines <span class="muted" style="font-weight:400">(prescribed, over-the-counter, herbal, weight-loss)</span><input id="p_meds" value="${esc(g('current_medicines'))}"></label>
+      <label style="grid-column:1/-1">Flagged for review<input id="p_teran" value="${esc(g('teratogenic_named'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_tera','Referred for medication review before conception')}</div>
+      <div id="p_medwhy" class="muted" style="font-size:12px;grid-column:1/-1"></div>`)}
+
+    ${sec('mental',`
+      <label style="grid-column:1/-1">Known mental illness<input id="p_mhi" value="${esc(g('mh_known_illness'))}"></label>
+      <div style="grid-column:1/-1">${tick('p_dep','Screens positive for depression')} ${tick('p_anx','Screens positive for anxiety')} ${tick('p_mhr','Referred')}</div>`)}
+
+    ${sec('environment',`
+      <div style="grid-column:1/-1">${tick('p_pets','Contact with pets / animals')} ${tick('p_rad','X-ray or radiation exposure')} ${tick('p_chem','Heavy metals or workplace chemicals')} ${tick('p_expc','Counselled on reducing exposure')}</div>`)}
+
+    ${sec('dental',`
+      <div style="grid-column:1/-1">${tick('p_dent','Bleeding gums, pain on chewing or loose teeth')} ${tick('p_dentr','Referred for dental care')}</div>`)}
+
+    <div class="grid" style="margin-top:12px">
+      <label style="grid-column:1/-1">Referred to<input id="p_refto" value="${esc(g('referred_to'))}"></label>
+      <label style="grid-column:1/-1">Plan agreed with her<textarea id="p_plan_text" rows="2">${esc(g('care_plan'))}</textarea></label>
+      <label>Next visit<input id="p_next" type="date" value="${esc(String(g('next_visit')||'').slice(0,10))}"></label>
+    </div>
+
+    ${ro?'':'<button class="act" id="p_save" style="margin-top:12px">Save the assessment</button>'}
+    <button class="sm" id="p_print" style="margin-top:12px">Print the care plan</button>
+    <span class="muted" id="p_msg"></span>
+    <div style="margin-top:8px"><a class="nav" href="#pcclist">&lsaquo; Preconception care</a></div>
+  </div>
+  ${prev.length?`<div class="card"><h3>Previous assessments</h3>
+    <table class="tbl"><thead><tr><th>Date</th><th>Folic acid</th><th>Readiness</th><th>Why</th></tr></thead><tbody>
+    ${prev.map(p=>`<tr><td>${esc(String(p.contact_date||'').slice(0,10))}</td>
+      <td>${esc(p.folate_dose||'&mdash;')}</td><td>${pccPill(p.readiness)}</td>
+      <td class="muted" style="font-size:12px">${esc(p.readiness_reasons||'')}</td></tr>`).join('')}
+    </tbody></table></div>`:''}`;
+
+  // Restore the booleans from her last assessment / her chart before anything is computed from them.
+  const seed={}; Object.keys(TICKMAP).forEach(k=>{ seed[TICKMAP[k]] = g(TICKMAP[k]); });
+  fillTicks(seed, TICKMAP);
+
+  // ---- LIVE READINESS -----------------------------------------------------------------------
+  // Recomputed on every keystroke, from the same engine the record is saved with. What she is told
+  // and what is written down cannot diverge, because they are the same call.
+  const refresh=()=>{
+    const d=pccDraft();
+    const R=PCC.readiness(d);
+    const bmiEl=$('#p_bmi');
+    if(bmiEl) bmiEl.innerHTML = R.bmi ? `BMI <b>${R.bmi}</b> &mdash; ${esc(R.bmi_class)}` : 'BMI: enter height and weight';
+    const fw=$('#p_folwhy');
+    if(fw) fw.innerHTML = R.folate.high
+      ? `<b>5 mg</b> is indicated: ${esc(R.folate.reasons.join('; '))}. At least 3 months before conception.`
+      : 'Routine dose is 0.4 mg daily, with iron, for at least 3 months before conception.';
+    const mw=$('#p_medwhy');
+    const flagged=PCC.flagsMedicines($('#p_meds')?$('#p_meds').value:'');
+    if(mw) mw.innerHTML = flagged.length
+      ? `<b>Refer for review before conception:</b> ${esc(flagged.join(', '))}. Do not stop the medicine on this tool&rsquo;s advice.`
+      : '';
+    // section status lines
+    C.forEach(c=>{ const el=document.getElementById('st_'+c.key); if(!el) return;
+      el.innerHTML = PCC.componentDone(c.key,d) ? '<span class="pccok">recorded</span>' : ''; });
+    const comp=PCC.completeness(d);
+    const clock=PCC.folateClock(d.folate_start_date);
+    const box=$('#pccready'); if(!box) return;
+    const list=(arr,cls)=>arr.length?`<ul class="pccrs ${cls}">${arr.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'';
+    box.innerHTML=`<div class="pccready pccready-${R.state}">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${pccPill(R.state)}
+        <span class="muted" style="font-size:12px">${comp.done} of ${comp.total} components recorded</span>
+        ${clock?`<span class="muted" style="font-size:12px">&middot; folic acid started ${esc(clock.start)} &mdash; ${clock.complete?'<b>conception may be advised now</b>':('conception advised from <b>'+esc(clock.conception_from)+'</b> ('+clock.days_remaining+' days)')}</span>`:''}
+      </div>
+      ${list(R.defer,'pccdefer')}
+      ${list(R.optimize,'pccopt')}
+      ${R.cannot_assess.length?`<div class="pccgap"><b>Not assessed &mdash; this is not the same as normal:</b>${list(R.cannot_assess,'')}</div>`:''}
+      ${list(R.advise,'pccadv')}
+      ${R.contraception_indicated?`<div class="pccadv" style="font-size:13px;margin-top:6px"><b>Effective contraception until this is put right</b> &mdash; otherwise the advice is incomplete and she conceives anyway.</div>`:''}
+    </div>`;
+  };
+  ['input','change'].forEach(ev=>$('#app').addEventListener(ev,e=>{ if(e.target.closest('#app')) refresh(); }));
+  refresh();
+
+  if(!ro) $('#p_save').onclick=async()=>{
+    const b=$('#p_save'); if(b.disabled) return; b.disabled=true;
+    try{
+      const d=pccDraft();
+      const R=PCC.readiness(d);
+      d.woman_id=+wid;
+      d.readiness=R.state;
+      d.readiness_reasons=R.reasons.join(' | ')||null;
+      d.cannot_assess=R.cannot_assess.join('; ')||null;
+      const r=await api('POST','pcc',d);
+      if(r&&(r.id||r.queued)){
+        toast(r.queued?'Saved on this device — it will sync':'Preconception assessment saved','ok');
+        $('#p_msg').textContent=' saved';
+        // The folic-acid clock is the one date she leaves with. Set the recall against it.
+        if(d.folate_start_date && d.plans_pregnancy!=='no'){
+          const clk=PCC.folateClock(d.folate_start_date);
+          if(clk) api('POST','reminders',{woman_id:+wid,kind:'pcc_folate',due_date:clk.conception_from,
+            message:'Preconception folic acid — three months complete'}).catch(()=>{});
+        }
+        setTimeout(()=>{ pccScreen(wid); },600);            // re-render from the saved record
+      } else { $('#p_msg').textContent=' '+((r&&r.error)||'could not save'); }
+    } finally{ b.disabled=false; }
+  };
+  $('#p_print').onclick=()=>printPage();
+}
+
+// ---- PCC UPTAKE AT ANC (MoH Table 8) -----------------------------------------------------------
+// Asked of a woman who is ALREADY pregnant: what was done for you BEFORE you conceived? Fifteen
+// yes/no items, verified against her LMP or GA — the guideline is explicit that an unverified claim
+// is not evidence, so the tool records WHICH it was checked against.
+//
+// Three of the five national indicators come from this screen and from nowhere else.
+async function pccUptake(eid){
+  const ro=!canDo('clinical');
+  let e=null; try{ const one=await api('GET','episodes?ep='+eid); e=(Array.isArray(one)?one[0]:one)||null; }catch(err){}
+  if(!e){ app().innerHTML=nav()+'<div class="card"><h3>Record could not be loaded</h3><p class="muted">Nothing has been changed.</p><a class="nav" href="#home">&lsaquo; Home</a></div>'; return; }
+  let u=null; try{ u=await api('GET','pcc-uptake?episode='+eid); }catch(err){}
+  if(Array.isArray(u)) u=u[0]||null;
+  // If she has her OWN preconception record here, the checklist starts from it. She still confirms
+  // every line — this fills the form, it does not answer for her.
+  let own=null, pre=null;
+  try{ const a=await api('GET','pcc?woman='+e.woman_id); own=(a&&a[0])||null; }catch(err){}
+  if(!u && own) pre=PCC.uptakeFromAssessment(own);
+  const src=u||pre||{};
+  const ck=k=> (src[k]==1||src[k]==='1') ? ' checked' : '';
+
+  app().innerHTML=nav()+`<div class="card">
+    <h3>Preconception care uptake</h3>
+    <p class="muted">MRN ${esc(e.mrn||'')} &middot; ${esc(((e.first_name||'')+' '+(e.father_name||'')).trim())}</p>
+    <p class="muted">Ask her whether she received each of these <b>before she conceived this pregnancy</b>. Check what she says against her LMP or gestational age.</p>
+    ${pre&&!u?`<p style="background:#eef6f5;border:1px solid #0f766e;color:#0f5c55;border-radius:8px;padding:6px 10px;font-size:13px">Started from her own preconception record of ${esc(String(own.contact_date||'').slice(0,10))}. Confirm each line with her.</p>`:''}
+    ${ro?'<p class="muted"><b>VIEW ONLY</b> with your role.</p>':''}
+
+    <div class="grid" style="margin-bottom:8px">
+      <label>Verified against<select id="u_ver">
+        ${[['lmp','Her LMP'],['ga','Gestational age'],['not_verified','Could not verify']].map(([v,l])=>`<option value="${v}"${src.verified_against===v?' selected':''}>${l}</option>`).join('')}
+      </select></label>
+      <label>Date asked<input id="u_date" type="date" value="${esc(String(src.asked_date||localDate()).slice(0,10))}"></label>
+    </div>
+    <div>${tick('u_planned','This pregnancy was planned')}</div>
+    <div style="margin-top:10px">
+      ${window.PCC.UPTAKE_ITEMS.map(i=>`<label class="tick" style="display:block;padding:5px 0;border-bottom:1px solid var(--border)">
+        <input type="checkbox" id="u_${i.key}"${ck(i.key)}> <b>${i.n}.</b> ${esc(i.label)}</label>`).join('')}
+    </div>
+    <label style="margin-top:8px;display:block">Remark<input id="u_rem" value="${esc(src.remark||'')}"></label>
+
+    <div id="u_status" style="margin-top:12px"></div>
+    ${ro?'':'<button class="act" id="u_save" style="margin-top:10px">Save</button>'}
+    <span class="muted" id="u_msg"></span>
+    <div style="margin-top:8px"><a class="nav" href="#patient/${esc(eid)}">&lsaquo; Back to patient</a></div>
+  </div>`;
+
+  const read=()=>{ const o={}; window.PCC.UPTAKE_ITEMS.forEach(i=>{ o[i.key]=tk('u_'+i.key); }); return o; };
+  const refresh=()=>{
+    const o=read(); const st=PCC.uptakeStatus(o);
+    const yes=Object.keys(o).filter(k=>o[k]===1).length;
+    const cls={none:'defer',partial:'optimize',optimal:'ready'}[st];
+    $('#u_status').innerHTML=`<div class="pccready pccready-${cls}">
+      ${pccPill(st==='optimal'?'ready':(st==='partial'?'optimize':'defer'))}
+      <b style="margin-left:6px">${esc(PCC.UPTAKE_LABEL[st])}</b>
+      <span class="muted" style="font-size:12px"> &mdash; ${yes} of 15 components${st==='partial'?'; optimal needs folic acid plus at least one other':''}</span>
+    </div>`;
+  };
+  ['change'].forEach(ev=>$('#app').addEventListener(ev,refresh));
+  refresh();
+
+  if(!ro) $('#u_save').onclick=async()=>{
+    const b=$('#u_save'); if(b.disabled) return; b.disabled=true;
+    try{
+      const d=Object.assign({episode_id:+eid, asked_date:$('#u_date').value||localDate(),
+        verified_against:$('#u_ver').value, planned_pregnancy:tk('u_planned'), remark:$('#u_rem').value||null}, read());
+      const r=await api('POST','pcc-uptake',d);
+      if(r&&(r.id||r.queued)){ toast(r.queued?'Saved on this device — it will sync':'PCC uptake recorded','ok'); $('#u_msg').textContent=' saved'; }
+      else $('#u_msg').textContent=' '+((r&&r.error)||'could not save');
+    } finally{ b.disabled=false; }
+  };
+}
+
 async function facilityEdit(id){
   if(!SUPER()){ app().innerHTML=nav()+'<div class="card">Facilities are managed centrally &mdash; a super-admin action.</div>'; return; }
   const list=await api('GET','facilities').catch(()=>[]); const f=(list||[]).find(x=>x.id==id)||{};
@@ -6428,11 +6915,21 @@ async function patientHub(id){
   // any of them. Both had nowhere to go.
   const lossTile  = (cat==='anc'||cat==='abortion') ? tile('#abortion/'+id,'Pregnancy loss / abortion care') : '';
   const deathTile = (ME.role==='provider'||ADMIN()) ? tile('#death/'+id,'Record a maternal death') : '';
+  // PRECONCEPTION CARE — "every woman, every time".
+  // The guideline does not put PCC in a clinic of its own at this level; it puts it in the units the
+  // woman is already sitting in. The postnatal visit is the one it calls ideal (this pregnancy is the
+  // preparation for the next one), and after a pregnancy loss it is reproductive planning, which is
+  // the first thing on its list. So the tile appears on HER, wherever she is — it goes to her woman
+  // record, not to this episode, because preconception care outlives any one pregnancy.
+  const pccTile   = e.woman_id ? tile('#pcc/'+e.woman_id,'Preconception care') : '';
+  // The uptake checklist is a different question, asked only of a woman who is ALREADY pregnant, at
+  // ANC: what was done for you before you conceived? It is the source of the national indicators.
+  const uptakeTile= (cat==='anc') ? tile('#pccuptake/'+id,'PCC uptake (before this pregnancy)') : '';
   let tiles, fold='';
   if(ME.role==='observer') tiles=[tile('#report/'+id,'Full record')];   // read-only role: view the summary, no data-entry screens
-  else if(cat==='abortion') tiles=[tile('#abortion/'+id,'Pregnancy loss / abortion care'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),deathTile];
-  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pmTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),lossTile,deathTile];
-  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
+  else if(cat==='abortion') tiles=[tile('#abortion/'+id,'Pregnancy loss / abortion care'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),pccTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),deathTile];
+  else if(cat==='anc') tiles=[scrTile,tile('#ancvisit/'+id,'Follow-up visit'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),uptakeTile,pmTile,tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),tile('#editwoman/'+e.woman_id,'Edit details'),lossTile,deathTile];
+  else if(postnatal){ tiles=[tile('#pncvisit/'+id,'PNC follow-up'),tile('#baby/'+id,'Newborn'),tile('#vitals/'+id,'Vital signs'),tile('#danger/'+id,'Danger signs'),scrTile,pccTile,pmTile,tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
     if(isLab&&delivered){ const lab=[tile('#intrapartum/'+id,'Intrapartum care'),tile('#delivery/'+id,'Delivery'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover')];
       fold=`<details style="margin-top:10px;border:0.5px solid #e6eae8;border-radius:10px"><summary style="cursor:pointer;padding:10px 12px;font-size:13px;color:#334155">Labour &amp; delivery record <span class="muted">&mdash; for review</span></summary><div class="hubgrid" style="padding:0 12px 12px">${lab.join('')}</div></details>`; } }
   else tiles=[tile('#intrapartum/'+id,'Intrapartum care'),scrTile,tile('#vitals/'+id,'Vital signs'),tile('#checklist/'+id,'Safe-birth checklist'),tile('#danger/'+id,'Danger signs'),tile('#delivery/'+id,'Delivery'),tile('#baby/'+id,'Newborn'),pmTile,tile('#bemonc/'+id,'Emergency care (BEmONC)'),tile('#handover/'+id,'Handover'),tile('#editwoman/'+e.woman_id,'Obstetric details'),tile('#referral/'+id,'Refer'),tile('#letter/'+id,'Referral letter'),tile('#report/'+id,'Full record'),deathTile];
