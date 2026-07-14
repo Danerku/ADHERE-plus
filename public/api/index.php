@@ -644,6 +644,16 @@ try {
         if($tbl==='anc_risk_screening' && !empty($row['item_code'])){
           db()->prepare("DELETE FROM anc_risk_screening WHERE episode_id=? AND item_code=?")
               ->execute([$row['episode_id'],$row['item_code']]); }
+        // THE CHECKLIST AND BEmONC HAD THE SAME DEFECT and no unique key to stop it: every save
+        // appended a fresh set of rows, so a pause point recorded twice held two contradictory
+        // answers for the same item and the "checklists completed" count was inflated. Re-saving an
+        // item now CORRECTS it. (v26 adds the UNIQUE keys so the database enforces this too.)
+        if($tbl==='checklist_responses' && !empty($row['item_code'])){
+          db()->prepare("DELETE FROM checklist_responses WHERE episode_id=? AND pause_point=? AND item_code=?")
+              ->execute([$row['episode_id'],$row['pause_point']??'',$row['item_code']]); }
+        if($tbl==='bemonc_care' && !empty($row['item_code'])){
+          db()->prepare("DELETE FROM bemonc_care WHERE episode_id=? AND item_code=?")
+              ->execute([$row['episode_id'],$row['item_code']]); }
         $ids[]=insert($tbl,array_intersect_key($row,array_flip($allow))); }
 
       // ---- write person-level facts back onto the WOMAN, so they follow her ----
