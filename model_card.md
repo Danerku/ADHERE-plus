@@ -107,7 +107,50 @@ distinguishable from "normal" in the current feature space** — a known limitat
 the deterministic red-flag layer (which fires only on values that *were* measured) sits above the
 model and can only escalate it, never lower it.
 
-## Performance (held-out, v3.0)
+## v4.0 — rebuilt for the Labour Care Guide (July 2026)
+
+Ethiopia's endorsed Intrapartum Care Guideline replaced the partograph with the WHO Labour Care
+Guide, and that changes what the model is looking at:
+
+- **Active first stage now starts at 5 cm**, not 4. `hours_since_active` means something different.
+- **The alert line is gone.** Poor progress is no longer "behind a 1 cm/hour diagonal" but "she has
+  been at *this* centimetre longer than its lag time, with no progress" (5 cm ≥6 h, 6 cm ≥5 h,
+  7 cm ≥3 h, 8 cm ≥2.5 h, 9 cm ≥2 h).
+- **`cvx_rate` has been deleted.** It was `(cervix − 4) / hours` — anchored on a start that no longer
+  exists. Left in place it would have kept producing a number: plausible, and wrong. Its replacement
+  is what the guideline itself reasons about — `stall_h` (hours at the current dilatation) and
+  `lag_ratio` (that stall against the lag time allowed for it; ≥1 is the alert).
+- **New inputs the partograph never collected:** duration of contractions, deceleration *type* (late
+  is the one that matters), fetal position, caput, and graded meconium (M+/M++/M+++).
+- **Supportive care is deliberately NOT an input.** Companion, pain relief, oral fluid and posture are
+  alerts in the guideline and alerts in the tool — but feeding them to a model would let it learn
+  *documentation habits* (which wards write "companion: Y") and dress that up as physiological risk.
+
+| Model | Complete records | **Under realistic missingness (field)** | Brier (field) |
+|---|---|---|---|
+| Maternal `adhere-eth-lcg-4.0` | 0.808 | **0.778** (95% CI 0.772–0.785) | 0.132 |
+| Newborn `adhere-nb-lcg-4.0` | 0.757 | **0.718** (95% CI 0.691–0.744) | 0.110 |
+
+**These numbers are lower than v3.0's, and that is not a regression to explain away.** v3.0's 0.828
+described a model scoring a partograph-defined labour. This one scores an LCG-defined labour, on a
+harder and differently-labelled problem, with a cohort of 13,500 labours (128,000 assessments). The
+two figures are not comparable, and presenting the drop as a loss — or the earlier number as a gain —
+would be dishonest in both directions.
+
+**Subgroup AUROC (field):** nullipara 0.776, multipara 0.776, age <19 0.782, age 19–34 0.776,
+age ≥35 0.777, previous caesarean 0.769, no previous caesarean 0.778. Stable across subgroups.
+
+**The most important caveat.** `lag_ratio` carries 42% of the model's importance — which is to say
+the model has substantially learned the guideline's own dystocia rule. For obstructed labour it adds
+little to the alert column that a provider reading the guide would not already see. Where it earns
+its place is elsewhere: the pre-eclampsia cluster, sepsis, fetal distress and the interactions
+between them. This is a prioritisation aid layered on a guideline that stands on its own, and the
+alert column is never suppressed by it.
+
+**Known weakness:** the newborn model remains over-confident in its top bin (predicted 0.91 →
+observed 0.44). Use the band, not the number, at the extreme.
+
+## Performance (held-out, v3.0 — the partograph-era model, retained for the record)
 
 **Two numbers are reported, and the smaller one is the honest one.** The *complete-record* AUROC
 is what the model achieves when every feature was measured. The *field* AUROC is what it achieves

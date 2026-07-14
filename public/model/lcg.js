@@ -184,9 +184,31 @@
 
   function round1(n){ return Math.round(n*10)/10; }
 
+  // ---- What the RISK MODEL is given about progress ---------------------------------------------
+  // The model no longer receives `cvx_rate` — the (cervix - 4) / hours of the partograph era, which
+  // was anchored on a 4 cm start that the guideline has abolished. It receives what the guideline
+  // itself reasons about: how long she has stood still at THIS centimetre, and how that compares
+  // with the lag time allowed for it. lag_ratio >= 1 is the alert.
+  function stallInfo(series, now){
+    const withCvx=(series||[]).filter(o=>o.cervix_cm!=null && o.cervix_cm!=='');
+    if(!withCvx.length) return {cm:null, stall_h:null, lag_ratio:null};
+    const last=withCvx[withCvx.length-1];
+    const cm=Math.floor(+last.cervix_cm);
+    let since=last.obs_datetime;
+    for(let i=withCvx.length-1;i>=0;i--){
+      if(Math.floor(+withCvx[i].cervix_cm) < cm) break;
+      since=withCvx[i].obs_datetime;
+    }
+    const t0=new Date(String(since).replace(' ','T'));
+    const t1=new Date(String(now||last.obs_datetime).replace(' ','T'));
+    const stall=Math.max(0,(t1-t0)/3600000);
+    const limit=LAG_HOURS[cm];
+    return { cm:cm, stall_h:round1(stall), lag_ratio: limit ? Math.round((stall/limit)*100)/100 : null };
+  }
+
   global.LCG = {
     LAG_HOURS, SECOND_STAGE_HOURS, RULES, SCHEDULE,
-    alertsFor, cellAlerts, cervixStall, secondStageStall, dueNow,
+    alertsFor, cellAlerts, cervixStall, secondStageStall, dueNow, stallInfo,
     lagLimit: cm => LAG_HOURS[Math.floor(+cm)] || null,
   };
 })(window);
