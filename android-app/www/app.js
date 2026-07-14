@@ -2636,7 +2636,7 @@ async function overviewSection(){
       ${ovStat(pc.folate_started||0,'On folic acid',(pc.folate_high||0)+' on 5 mg')}
       ${ovStat(pc.defer||0,'Defer &mdash; refer','pregnancy not advised yet')}
       ${ovStat(pc.optimize||0,'Optimise first')}
-      ${ovStat(pc.incomplete||0,'Could not complete','a test was not available')}
+      ${ovStat(pc.gaps||0,'Could not complete','a test was not available')}
       ${ovStat(pc.couple_counselled||0,'Couple counselled')}
     </div>
     <h4 style="margin-top:12px">What women arriving at ANC received <span class="muted" style="font-weight:400;font-size:12px">&mdash; before they conceived</span></h4>
@@ -6555,6 +6555,13 @@ async function pccList(){
 
 async function pccScreen(wid){
   if(!wid){ location.hash='#pcclist'; return; }
+  // A preconception assessment carries her HIV status, whether she has disclosed violence, and whether
+  // she has been cut. An observer or a records clerk has no business reading it, and typing the hash
+  // by hand was enough to render the whole form. The save path was blocked; the DISCLOSURE was not.
+  if(!canDo('clinical') && !ADMIN()){
+    app().innerHTML=nav()+'<div class="card"><h3>Preconception care</h3><p class="muted">This is a clinical record. It is not available with your role.</p><a class="nav" href="#home">&lsaquo; Home</a></div>';
+    return;
+  }
   const ro=!canDo('clinical');
   let w=null; try{ w=await api('GET','women/'+wid); }catch(e){}
   if(!w||!w.id){
@@ -6564,7 +6571,11 @@ async function pccScreen(wid){
     return;
   }
   let prev=[]; try{ prev=await api('GET','pcc?woman='+wid)||[]; }catch(e){}
-  const last=prev[0]||null;                       // the API returns newest first
+  // Sorted HERE, not trusted from the server. Three screens depend on "the most recent assessment"
+  // (this pre-fill, the referral letter, the ANC uptake pre-tick); if an ORDER BY were ever dropped
+  // they would all silently start using her OLDEST record, and nothing on screen would look wrong.
+  prev=(prev||[]).slice().sort((a,b)=>String(b.contact_date||'').localeCompare(String(a.contact_date||'')) || (b.id-a.id));
+  const last=prev[0]||null;
 
   // ---- PRE-FILL FROM HER OWN RECORD ------------------------------------------------------------
   // Everything below is already written down somewhere in this tool. Asking her again is not
@@ -6588,8 +6599,32 @@ async function pccScreen(wid){
       ckd_known: w.cardiac_renal==1?1:null,
     };
   }catch(e){}
-  const g=(k)=> (last&&last[k]!==null&&last[k]!==undefined&&last[k]!=='') ? last[k] : (pre[k]!==undefined&&pre[k]!==null?pre[k]:'');
+  // ---- WHAT MAY BE CARRIED FORWARD, AND WHAT MAY NOT --------------------------------------------
+  // A MEASUREMENT IS NOT A FACT ABOUT HER, IT IS A FACT ABOUT A DAY.
+  //
+  // Pre-filling everything from her last assessment meant a follow-up contact where the provider
+  // updated only the weight was saved, dated today, carrying last visit's blood pressure, HbA1c,
+  // creatinine and haemoglobin as if they had been measured today — and the readiness verdict was
+  // computed from them. Her height does not change between visits. Her blood pressure does.
+  //
+  // So: durable facts pre-fill. Point-in-time measurements start EMPTY, and the last recorded value
+  // is shown beside the form as history, where it informs without pretending to be today's finding.
+  const VOLATILE = ['weight_kg','bmi','bp_systolic','bp_diastolic','hgb','dm_fbs','dm_hba1c',
+                    'creatinine','activity_min_week','coffee_cups','folate_adherence'];
+  const g=(k)=>{
+    if(VOLATILE.indexOf(k) >= 0) return '';                    // measured today, or not at all
+    if(last && last[k]!==null && last[k]!==undefined && last[k]!=='') return last[k];
+    return (pre[k]!==undefined && pre[k]!==null) ? pre[k] : '';
+  };
   const opt=(k,vals)=> vals.map(([v,l])=>`<option value="${v}"${String(g(k))===v?' selected':''}>${l}</option>`).join('');
+  // The history line: what was last measured, and when. Shown, never silently reused.
+  const lastSeen = last ? VOLATILE
+      .filter(k=>last[k]!==null && last[k]!==undefined && last[k]!=='')
+      .map(k=>({bp_systolic:'BP (sys)',bp_diastolic:'BP (dia)',weight_kg:'Weight',bmi:'BMI',hgb:'Hb',
+                dm_fbs:'Fasting glucose',dm_hba1c:'HbA1c',creatinine:'Creatinine',
+                activity_min_week:'Activity (min/wk)',coffee_cups:'Coffee (cups/day)',
+                folate_adherence:'Folate adherence'}[k]+' '+last[k]))
+      .join(' &middot; ') : '';
   // tick() renders an UNCHECKED box, so a pre-filled boolean has to be restored after the markup is
   // in the DOM (fillTicks, the same helper the ANC/PNC corrections use). Without this every checkbox
   // she ticked last time would come back empty and be silently re-saved as "no".
@@ -6607,16 +6642,20 @@ async function pccScreen(wid){
   // components are recorded only with checkboxes, and an unticked box reads 0 — indistinguishable
   // from a question never asked. Without this mark the tool cannot tell "she has no diabetes" from
   // "nobody asked her", and it was reporting the second as the first.
+  // "Asked and reviewed" ALWAYS STARTS UNTICKED. It is never carried forward from her last visit.
+  // Her clinical answers can be pre-filled — her height does not change — but the assertion "I went
+  // through this component WITH HER TODAY" is about today, and it can only be made today. Carrying it
+  // forward meant a follow-up form opened claiming 15 of 15 components already delivered, and a save
+  // recorded a full preconception assessment in which nothing had been asked.
   const sec=(key,inner)=>{ const c=C.find(x=>x.key===key);
-    const rev=String((last&&last.sections_reviewed)||'').split(',').indexOf(key)>=0;
     return `<details class="pccsec" id="sec_${key}"><summary><b>${c.n}. ${esc(c.label)}</b> ${pccLevelTag(c.owns)}<span class="pccstat" id="st_${key}"></span></summary>
       <div class="muted" style="font-size:12px;margin:2px 0 8px">${esc(c.assess)}</div>
       <div class="grid">${inner}</div>${c.note?`<div class="muted" style="font-size:12px;margin-top:6px">${esc(c.note)}</div>`:''}
-      <label class="tick" style="margin-top:8px"><input type="checkbox" id="rev_${key}"${rev?' checked':''}> Asked and reviewed with her <span class="muted" style="font-weight:400">&mdash; tick this even when there is nothing to report</span></label>
+      <label class="tick" style="margin-top:8px"><input type="checkbox" id="rev_${key}"> Asked and reviewed with her today <span class="muted" style="font-weight:400">&mdash; tick this even when there is nothing to report</span></label>
       </details>`; };
 
   const wname=((w.first_name||'')+' '+(w.father_name||'')).trim();
-  app().innerHTML=nav()+`<div class="card">
+  app().innerHTML=nav()+`<div class="card" id="pcccard">
     <h3>Preconception care${wname?(' &mdash; '+esc(wname)):''}</h3>
     <p class="muted">MRN ${esc(w.mrn||'')}${w.age?' &middot; '+esc(w.age):''}${prev.length?(' &middot; '+prev.length+' previous assessment'+(prev.length>1?'s':'')):''}</p>
     ${ro?'<p class="muted"><b>VIEW ONLY</b> with your role.</p>':''}
@@ -6639,6 +6678,7 @@ async function pccScreen(wid){
       </div>
       <div style="margin-top:6px">${tick('p_couple','Counselled together with her partner')} ${tick('p_partner','Partner present today')}</div>
       <div id="p_bmi" class="muted" style="font-size:12px;margin-top:6px"></div>
+      ${lastSeen?`<div class="muted" style="font-size:12px;margin-top:4px">At her last assessment (${esc(String(last.contact_date||'').slice(0,10))}): ${lastSeen}. <b>Measure again today</b> &mdash; these are not carried forward.</div>`:''}
     </div>
 
     <div id="pccready" style="margin:12px 0"></div>
@@ -6781,7 +6821,15 @@ async function pccScreen(wid){
       ${R.contraception_indicated?`<div class="pccadv" style="font-size:13px;margin-top:6px"><b>Effective contraception until this is put right</b> &mdash; otherwise the advice is incomplete and she conceives anyway.</div>`:''}
     </div>`;
   };
-  ['input','change'].forEach(ev=>$('#app').addEventListener(ev,e=>{ if(e.target.closest('#app')) refresh(); }));
+  // BIND TO THE CARD, NOT TO #app.
+  //
+  // #app is a PERSISTENT node — screens replace its innerHTML, they do not replace the node. A listener
+  // added to it survives every navigation and is never removed: each visit to this screen added two
+  // more, so after n saves every keystroke re-ran the whole rules engine 2n times, and the uptake
+  // screen's leaked handler went on firing on every change event ANYWHERE in the app, throwing on a
+  // #u_status that no longer existed. Binding to the card means the listener dies with the markup.
+  const card=$('#pcccard');
+  if(card) ['input','change'].forEach(ev=>card.addEventListener(ev, refresh));
   refresh();
 
   if(!ro) $('#p_save').onclick=async()=>{
@@ -6792,6 +6840,9 @@ async function pccScreen(wid){
       d.woman_id=+wid;
       d.readiness=R.state;
       d.readiness_reasons=R.reasons.join(' | ')||null;
+      // The gap is stored whether or not it drove the state. `optimize` outranks `incomplete`, so a
+      // woman with an untested HBsAg AND a raised BMI is filed as `optimize` — and the facility's
+      // laboratory gap would have vanished from the count if it were only ever read off the state.
       d.cannot_assess=R.cannot_assess.join('; ')||null;
       const r=await api('POST','pcc',d);
       if(r&&(r.id||r.queued)){
@@ -6807,7 +6858,16 @@ async function pccScreen(wid){
       } else { $('#p_msg').textContent=' '+((r&&r.error)||'could not save'); }
     } finally{ b.disabled=false; }
   };
-  $('#p_print').onclick=()=>printPage();
+  // A COLLAPSED <details> PRINTS NOTHING. The care plan she was going to be handed was fifteen bold
+  // headings with empty space under each one — the sections are collapsed by design on screen, and
+  // browsers do not open them for the printer. Open them all, print, then put them back as they were.
+  $('#p_print').onclick=()=>{
+    const secs=[...document.querySelectorAll('details.pccsec')];
+    const was=secs.map(d=>d.open);
+    secs.forEach(d=>d.open=true);
+    printPage();
+    setTimeout(()=>secs.forEach((d,i)=>d.open=was[i]), 800);
+  };
 }
 
 // ---- PCC UPTAKE AT ANC (MoH Table 8) -----------------------------------------------------------
@@ -6817,6 +6877,10 @@ async function pccScreen(wid){
 //
 // Three of the five national indicators come from this screen and from nowhere else.
 async function pccUptake(eid){
+  if(!canDo('clinical') && !ADMIN()){
+    app().innerHTML=nav()+'<div class="card"><h3>Preconception care uptake</h3><p class="muted">This is a clinical record. It is not available with your role.</p><a class="nav" href="#home">&lsaquo; Home</a></div>';
+    return;
+  }
   const ro=!canDo('clinical');
   let e=null; try{ const one=await api('GET','episodes?ep='+eid); e=(Array.isArray(one)?one[0]:one)||null; }catch(err){}
   if(!e){ app().innerHTML=nav()+'<div class="card"><h3>Record could not be loaded</h3><p class="muted">Nothing has been changed.</p><a class="nav" href="#home">&lsaquo; Home</a></div>'; return; }
@@ -6825,12 +6889,14 @@ async function pccUptake(eid){
   // If she has her OWN preconception record here, the checklist starts from it. She still confirms
   // every line — this fills the form, it does not answer for her.
   let own=null, pre=null;
-  try{ const a=await api('GET','pcc?woman='+e.woman_id); own=(a&&a[0])||null; }catch(err){}
+  try{ const a=await api('GET','pcc?woman='+e.woman_id);
+       const rows=(a||[]).slice().sort((x,y)=>String(y.contact_date||'').localeCompare(String(x.contact_date||'')) || (y.id-x.id));
+       own=rows[0]||null; }catch(err){}
   if(!u && own) pre=PCC.uptakeFromAssessment(own);
   const src=u||pre||{};
   const ck=k=> (src[k]==1||src[k]==='1') ? ' checked' : '';
 
-  app().innerHTML=nav()+`<div class="card">
+  app().innerHTML=nav()+`<div class="card" id="pccucard">
     <h3>Preconception care uptake</h3>
     <p class="muted">MRN ${esc(e.mrn||'')} &middot; ${esc(((e.first_name||'')+' '+(e.father_name||'')).trim())}</p>
     <p class="muted">Ask her whether she received each of these <b>before she conceived this pregnancy</b>. Check what she says against her LMP or gestational age.</p>
@@ -6838,8 +6904,12 @@ async function pccUptake(eid){
     ${ro?'<p class="muted"><b>VIEW ONLY</b> with your role.</p>':''}
 
     <div class="grid" style="margin-bottom:8px">
+      <!-- "Could not verify" IS THE DEFAULT, and it must be. The select had "Her LMP" first, so a form
+           nobody touched saved verified_against='lmp' — the record then claimed a verification against
+           her last menstrual period that no one had performed, and the guideline is explicit that an
+           unverified claim is not evidence. The tool does not get to assert a check it did not make. -->
       <label>Verified against<select id="u_ver">
-        ${[['lmp','Her LMP'],['ga','Gestational age'],['not_verified','Could not verify']].map(([v,l])=>`<option value="${v}"${src.verified_against===v?' selected':''}>${l}</option>`).join('')}
+        ${[['not_verified','Not verified'],['lmp','Checked against her LMP'],['ga','Checked against gestational age']].map(([v,l])=>`<option value="${v}"${(src.verified_against||'not_verified')===v?' selected':''}>${l}</option>`).join('')}
       </select></label>
       <label>Date asked<input id="u_date" type="date" value="${esc(String(src.asked_date||localDate()).slice(0,10))}"></label>
     </div>
@@ -6856,27 +6926,41 @@ async function pccUptake(eid){
     <div style="margin-top:8px"><a class="nav" href="#patient/${esc(eid)}">&lsaquo; Back to patient</a></div>
   </div>`;
 
+  // "This pregnancy was planned" is a checkbox, and tick() renders it UNCHECKED. Without this restore,
+  // reopening an existing uptake record and pressing Save silently rewrote planned_pregnancy to 0 —
+  // and that field IS one of the five national indicators (Table 7, indicator 2).
+  fillTicks(src, {u_planned:'planned_pregnancy'});
+
   const read=()=>{ const o={}; window.PCC.UPTAKE_ITEMS.forEach(i=>{ o[i.key]=tk('u_'+i.key); }); return o; };
   const refresh=()=>{
+    const box=$('#u_status'); if(!box) return;                 // the screen has been navigated away from
     const o=read(); const st=PCC.uptakeStatus(o);
     const yes=Object.keys(o).filter(k=>o[k]===1).length;
     const cls={none:'defer',partial:'optimize',optimal:'ready'}[st];
-    $('#u_status').innerHTML=`<div class="pccready pccready-${cls}">
+    box.innerHTML=`<div class="pccready pccready-${cls}">
       ${pccPill(st==='optimal'?'ready':(st==='partial'?'optimize':'defer'))}
       <b style="margin-left:6px">${esc(PCC.UPTAKE_LABEL[st])}</b>
       <span class="muted" style="font-size:12px"> &mdash; ${yes} of 15 components${st==='partial'?'; optimal needs folic acid plus at least one other':''}</span>
     </div>`;
   };
-  ['change'].forEach(ev=>$('#app').addEventListener(ev,refresh));
+  const ucard=$('#pccucard');                                   // bind to the card, not to #app (it outlives the screen)
+  if(ucard) ucard.addEventListener('change', refresh);
   refresh();
 
   if(!ro) $('#u_save').onclick=async()=>{
     const b=$('#u_save'); if(b.disabled) return; b.disabled=true;
     try{
+      const items=read();
       const d=Object.assign({episode_id:+eid, asked_date:$('#u_date').value||localDate(),
-        verified_against:$('#u_ver').value, planned_pregnancy:tk('u_planned'), remark:$('#u_rem').value||null}, read());
-      const r=await api('POST','pcc-uptake',d);
-      if(r&&(r.id||r.queued)){ toast(r.queued?'Saved on this device — it will sync':'PCC uptake recorded','ok'); $('#u_msg').textContent=' saved'; }
+        verified_against:$('#u_ver').value, planned_pregnancy:tk('u_planned'), remark:$('#u_rem').value||null,
+        status:PCC.uptakeStatus(items)}, items);
+      // A CORRECTION IS A PATCH. Re-POSTing sent a partial body, and the status is derived from the
+      // body — so correcting one tick could rewrite the whole record's status from what she actually
+      // said. Where the row exists, correct it; only a first answer creates one.
+      const r = (u && u.id && !isLocalId(u.id))
+        ? await api('PATCH','pcc-uptake/'+u.id, d)
+        : await api('POST','pcc-uptake', d);
+      if(r&&(r.id||r.ok||r.queued)){ toast(r.queued?'Saved on this device — it will sync':'PCC uptake recorded','ok'); $('#u_msg').textContent=' saved'; }
       else $('#u_msg').textContent=' '+((r&&r.error)||'could not save');
     } finally{ b.disabled=false; }
   };

@@ -413,8 +413,15 @@ ul.pccdefer li{color:#7f1d1d}
 ul.pccopt li{color:#633806}
 ul.pccadv li{color:#334155}
 .pccgap{margin-top:8px;padding:6px 10px;border-radius:8px;background:#fff;border:1px dashed #b6bfbc;font-size:13px;color:#334155}
+/* "Effective contraception until this is put right" is the sentence that stops an unplanned pregnancy
+   in a woman who has just been told to wait. It was rendering as unstyled body text — the least
+   prominent thing in the panel. It is a banner now. */
+div.pccadv{margin-top:8px;padding:8px 10px;border-radius:8px;background:#fdf7ee;border:1px solid #f0d3a4;color:#633806}
 @media print{
+  /* A COLLAPSED <details> PRINTS NOTHING AT ALL. The printed care plan was fifteen headings and no
+     content. The button opens them before printing; this is the belt to that pair of braces. */
   details.pccsec{border:0;padding:0}
+  details.pccsec > *{display:block !important}
   details.pccsec summary{font-weight:700}
   .pccready,.pcctriage{border:0;background:transparent;padding:0}
   .pccready-ready,.pccready-optimize,.pccready-defer,.pccready-incomplete{background:transparent}

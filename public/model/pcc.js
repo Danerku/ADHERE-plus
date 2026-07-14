@@ -123,16 +123,23 @@
   // 0.4 mg is the routine dose. 5 mg is indicated where the guideline names an indication — and the
   // indications are the reason the dose exists, so they are returned WITH it. A provider who is told
   // "5 mg" and not told why cannot check whether we are right.
+  // folateDose() IS CALLED DIRECTLY, not only through readiness() — the screen calls it on every
+  // keystroke to explain the dose. So it must do its own normalisation: the adverse-outcome box says
+  // "none, or what happened" in its own placeholder, and a provider who does as she is told and types
+  // "none" was being escalated to 5 mg, with the care plan printing "5 mg is indicated: previous
+  // adverse pregnancy outcome (none)". The dose is a clinical decision; it does not get to rest on a
+  // string that says the opposite of what it is being read as.
   function folateDose(a){
     a = a || {};
+    const apo = txt(a.prior_apo), fhx = txt(a.family_hx_genetic);
     const why = [];
-    if(a.prior_ntd)                                    why.push('previous neural tube defect');
-    if(a.dm_known)                                     why.push('diabetes');
+    if(on(a.prior_ntd))                                why.push('previous neural tube defect');
+    if(on(a.dm_known))                                 why.push('diabetes');
     if(bad(a.dm_fbs)      && +a.dm_fbs   > T.FBS_MAX)  why.push('raised fasting blood glucose');
     if(bad(a.dm_hba1c)    && +a.dm_hba1c > T.HBA1C_MAX)why.push('HbA1c above target');
-    if(a.epilepsy)                                     why.push('epilepsy');
-    if(a.family_hx_genetic)                            why.push('family history of genetic disorder');
-    if(a.prior_apo)                                    why.push('previous adverse pregnancy outcome (' + String(a.prior_apo).slice(0,60) + ')');
+    if(on(a.epilepsy))                                 why.push('epilepsy');
+    if(fhx)                                            why.push('family history of genetic disorder');
+    if(apo)                                            why.push('previous adverse pregnancy outcome (' + String(apo).slice(0,60) + ')');
     return { dose: why.length ? '5mg' : '0.4mg', high: why.length > 0, reasons: why };
   }
   function bad(v){ return v !== null && v !== undefined && v !== '' && !isNaN(+v); }
