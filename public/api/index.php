@@ -324,8 +324,9 @@ try {
       if($ft==='health_center' && $len!==5) err('MRN must be 5 digits at a health centre');
       if(($ft==='primary_hospital'||$ft==='general_hospital') && $len!==6) err('MRN must be 6 digits at a hospital');
       if($len<5 || $len>6) err('MRN must be 5 or 6 digits');
-      if(isset($b['age'])&& $b['age']!==null && $b['age']!==''){ $ag=(int)$b['age'];
-        if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
+      // Age, height, gravida and para all go through the SAME guard now. Age alone was checked, which
+      // is why a height of 1700000 — and the 65 / 45 / 55 cm heights in production — sailed through.
+      check_ranges($b);
       // The MRN is unique per facility, and VOIDING DOES NOT FREE IT — the row still holds the number,
       // because destroying the identifier would destroy the audit trail of what was removed. Say so
       // plainly, otherwise the app offers to "open her existing record" for a woman who no longer has
@@ -342,10 +343,9 @@ try {
       audit('create','women',$wid); out(['id'=>$wid],201); }
     if($m==='PATCH' && $id){ $u=require_role(['recorder','provider','admin']); $b=body();
       $wc=db()->prepare("SELECT id FROM women WHERE id=? AND facility_id=? AND voided=0"); $wc->execute([$id,$u['facility_id']]); if(!$wc->fetch()) err('woman not in your facility',404);
-      // Age was validated on CREATE and not on UPDATE. Age <19 or >35 is a high-risk trigger, so
-      // a typo here silently corrupted the flag — and a blank cleared it.
-      if(array_key_exists('age',$b) && $b['age']!==null && $b['age']!==''){
-        $ag=(int)$b['age']; if($ag<10 || $ag>60) err('Age must be between 10 and 60'); }
+      // Age <19 or >35 is a high-risk trigger, so a typo here silently corrupted the flag — and a
+      // blank cleared it. Height, gravida and para are held to the same standard on a correction.
+      check_ranges($b);
       $fields=array_intersect_key($b,array_flip(array_merge(['first_name','father_name','grandfather_name','age','phone','kebele','house_no','marital_status','next_of_kin','kin_phone','gravida','para','height_cm','children_alive','sms_consent','lnmp','edd','kin_address','prev_pregnancy_outcome','ga_first_contact','first_contact_date','late_anc_initiation',
         'blood_group','rh_factor','pregnancy_planned','abortions','ectopic','gtd','residence','occupation',
         'prior_cs','prior_stillbirth','prior_pph','prior_preeclampsia','prior_obstructed','chronic_htn','diabetes','cardiac_renal'],MOH_PERSON_FIELDS)));
@@ -749,6 +749,11 @@ try {
       require_ep($row['episode_id']);
       $f=array_intersect_key($b,array_flip($allow));
       unset($f['episode_id'],$f['recorded_by']);         // never re-parent a row, never forge authorship
+      // A CORRECTION can be as mistyped as the original — so validate it. But validate ONLY THE FIELDS
+      // THE USER TYPED, not the merged row: a record that already holds a legacy bad value (this is
+      // exactly the situation with the three impossible heights) must still be correctable, and
+      // validating the merge would refuse the very edit that fixes it.
+      check_ranges($f,['age']);
       foreach($f as $k=>$v){ db()->prepare("UPDATE `$tbl` SET `$k`=? WHERE id=?")->execute([$v,$id]); }
 
       // A CORRECTION MUST TRIGGER THE SAME CONSEQUENCES AS THE ORIGINAL ENTRY.
@@ -774,7 +779,9 @@ try {
 
     if($m==='POST'){ $clin=['checklist_responses','danger_signs','delivery_summary','anc_risk_screening','referrals','anc_visits','pnc_visits','babies','maternal_vitals','bemonc_care','handovers','lab_orders','messages']; $u = in_array($tbl,$clin)?require_role(['provider','admin']):require_auth(); $b=body();
       $rows = isset($b[0])?$b:[$b];  // accept single object or array (checklist batch)
-      foreach($rows as $row){ require_ep($row['episode_id']??0); }
+      // Impossible readings are refused HERE, not only in the browser. `age` is skipped: on an
+      // immunization client it means a child (0, or 9-14 for HPV), not a mother.
+      foreach($rows as $row){ require_ep($row['episode_id']??0); check_ranges($row,['age']); }
       $ids=[]; foreach($rows as $row){ if(in_array('recorded_by',$allow)) $row['recorded_by']=$u['id'];
         if($tbl==='handovers') $row['from_provider_id']=$u['id'];   // sender identity from the session, never caller-supplied
         if($tbl==='messages')  $row['from_user_id']=$u['id'];
@@ -931,6 +938,9 @@ try {
     }
     if($m==='POST'){ $u=require_role($writeRoles); $b=body();
       $row=array_intersect_key($b,array_flip($allow));
+      // Same guard as the maternal tables (viral load, CD4, BP). `age` is skipped on purpose: here it
+      // is an immunization client's age — an infant, or a 9-14 year old girl for HPV.
+      check_ranges($row,['age']);
       if($hasFac){ $row['facility_id']=$u['facility_id']; }
       $row['recorded_by']=$u['id'];
       // child rows must belong to a client in THIS facility

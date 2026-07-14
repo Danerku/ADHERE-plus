@@ -133,6 +133,64 @@ function idem_guard(){
     out(['error'=>'this entry is already being saved — retrying shortly'], 503);
   }catch(\PDOException $e){ return; }              // table missing pre-migration -> behave as before
 }
+// ================================================================================================
+// MEASUREMENT RANGES — ENFORCED HERE, NOT ONLY IN THE BROWSER.
+//
+// A clinician typed a height of 1700000. The browser now stops that; the SERVER did not, and the
+// server is the only thing that actually protects the record. Anything that reaches the API by any
+// other path — a queued write replayed after an app update, a stale tablet running an older build,
+// a bad merge in the form code — could still store it. Three women in production carry heights of
+// 65, 45 and 55 cm, which is how we know this is not hypothetical.
+//
+// It matters beyond tidiness: height feeds BMI, weight and BP feed the risk model, and a number like
+// 1700000 does not produce a wrong score so much as a meaningless one.
+//
+// Bounds are deliberately GENEROUS — the job is to reject the impossible, not to second-guess an
+// unusual patient. Zero is a real reading for some of these (fetal heart, contractions, APGAR), so
+// the floor is 0 where that is clinically true, and empty/NULL always passes: "not measured" is a
+// legitimate answer and must never be blocked.
+// ================================================================================================
+function ranges(){
+  return [
+    'height_cm'=>[120,200,'Height (cm)'],        'weight_kg'=>[30,200,'Weight (kg)'],
+    'age'=>[10,60,'Age'],                        'ga_weeks'=>[4,43,'Gestational age (weeks)'],
+    'bp_systolic'=>[60,250,'Systolic BP'],       'bp_diastolic'=>[30,160,'Diastolic BP'],
+    'pulse'=>[30,200,'Pulse'],                   'temperature'=>[30,43,'Temperature (°C)'],
+    'resp_rate'=>[6,60,'Respiratory rate'],      'spo2'=>[50,100,'SpO2 (%)'],
+    'fundal_height'=>[10,45,'Fundal height (cm)'],'fetal_heart'=>[0,220,'Fetal heart rate'],
+    'hgb'=>[3,20,'Haemoglobin'],                 'muac'=>[10,45,'MUAC (cm)'],
+    'cervix_cm'=>[0,10,'Cervical dilatation'],   'contractions'=>[0,10,'Contractions / 10 min'],
+    'hours_labour'=>[0,48,'Hours in labour'],    'apgar_1min'=>[0,10,'APGAR (1 min)'],
+    'apgar_5min'=>[0,10,'APGAR (5 min)'],        'weight_g'=>[300,6000,'Birth weight (g)'],
+    'blood_loss_ml'=>[0,5000,'Blood loss (ml)'], 'td_dose_no'=>[1,5,'TD dose'],
+    'ifa_tabs'=>[0,200,'IFA tablets'],           'gravida'=>[0,20,'Gravida'],
+    'para'=>[0,20,'Para'],                       'viral_load'=>[0,10000000,'Viral load'],
+    'cd4'=>[0,2000,'CD4'],
+  ];
+}
+// Rejects a row that carries an impossible measurement. Call it BEFORE the insert/update.
+//
+// $skip exists because the same COLUMN NAME does not always mean the same THING. `age` on a woman is
+// a mother's age (10-60). `age` on an immunization client is an INFANT (0) or an HPV girl (9-14) —
+// applying the maternal bound there would have refused every child in the immunization register.
+// So the generic clinical handler skips `age`, and it is enforced on the woman record, where it is
+// unambiguous and where it feeds the risk flag.
+function check_ranges(array $row, array $skip=[]){
+  foreach(ranges() as $col=>[$min,$max,$label]){
+    if(in_array($col,$skip,true)) continue;
+    if(!array_key_exists($col,$row)) continue;
+    $v=$row[$col];
+    if($v===null || $v==='' ) continue;                       // "not measured" is a valid answer
+    if(!is_numeric($v)) err("$label must be a number.");
+    $n=$v+0;
+    if($n<$min || $n>$max) err("$label must be between $min and $max. You entered ".rtrim(rtrim((string)$n,'0'),'.').".");
+  }
+  // A diastolic at or above the systolic is a transposition or a typo, never a reading.
+  if(isset($row['bp_systolic'],$row['bp_diastolic']) && is_numeric($row['bp_systolic']) && is_numeric($row['bp_diastolic'])
+     && $row['bp_systolic']!=='' && $row['bp_diastolic']!=='' && ($row['bp_diastolic']+0) >= ($row['bp_systolic']+0)){
+    err('Diastolic BP must be lower than systolic BP.');
+  }
+}
 function insert($table,$data){
   $cols=array_keys($data); $ph=implode(',',array_fill(0,count($cols),'?'));
   $sql="INSERT INTO `$table` (`".implode('`,`',$cols)."`) VALUES ($ph)";
