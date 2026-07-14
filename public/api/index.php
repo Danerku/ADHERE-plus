@@ -618,10 +618,12 @@ try {
   if ($r==='maternal_deaths'){
     $u=require_role(['provider','admin','supervisor']);
     if($m==='GET'){
+      // voided=0: a REMOVED patient is removed from the death register too. (A death that is real
+      // must never be removed — but a record created by mistake is not a death.)
       $st=db()->prepare("SELECT d.*, w.mrn, TRIM(CONCAT_WS(' ',w.first_name,w.father_name)) AS name, w.age,
                                 u.full_name AS recorded_by_name
                            FROM maternal_deaths d
-                           JOIN women w ON w.id=d.woman_id
+                           JOIN women w ON w.voided=0 AND w.id=d.woman_id
                       LEFT JOIN users u ON u.id=d.recorded_by
                           WHERE d.facility_id=? ORDER BY d.death_datetime DESC LIMIT 200");
       $st->execute([(int)$u['facility_id']]); out($st->fetchAll());
@@ -1276,12 +1278,12 @@ try {
        'pac_fp'       =>$one("SELECT COUNT(*) c FROM abortion_care a JOIN episodes e ON e.voided=0 AND e.id=a.episode_id WHERE e.facility_id=? AND a.pac_fp_method IS NOT NULL AND a.pac_fp_method<>'none'$since"),
      ],
      'maternal_deaths'=>[
-       'total'      =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=?".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'antenatal'  =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='antenatal'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'abortion'   =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='abortion_related'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'intrapartum'=>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='intrapartum'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'postpartum' =>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.phase='postpartum'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
-       'not_reported'=>$one("SELECT COUNT(*) c FROM maternal_deaths d WHERE d.facility_id=? AND d.reported_mdsr=0".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'total'      =>$one("SELECT COUNT(*) c FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id WHERE d.facility_id=?".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'antenatal'  =>$one("SELECT COUNT(*) c FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id WHERE d.facility_id=? AND d.phase='antenatal'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'abortion'   =>$one("SELECT COUNT(*) c FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id WHERE d.facility_id=? AND d.phase='abortion_related'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'intrapartum'=>$one("SELECT COUNT(*) c FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id WHERE d.facility_id=? AND d.phase='intrapartum'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'postpartum' =>$one("SELECT COUNT(*) c FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id WHERE d.facility_id=? AND d.phase='postpartum'".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
+       'not_reported'=>$one("SELECT COUNT(*) c FROM maternal_deaths d JOIN women w ON w.voided=0 AND w.id=d.woman_id WHERE d.facility_id=? AND d.reported_mdsr=0".($days>0?" AND d.death_datetime >= DATE_SUB(CURDATE(), INTERVAL $days DAY)":"")),
      ],
      // ---- Family planning ----
      'fp'=>[
