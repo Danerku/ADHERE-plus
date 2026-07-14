@@ -787,9 +787,36 @@ async function failedScreen(){
 function toast(msg,kind){ let t=document.getElementById('toast'); if(!t){ t=document.createElement('div'); t.id='toast'; t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);color:#fff;padding:10px 18px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);z-index:9999;max-width:92%;font-size:14px;transition:opacity .3s'; document.body.appendChild(t); } t.style.background=(kind==='ok')?'#0f6e56':'#a32d2d'; t.textContent=msg; t.style.opacity='1'; clearTimeout(t._h); t._h=setTimeout(()=>{ t.style.opacity='0'; },4500); }
 window.addEventListener('unhandledrejection',e=>{ const m=(e.reason&&e.reason.message)?e.reason.message:''; if(m&&m!=='undefined') toast('Could not save — '+m+'. Nothing was recorded; please try again.'); });
 
+// A MODEL FROM A DIFFERENT ERA MUST NOT SCORE A PATIENT.
+//
+// Caught in a live audit: after the retrain, a tablet was scoring newborns with the PREVIOUS model
+// while the server served the new one — the service worker had filled its brand-new cache from the
+// browser's old HTTP cache. The old model still "worked": it accepted the row, ignored the features
+// it had never heard of, and returned a confident number. Nothing anywhere said it was the wrong
+// model. That is the worst way for this to fail.
+//
+// The scorer now refuses a model whose feature contract is not the one this build was written for.
+// No score is far better than a plausible score from the wrong model — the Labour Care Guide's alert
+// column does not depend on the model and keeps working regardless.
+const MODEL_CONTRACT = {
+  'model/risk_model.json':    { must:['lag_ratio','stall_h','ctx_dur','decel_late'], forbid:['cvx_rate'] },
+  'model/newborn_model.json': { must:['lag_ratio','decel_late'],                     forbid:[] },
+};
+function modelIsCurrent(path, m){
+  const c=MODEL_CONTRACT[path]; if(!c||!m||!Array.isArray(m.features)) return false;
+  return c.must.every(f=>m.features.includes(f)) && c.forbid.every(f=>!m.features.includes(f));
+}
+async function loadModel(path){
+  const m = await (await fetch(path, {cache:'no-cache'})).json();   // revalidate; the SW still serves it offline
+  if(!modelIsCurrent(path, m)){
+    console.warn('ADHERE+: refusing a model that does not match this build:', path, m && m.version);
+    return null;
+  }
+  return m;
+}
 async function boot(){
-  try{ MODEL=await (await fetch('model/risk_model.json')).json(); RM=new RiskModel(MODEL); }catch(e){}
-  try{ NBMODEL=await (await fetch('model/newborn_model.json')).json(); NRM=new RiskModel(NBMODEL); }catch(e){}
+  try{ MODEL=await loadModel('model/risk_model.json');    RM = MODEL ? new RiskModel(MODEL) : null; }catch(e){ RM=null; }
+  try{ NBMODEL=await loadModel('model/newborn_model.json'); NRM = NBMODEL ? new RiskModel(NBMODEL) : null; }catch(e){ NRM=null; }
   try{ RULES=await (await fetch('model/mch_rules.json')).json(); RE=new RulesEngine(RULES); }catch(e){}
   // Distinguish THREE states that used to be conflated into one:
   //   (a) the server answered and we have a session  -> log in
@@ -2190,7 +2217,19 @@ async function intrapartum(id){
       const observed=OBSERVABLE.filter(k=>feat[k]!=null);
       const haveCore=CORE.filter(k=>feat[k]!=null).length;
       const aiBox=$('#ai');
-      if(haveCore<2){
+      // NO MODEL IS NOT A GREEN LIGHT. If the scorer was refused (a model that does not match this
+      // build) or failed to load, the panel says so. It used to fall back to {probability:0, band:
+      // 'green'} — a reassuring, entirely fictional score, which is the most dangerous thing this
+      // screen could do. The Labour Care Guide's alert column above does not need the model and is
+      // unaffected.
+      if(!RM){
+        aiBox.style.display='block';
+        $('#prob').textContent='—'; $('#prob').className='';
+        $('#band').textContent=''; $('#band').className='pill';
+        $('#drv').textContent='The risk score is not available on this device.';
+        $('#why').innerHTML='';
+        $('#cover').textContent='Her assessment is recorded, and the alert thresholds above still apply. Reopen the app while online to restore the score.';
+      } else if(haveCore<2){
         aiBox.style.display='block';
         $('#prob').textContent='—'; $('#prob').className='';
         $('#band').textContent=''; $('#band').className='pill';
@@ -2198,7 +2237,7 @@ async function intrapartum(id){
         $('#why').innerHTML='';
         $('#cover').textContent='A score needs at least the hours in active labour, the cervix and the fetal heart. Nothing is guessed.';
       } else {
-        const r=RM?RM.predict(feat):{probability:0,band:'green'};
+        const r=RM.predict(feat);
         const cfIn={sbp:o.bp_systolic,dbp:o.bp_diastolic,fhr:o.fhr_baseline,mld:mldN,tmp:o.temperature,hrs:hrs,cvx:o.cervix_cm};
         const cf=clinicalFlags(cfIn);
         // The guideline's own alert column also escalates: an LCG alert is never quietly green.
