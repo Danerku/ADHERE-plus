@@ -1387,6 +1387,25 @@ async function register(){
     </select></label>
    </div>
    <p class="muted" style="font-size:12px;margin:-4px 0 8px">Every service the tool provides has a door here. Registering her for family planning, PMTCT or immunization creates that record <b>linked to her</b> — not a second, unconnected identity.</p>
+
+   <!-- SHE CAME FROM SOMEWHERE. The tool knew three ways in, and all three were internal ('new',
+        'from ANC', 'from high risk'). A woman booked at another health centre who arrives here in
+        labour, or one referred in from a health post, was recorded as NEW — as if nobody had ever
+        seen her. She was then screened as unbooked, which is a different woman with a different
+        risk, and whatever the sending facility knew about her was thrown away at the door. -->
+   <details class="moh" id="tinbox"><summary>She was sent here from another facility <span class="muted">&mdash; transferred or referred in</span></summary>
+    <div class="grid">
+     <label>How did she come?<select id="tinhow">
+       <option value="">— she came on her own —</option>
+       <option value="referred_in">Referred in (they sent her because of a problem)</option>
+       <option value="transfer_in">Transferred in (her care simply moves here)</option>
+     </select></label>
+     <label>From which facility<input id="tinfac" placeholder="health post / health centre / hospital"></label>
+     <label>Why was she sent<input id="tinwhy" placeholder="e.g. severe pre-eclampsia · prolonged labour · she moved here"></label>
+    </div>
+    <div class="ticks">${tick('tinrec','She brought her card / a letter with her')}</div>
+    <div class="muted" style="font-size:12px">If she brought her ANC card, enter what is on it &mdash; her blood group, her HIV result, her Td doses. Care she has already had is care she should not have to have twice.</div>
+   </details>
    <div id="riskbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px"></div>
 
    <!-- The pregnancy test is the FRONT DOOR, so it lives here, at the front door. It used to be
@@ -1617,8 +1636,14 @@ async function routeNewClient(cat, wid, d){
     toast('Registered','ok'); location.hash='#pmtct'; return;
   }
   // maternity: ANC, labour, PNC, and the pregnancy that ends early
+  const how=(($('#tinhow')||{}).value)||'';
   const ep=await api('POST','episodes',{woman_id:wid,service_category:cat,status:(cat==='labour'?'laboring':'active'),
-    provider_id:(ME.role==='provider'?ME.id:null),admission_datetime:localDateTime()});
+    provider_id:(ME.role==='provider'?ME.id:null),admission_datetime:localDateTime(),
+    // where she came from — 'new' was a lie for every woman another facility had already seen
+    admitted_from:(how||'new'),
+    came_from_facility:(how?((($('#tinfac')||{}).value)||null):null),
+    came_with_records:(how&&tk('tinrec'))?1:0,
+    transfer_reason:(how?((($('#tinwhy')||{}).value)||null):null)});
   // A woman admitted for a pregnancy loss is bleeding, or septic, or has an ectopic. Take the
   // provider straight to the screen that records the care — not to a grid of tiles.
   if(ep&&ep.id&&cat==='abortion'){ location.hash='#abortion/'+ep.id; return; }
@@ -2779,14 +2804,16 @@ async function referralScreen(id){
 
    <div class="card"><h3>Referral history</h3>
    <p class="muted" style="font-size:12px">A referral used to leave the building and never come back: nobody recorded what the hospital found, whether she arrived, or whether she came home. So the same woman was referred again for the same thing, and the facility never learned whether referring her helped. <b>Close the loop here.</b></p>
-   <table><tr><th>When</th><th>To</th><th>Urgency</th><th>Reason</th><th>What came back</th><th></th></tr>
+   <table><tr><th>When</th><th>Who</th><th>To</th><th>Urgency</th><th>Reason</th><th>What came back</th><th></th></tr>
     ${past.map(p=>`<tr>
-      <td>${esc((p.recorded_at||'').slice(0,16))}</td><td>${esc(p.referred_to||'')}</td>
+      <td>${esc((p.recorded_at||'').slice(0,16))}</td>
+      <td>${String(p.subject||'mother')==='newborn'?'<span class="pill amber">Newborn</span>':'Mother'}</td>
+      <td>${esc(p.referred_to||'')}</td>
       <td>${String(p.urgency||'')==='emergency'?'<span class="pill red">Emergency</span>':esc(p.urgency||'')}</td>
       <td>${esc(p.reason||'')}</td>
       <td>${p.feedback?esc(p.feedback):'<span class="pill amber">Nothing back yet</span>'}</td>
       <td><button class="sm" data-fb="${p.id}">${p.feedback?'Update':'Record what happened'}</button></td></tr>`).join('')
-      ||'<tr><td colspan=6 class=muted>No referrals yet.</td></tr>'}
+      ||'<tr><td colspan=7 class=muted>No referrals yet.</td></tr>'}
    </table></div>`;
 
   // ---- CLOSING THE LOOP ---------------------------------------------------------------------
@@ -3604,6 +3631,19 @@ async function babiesScreen(id){
      <label id="oxw" style="display:none">Oxygen <span class="muted" style="font-weight:400">(respiratory distress)</span><select id="oxy">${selOpts([['given','Given'],['not_given','Not given'],['not_indicated','Not indicated']])}</select></label>
      <label>NICU / referral<select id="nicu">${selOpts([['not_indicated','Not indicated'],['admitted','Admitted to NICU here'],['referred_out','Referred out to NICU'],['referred_declined','Referral declined by family']])}</select></label>
      <label id="nfw" style="display:none">Referred / admitted to<input id="nicuf" placeholder="facility name"></label>
+    </div>
+    <!-- A SICK NEWBORN WHO IS REFERRED OUT MUST BE REFERRED, NOT JUST NOTED.
+         The record could say "referred_out" and that was the end of it: no referral, so no letter
+         to send with him, nothing on the referral list, and no way to ever learn whether he lived.
+         Recording the referral here puts him in the same loop as his mother. -->
+    <div id="nrefbox" style="display:none;background:#fcebeb;border:1px solid #f09595;color:#791f1f;border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px">
+      <b>He is being referred out.</b> Record it as a referral so a letter goes with him and someone can record what happened to him.
+      <div class="grid" style="margin-top:6px">
+        <label style="color:#791f1f">Why<input id="nrefwhy" placeholder="e.g. prematurity 32 weeks, respiratory distress"></label>
+        <label style="color:#791f1f">Urgency<select id="nrefurg">${selOpts([['emergency','Emergency'],['urgent','Urgent'],['routine','Routine']])}</select></label>
+      </div>
+      <button class="sm" id="nrefsave" type="button" style="margin-top:6px">Record the newborn&rsquo;s referral</button>
+      <span class="muted" id="nrefm" style="color:#791f1f"></span>
     </div></details>
 
    <details class="moh" open><summary>Vaccinated at birth <span class="muted">&mdash; MoH Delivery register</span></summary><div class="ticks">
@@ -3675,6 +3715,36 @@ async function babiesScreen(id){
   // pathway is simply open. (`hex` still carries the value 1, so the record and the register are
   // unchanged.)
   if(mHiv==='positive' && $('#hex')) $('#hex').value='1';
+
+  // ---- THE NEWBORN WHO IS REFERRED OUT ------------------------------------------------------
+  const paintNref=()=>{
+    const box=$('#nrefbox'); if(!box) return;
+    const out=($('#nicu')||{}).value==='referred_out';
+    box.style.display=out?'':'none';
+    if(out && !$('#nrefwhy').value){
+      // pre-fill from the problems already ticked — the reason is on the screen, do not ask twice
+      const probs=[tk('bpre')?'prematurity':'',tk('bsep')?'sepsis':'',tk('brds')?'respiratory distress':'',
+                   tk('bjau')?'jaundice':'',tk('bcon')?'congenital malformation':'',
+                   (+($('#wg')||{}).value>0 && +($('#wg').value)<2500)?'low birth weight':''].filter(Boolean);
+      if(probs.length) $('#nrefwhy').value=probs.join(', ');
+    }
+  };
+  const nicuEl=$('#nicu'); if(nicuEl) nicuEl.addEventListener('change',paintNref);
+  ['bpre','bsep','brds','bjau','bcon','wg'].forEach(k=>{const el=$('#'+k); if(el){el.addEventListener('change',paintNref); el.addEventListener('input',paintNref);} });
+  paintNref();
+  const nrs=$('#nrefsave');
+  if(nrs) nrs.onclick=async()=>{
+    const to=($('#nicuf').value||'').trim();
+    if(!to){ toast('Which facility is he being referred to?'); $('#nicuf').focus(); return; }
+    const why=($('#nrefwhy').value||'').trim() || 'Sick newborn — referred out';
+    nrs.disabled=true;
+    const r=await api('POST','referrals',{episode_id:+id, subject:'newborn',
+      baby_id:(ed&&ed.id)?+ed.id:null,
+      referred_to:to, reason:'NEWBORN'+((ed&&ed.birth_order)?(' #'+ed.birth_order):'')+' — '+why,
+      urgency:($('#nrefurg').value||'urgent'), transport:null}).catch(e=>({error:e.message}));
+    if(r&&(r.ids||r.queued)){ $('#nrefm').textContent=' referred — print his letter from the Refer screen'; toast('The newborn’s referral is recorded','ok'); }
+    else { nrs.disabled=false; $('#nrefm').textContent=' '+((r&&r.error)||'error'); }
+  };
   // She tested negative: nothing is asked. If her status has changed, the provider can say so.
   const hov=$('#hexoverride');
   if(hov) hov.onclick=()=>{ const a=$('#hexask'); if(a) a.style.display=''; hov.style.display='none'; };
@@ -5647,7 +5717,22 @@ async function letterScreen(id){
       ${W.rh_factor?`<div class="rec-f"><span class="rec-l">Rh factor</span><span class="rec-v${String(W.rh_factor).toLowerCase()==='neg'?' rec-alarm':''}">${esc(String(W.rh_factor).toLowerCase()==='neg'?'NEGATIVE':'Positive')}</span></div>`:''}
       ${line('Phone',W.phone)}
     </div></div>
-    <div class="rec-b"><h5>Why she is being referred</h5>
+    ${ref && String(ref.subject||'')==='newborn' ? `<div class="rec-b" style="border-left:4px solid #a32d2d">
+      <h5 style="color:#a32d2d">THIS REFERRAL IS FOR THE NEWBORN</h5>
+      <p style="font-size:13px;margin:2px 0">The baby is the patient. His mother's details are below because the receiving unit will need them &mdash; her HIV status, her blood group, how he was born.</p>
+      ${(()=>{ const b=(bbs||[]).find(x=>String(x.id)===String(ref.baby_id)) || bbs[0];
+        return b?`<div class="rec-g">
+          ${line('Newborn', 'Baby '+(b.birth_order||'')+(b.sex?(' · '+b.sex):''))}
+          ${fld('weight_g',b.weight_g)}${fld('apgar_1min',b.apgar_1min)}${fld('apgar_5min',b.apgar_5min)}
+          ${fld('outcome',b.outcome)}${fld('resuscitated',b.resuscitated)}${fld('vitamin_k_time',b.vitamin_k_time)}
+          ${fld('breastfeed_initiated',b.breastfeed_initiated)}${fld('hiv_exposed',b.hiv_exposed)}${fld('arv_prophylaxis',b.arv_prophylaxis)}
+          ${fld('prob_prematurity',b.prob_prematurity)}${fld('prob_sepsis_vsd',b.prob_sepsis_vsd)}${fld('prob_resp_distress',b.prob_resp_distress)}
+          ${fld('prob_jaundice',b.prob_jaundice)}${fld('prob_congenital',b.prob_congenital)}
+          ${fld('kmc',b.kmc)}${fld('antibiotics',b.antibiotics)}${fld('oxygen',b.oxygen)}${fld('phototherapy',b.phototherapy)}
+        </div>`:''; })()}
+    </div>`:''}
+
+    <div class="rec-b"><h5>${ref && String(ref.subject||'')==='newborn' ? 'Why he is being referred' : 'Why she is being referred'}</h5>
       ${ref?`<div class="rec-g">
         ${line('Referred to',ref.referred_to)}${line('Urgency',ref.urgency)}${line('Transport',ref.transport)}
         <div class="rec-f" style="grid-column:1/-1"><span class="rec-l">Reason</span><span class="rec-v${String(ref.urgency||'')==='emergency'?' rec-alarm':''}">${esc(ref.reason||'')}</span></div>
@@ -5800,6 +5885,9 @@ async function patientHub(id){
        <button id="epreturn" class="sm" style="margin-left:6px">She has come back</button></p>`:''}
     ${(e.referred==1 && e.returned_at)?`<p class="muted" style="font-size:12px;margin:4px 0">Referred out${e.referred_at?(' on '+esc(String(e.referred_at).slice(0,16))):''} &middot; came back on ${esc(String(e.returned_at).slice(0,16))}.</p>`:''}
     ${e.late_anc_initiation==1?`<p style="background:#faeeda;border:1px solid #ef9f27;color:#633806;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">Late ANC initiation &mdash; first contact at ${esc(e.ga_first_contact)} weeks.</p>`:''}
+    ${(e.admitted_from==='referred_in'||e.admitted_from==='transfer_in')?`<p style="background:#eef6f5;border:1px solid #0f766e;color:#0f5c55;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:13px">
+      <b>${e.admitted_from==='referred_in'?'Referred in':'Transferred in'}</b>${e.came_from_facility?(' from '+esc(e.came_from_facility)):''}${e.transfer_reason?(' &mdash; '+esc(e.transfer_reason)):''}.
+      ${e.came_with_records==1?'She brought her card or a letter &mdash; enter what is on it, so she is not made to have the same care twice.':'<b>She brought nothing with her.</b> Whatever the sending facility knew about her is not here: ask her, and record what she can tell you.'}</p>`:''}
     ${(isLab&&!delivered)?`<p class="muted" style="margin:2px 0 8px">Membranes: <select id="rmset"><option value="0">Intact</option><option value="1">Ruptured</option></select>
       <span id="rmtwrap" style="display:none"> ruptured at <input id="rmt" type="datetime-local" style="width:auto"> <button id="rmtsave" class="sm">Save time</button></span>
       <span id="rmtshow" class="muted"></span></p>`:''}

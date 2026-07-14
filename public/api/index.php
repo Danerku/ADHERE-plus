@@ -818,7 +818,10 @@ try {
       }
 
       $b['created_by']=$u['id']; $b['facility_id']=$u['facility_id'];
-      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','ruptured_datetime','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob'])));
+      // came_from_facility etc: a woman booked at another health centre who arrives here in labour
+      // was recorded as 'new' — as if nobody had ever seen her. The tool then screened her as
+      // unbooked, which is a different woman with a different risk.
+      $eid=insert('episodes',array_intersect_key($b,array_flip(['woman_id','service_category','status','provider_id','admitted_from','ruptured_membrane','ruptured_datetime','admission_datetime','facility_id','created_by','place_of_delivery','infant_dob','came_from_facility','came_with_records','transfer_reason'])));
       audit('create','episodes',$eid); out(['id'=>$eid],201); }
     if($m==='PATCH' && $id){ require_role(['recorder','provider','admin']); require_ep($id); $b=body();
       // REFERRAL IS NOT A CLINICAL STATE. It used to overwrite status with 'referred', which
@@ -854,7 +857,7 @@ try {
       // and hands that to the scorer, but it was in NO allow-list — so the column was never written
       // and the model's rom_hours was null for every woman. Prolonged rupture is the main driver of
       // intrapartum sepsis; the feature existed in name only.
-      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','ruptured_datetime','place_of_delivery','infant_dob','returned_at']));
+      $fields=array_intersect_key($b,array_flip(['status','provider_id','ruptured_membrane','ruptured_datetime','place_of_delivery','infant_dob','returned_at','came_from_facility','came_with_records','transfer_reason','admitted_from']));
       foreach($fields as $k=>$v){ db()->prepare("UPDATE episodes SET `$k`=? WHERE id=?")->execute([$v,$id]); }
       if($fields) audit('update','episodes',$id,$fields);
       out(['ok'=>true]); }
@@ -897,7 +900,10 @@ try {
              'pac_fp_counselled','pac_fp_method','outcome','referred_to','remark','recorded_by']],
            'anc_screening'=>['anc_risk_screening',['episode_id','item_code','item_group','response','recorded_by']],
            'handover'=>['handovers',['episode_id','from_provider_id','to_provider_id','note']],
-           'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','recorded_by']],
+           // subject/baby_id: a referral can be about the MOTHER or about the NEWBORN. A sick baby
+           // referred out used to leave no referral at all — no letter, nothing on the referral
+           // list, and no way to record whether he lived.
+           'referrals'=>['referrals',['episode_id','referred_to','reason','urgency','transport','feedback','subject','baby_id','recorded_by']],
            // PURGED (v17): hiv_status, syphilis, tetanus_td, iron_folic — legacy fields superseded by the
            // MoH register fields below (hiv_test_result, syphilis_result, td_dose_no, ifa_tabs). No form
            // writes them and nothing reads them. The DB columns stay so historical rows are not lost.
